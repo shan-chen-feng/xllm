@@ -30,7 +30,6 @@
 #define _DECLARE_PARAM(type, name) , type name
 #define _DECLARE_ARG_VALUE(type, name) , name
 
-// REG_KERNEL_ARGS(add_kernel, ARG_LIST_MACRO)
 #define REG_KERNEL_ARGS(kernel_name, ARG_LIST_MACRO)     \
   struct __attribute__((packed)) _##kernel_name##_Args { \
     void* ffts_addr __attribute__((aligned(8)));         \
@@ -42,7 +41,6 @@
     int32_t gridZ __attribute__((aligned(4)));           \
   };
 
-// REG_KERNEL_LAUNCHER(add_kernel, ARG_LIST_MACRO)
 #define REG_KERNEL_LAUNCHER(kernel_name, ARG_LIST_MACRO)                       \
   static rtError_t kernel_name(                                                \
       rtStream_t stream,                                                       \
@@ -51,8 +49,8 @@
       int32_t gridZ,                                                           \
       void* workspace_addr,                                                    \
       void* syncBlockLock ARG_LIST_MACRO(_DECLARE_PARAM)) {                    \
-    auto kernelHandle =                                                        \
-        xllm::kernel::npu::KernelLoader::get_kernel(#kernel_name);             \
+    auto kernelHandle = xllm::kernel::npu::KernelLoader::get_instance().           \
+                            get_kernel(#kernel_name);                          \
     if (!kernelHandle.is_valid()) {                                            \
       LOG(ERROR) << "Kernel '" << #kernel_name << "' is not registered";       \
       return RT_ERROR_INVALID_VALUE;                                           \
@@ -61,8 +59,11 @@
     int64_t workspaceSize = -1;                                                \
     int64_t lockInitValue = -1;                                                \
     int64_t lockNum = -1;                                                      \
-    xllm::kernel::npu::KernelLoader::get_kernel_workspace_config(              \
-        #kernel_name, workspaceSize, lockInitValue, lockNum);                  \
+    xllm::kernel::npu::KernelLoader::get_instance().get_kernel_workspace_config(   \
+        #kernel_name,                                                          \
+        workspaceSize,                                                         \
+        lockInitValue,                                                         \
+        lockNum);                                                              \
                                                                                \
     uint32_t blockNum = gridX * gridY * gridZ;                                 \
                                                                                \
@@ -157,4 +158,5 @@
                                                                                \
     return RT_ERROR_NONE;                                                      \
   }
+
 

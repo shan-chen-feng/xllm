@@ -16,25 +16,21 @@
 
 #pragma once
 
-#include <string>
+#include <torch/torch.h>
+#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+#include <torch_npu/torch_npu.h>
 
 namespace xllm::kernel::npu {
 
-class KernelHandle {
- public:
-  KernelHandle() = default;
-  KernelHandle(const std::string& kernel_name, const char* handle);
-
-  const char* get() const { return handle_; }
-  operator const char*() const { return handle_; }
-
-  bool is_valid() const { return handle_ != nullptr; }
-  const std::string& name() const { return kernel_name_; }
-
- private:
-  std::string kernel_name_;
-  const char* handle_{nullptr};
-};
+std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
+    const torch::Tensor& A_log,
+    const torch::Tensor& a,
+    const torch::Tensor& b,
+    const torch::Tensor& dt_bias,
+    float beta = 1.0f,
+    float threshold = 20.0f);
 
 }  // namespace xllm::kernel::npu
+
 

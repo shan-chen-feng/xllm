@@ -26,6 +26,11 @@
 
 namespace xllm::kernel::npu {
 
+KernelLoader& KernelLoader::get_instance() {
+  static KernelLoader loader;
+  return loader;
+}
+
 KernelHandle KernelLoader::load_kernel(const std::string& kernel_name,
                                        const std::string& binary_path) {
   auto& registry = KernelRegistry::get_instance();
@@ -154,4 +159,5 @@ void KernelLoader::cleanup() {
 }
 
 }  // namespace xllm::kernel::npu
+
 

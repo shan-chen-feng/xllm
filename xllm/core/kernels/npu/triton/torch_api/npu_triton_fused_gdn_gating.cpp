@@ -1,3 +1,19 @@
+/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://github.com/jd-opensource/xllm/blob/main/LICENSE
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * ==============================================================================
+ */
+
 #include "npu_triton_fused_gdn_gating.h"
 
 #include <torch_npu/csrc/core/npu/NPUStream.h>
@@ -42,11 +58,6 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
   TORCH_CHECK(a.dim() == 2, "a must be 2D tensor (batch, num_heads)");
   TORCH_CHECK(b.dim() == 2, "b must be 2D tensor (batch, num_heads)");
   TORCH_CHECK(dt_bias.dim() == 1, "dt_bias must be 1D tensor");
-  // TORCH_CHECK(std::abs(beta - 1) < std::numeric_limits<float>::epsilon(),
-  // "beta must be 1, because this param compiled with tl.constexpr in triton
-  // kernel"); TORCH_CHECK(std::abs(threshold - 1) <
-  // std::numeric_limits<float>::epsilon(), "threshold must be 20, because this
-  // param, default triton kernel compiled with tl.constexpr");
 
   int64_t batch = a.size(0);
   int64_t num_heads = a.size(1);
@@ -88,7 +99,7 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
   void* bPtr = const_cast<void*>(b.data_ptr());
   void* dtBiasPtr = const_cast<void*>(dt_bias.data_ptr());
 
-  rtError_t ret = TritonLauncher::fused_gdn_gating_head8_kernel(
+  rtError_t ret = launchers::fused_gdn_gating_head8_kernel(
       stream,
       gridX,
       gridY,
@@ -111,3 +122,5 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
 }
 
 }  // namespace xllm::kernel::npu
+
+

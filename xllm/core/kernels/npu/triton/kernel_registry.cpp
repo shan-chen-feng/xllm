@@ -48,8 +48,7 @@ bool KernelRegistry::parse_json_config(const std::string& json_path,
     return false;
   }
 
-  nlohmann::json j =
-      nlohmann::json::parse(file, nullptr, false, true);
+  nlohmann::json j = nlohmann::json::parse(file, nullptr, false, true);
   file.close();
 
   if (j.is_discarded()) {
@@ -78,8 +77,7 @@ bool KernelRegistry::parse_json_config(const std::string& json_path,
     } else if (j["workspace_size"].is_null()) {
       workspace_size = -1;
     } else {
-      LOG(WARNING)
-          << "'workspace_size' is not an integer, using default -1";
+      LOG(WARNING) << "'workspace_size' is not an integer, using default -1";
       workspace_size = -1;
     }
   } else {
@@ -337,4 +335,5 @@ void KernelRegistry::cleanup() {
 }
 
 }  // namespace xllm::kernel::npu
+
 

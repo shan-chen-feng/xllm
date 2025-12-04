@@ -84,3 +84,4 @@ class KernelRegistry {
 
 }  // namespace xllm::kernel::npu
 
+

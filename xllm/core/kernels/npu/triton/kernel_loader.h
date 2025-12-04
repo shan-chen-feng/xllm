@@ -26,27 +26,33 @@ namespace xllm::kernel::npu {
 
 class KernelLoader {
  public:
-  static KernelHandle load_kernel(const std::string& kernel_name,
-                                  const std::string& binary_path);
+  static KernelLoader& get_instance();
 
-  static std::vector<KernelHandle> load_kernels(
+  KernelHandle load_kernel(const std::string& kernel_name,
+                           const std::string& binary_path);
+
+  std::vector<KernelHandle> load_kernels(
       const std::vector<std::pair<std::string, std::string>>& kernel_configs);
 
-  static int load_kernels_from_directory(const std::string& directory_path);
+  int load_kernels_from_directory(const std::string& directory_path);
 
-  static KernelHandle get_kernel(const std::string& kernel_name);
+  KernelHandle get_kernel(const std::string& kernel_name);
 
-  static bool get_kernel_workspace_config(const std::string& kernel_name,
-                                          int64_t& workspace_size,
-                                          int64_t& lock_init_value,
-                                          int64_t& lock_num);
+  bool get_kernel_workspace_config(const std::string& kernel_name,
+                                   int64_t& workspace_size,
+                                   int64_t& lock_init_value,
+                                   int64_t& lock_num);
 
-  static void cleanup();
+  void cleanup();
 
  private:
-  KernelLoader() = delete;
-  ~KernelLoader() = delete;
+  KernelLoader() = default;
+  ~KernelLoader() = default;
+
+  KernelLoader(const KernelLoader&) = delete;
+  KernelLoader& operator=(const KernelLoader&) = delete;
 };
 
 }  // namespace xllm::kernel::npu
+
 

@@ -21,7 +21,7 @@
 
 #include <glog/logging.h>
 
-#include "../csrc/torch_api/npu_triton_fused_gdn_gating.h"
+#include "torch_api/npu_triton_fused_gdn_gating.h"
 #include "kernel_loader.h"
 #include "test_utils.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
@@ -81,9 +81,10 @@ class TritonFusedGdnGatingTest : public ::testing::Test {
     torch_npu::init_npu(device_str_);
 
     binary_path_ = GetKernelBinaryPath(binary_filename_);
-    auto handle = KernelLoader::get_kernel(kernel_name_);
+    auto& loader = KernelLoader::get_instance();
+    auto handle = loader.get_kernel(kernel_name_);
     if (!handle.is_valid()) {
-      handle = KernelLoader::load_kernel(kernel_name_, binary_path_);
+      handle = loader.load_kernel(kernel_name_, binary_path_);
     }
     ASSERT_TRUE(handle.is_valid()) << "Failed to load Kernel: " << kernel_name_
                                    << " from " << binary_path_;

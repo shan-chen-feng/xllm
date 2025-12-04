@@ -23,3 +23,4 @@ KernelHandle::KernelHandle(const std::string& kernel_name, const char* handle)
 
 }  // namespace xllm::kernel::npu
 
+
