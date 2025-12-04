@@ -357,7 +357,7 @@ if(USE_NPU)
       $ENV{XLLM_KERNELS_PATH}/include/xllm_kernels/core/include
       $ENV{XLLM_KERNELS_PATH}/include/xllm_kernels
       $ENV{XLLM_KERNELS_PATH}/include/
-      ${CMAKE_CURRENT_SOURCE_DIR}/xllm/core/kernels/npu/triton/include # triton ascend adapter
+      ${CMAKE_CURRENT_SOURCE_DIR}/xllm/core/kernels/npu/triton # triton ascend adapter
   )
 
   link_directories(

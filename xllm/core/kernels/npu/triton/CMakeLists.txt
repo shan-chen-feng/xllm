@@ -26,7 +26,6 @@ cc_library(
     kernel_loader.h
     macros.h
     kernel_launchers.h
-    npu_triton_add_kernel.h
     ${TORCH_API_HDRS}
   INCLUDES
     ${ASCEND_HOME_PATH}/${PLATFORM}/include/experiment/platform
@@ -37,7 +36,6 @@ cc_library(
     kernel_handle.cpp
     kernel_registry.cpp
     kernel_loader.cpp
-    npu_triton_add_kernel.cpp
     ${TORCH_API_SRCS}
   DEPS
     ascendcl
