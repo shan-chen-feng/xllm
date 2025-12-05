@@ -24,20 +24,37 @@ namespace F = torch::nn::functional;
 class DiTLinearImpl : public torch::nn::Module {
  public:
   DiTLinearImpl(int64_t in, int64_t out, bool with_bias = true) {
-    weight = register_parameter("weight", torch::empty({out, in}));
     if (with_bias) {
+      // the weight needs to be transposed when using addmm
+      weight = register_parameter("weight", torch::empty({in, out}));
       bias = register_parameter("bias", torch::empty(out));
     } else {
+      weight = register_parameter("weight", torch::empty({out, in}));
       bias = register_parameter("bias", {}, false);
     }
   }
 
   torch::Tensor forward(const torch::Tensor& x) {
-    return F::linear(x, weight, bias);
+    // use addmm when bias is provided
+    if (bias.defined()) {
+      auto sizes = x.sizes();
+      if (sizes.size() == 3) {
+        torch::Tensor x_;
+        x_ = x.reshape({sizes[0] * sizes[1], sizes[2]});
+        return torch::addmm(bias, x_, weight, 1, 1)
+            .reshape({sizes[0], sizes[1], weight.size(1)});
+      } else {
+        return torch::addmm(bias, x, weight, 1, 1);
+      }
+    } else {
+      return F::linear(x, weight, bias);
+    }
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    weight::load_weight(state_dict, "weight", weight, weight_is_loaded_);
+    // an overloaded load_weight function was used to load transpoesd weights
+    weight::load_weight(
+        state_dict, "weight", weight, weight_is_loaded_, bias.defined());
     if (bias.defined()) {
       weight::load_weight(state_dict, "bias", bias, bias_is_loaded_);
     }
@@ -64,6 +81,7 @@ class DiTLinearImpl : public torch::nn::Module {
  private:
   bool weight_is_loaded_{false};
   bool bias_is_loaded_{false};
+  bool transposed_{false};
 };
 
 TORCH_MODULE(DiTLinear);

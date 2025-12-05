@@ -393,6 +393,18 @@ struct ModelArgs {
   PROPERTY(float, max_shift) = 0;
   PROPERTY(int64_t, base_image_seq_len) = 0;
   PROPERTY(int64_t, max_image_seq_len) = 0;
+  PROPERTY(float, shift_terminal) = 0;
+
+  // qwen image VAE args
+  PROPERTY(int64_t, base_dim) = 0;
+  PROPERTY(int64_t, z_dim) = 0;
+  PROPERTY(std::vector<int64_t>, dim_mult) = {};
+  PROPERTY(std::vector<double>, attn_scales) = {};
+  PROPERTY(std::vector<bool>, temperal_downsample) = {};
+  PROPERTY(int64_t, num_res_blocks) = 0;
+  PROPERTY(double, dropout) = 0;
+  PROPERTY(std::vector<double>, latents_mean) = {};
+  PROPERTY(std::vector<double>, latents_std) = {};
 };
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {

@@ -36,6 +36,27 @@ void load_weight(const StateDict& state_dict,
   }
 }
 
+void load_weight(const StateDict& state_dict,
+                 const std::string& name,
+                 torch::Tensor& weight,
+                 bool& weight_is_loaded,
+                 bool transpose) {
+  torch::NoGradGuard no_grad;
+  torch::Tensor tensor = state_dict.get_tensor(name);
+
+  if (tensor.defined()) {
+    if (transpose) {
+      tensor = tensor.transpose(0, 1).contiguous();
+    }
+    CHECK(!weight_is_loaded)
+        << "weight already loaded, name: " << state_dict.prefix() << name;
+    CHECK_EQ(weight.sizes(), tensor.sizes())
+        << "weight size mismatch for " << state_dict.prefix() << name;
+    weight.copy_(tensor);
+    weight_is_loaded = true;
+  }
+}
+
 void load_sharded_weight(const StateDict& state_dict,
                          const std::string& name,
                          int64_t dim,

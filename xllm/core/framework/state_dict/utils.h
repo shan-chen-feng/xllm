@@ -30,6 +30,12 @@ void load_weight(const StateDict& state_dict,
                  torch::Tensor& weight,
                  bool& weight_is_loaded);
 
+void load_weight(const StateDict& state_dict,
+                 const std::string& name,
+                 torch::Tensor& weight,
+                 bool& weight_is_loaded,
+                 bool transpose);
+
 void load_sharded_weight(const StateDict& state_dict,
                          const std::string& name,
                          int64_t dim,
