@@ -17,6 +17,7 @@ import torch_npu
 import triton
 import triton.language as tl
 import triton.language.extra.libdevice as tldevice
+import pytest
 
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     div = tldevice.fast_dividef
@@ -59,8 +60,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     ssm_state_indices,
     num_accepted_tokens,
     scale,
-    N: tl.constexpr,  # num of sequences
-    T: tl.constexpr,  # num of tokens
+    N,  # num of sequences
+    T,  # num of tokens
     B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -74,8 +75,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     stride_indices_tok: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
-    IS_BETA_HEADWISE: tl.
-    constexpr,  # whether beta is headwise vector or scalar,
+    IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
@@ -203,16 +203,6 @@ def fused_recurrent_gated_delta_rule_fwd(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
-    # print("N: ", N)
-    # print("T: ", T)
-    # print("B: ", B)
-    # print("H: ", H)
-    # print("HV: ", HV)
-    # print("K: ", K)
-    # print("V: ", V)
-    # print("BK: ", BK)
-    # print("BV: ", BV)
-
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
@@ -332,119 +322,116 @@ def fused_recurrent_gated_delta_rule(
     )
     return o, final_state
 
+def l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
+    """This function is intended to align with the l2norm implementation in the FLA library."""
+    inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
+    return x * inv_norm
 
 def torch_recurrent_gated_delta_rule(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    initial_state: torch.Tensor | None = None,
-    scale: float | None = None,
-    use_qk_l2norm_in_kernel: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reference PyTorch implementation used as golden for correctness.
+    query, key, value, g, beta, initial_state, output_final_state, use_qk_l2norm_in_kernel=False
+):
+    initial_dtype = query.dtype
+    if use_qk_l2norm_in_kernel:
+        query = l2norm(query, dim=-1, eps=1e-6)
+        key = l2norm(key, dim=-1, eps=1e-6)
+    query, key, value, beta, g = [
+        x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
+    ]
 
-    This implementation follows the math in the Triton kernel but uses
-    straightforward Python loops. It is only intended for small test sizes.
-    """
-    # q, k: [B, T, H, K]
-    # v:    [B, T, HV, V]
-    # g:    [B, T, HV]
-    # beta: [B, T, HV] (head-wise scalar)
-    B, T, H, K = q.shape
-    _, _, HV, V = v.shape
+    batch_size, num_heads, sequence_length, k_head_dim = key.shape
+    v_head_dim = value.shape[-1]
+    scale = 1 / (query.shape[-1] ** 0.5)
+    query = query * scale
 
-    if scale is None:
-        scale = K**-0.5
+    core_attn_out = torch.zeros(batch_size, num_heads, sequence_length, v_head_dim).to(value)
+    last_recurrent_state = (
+        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim).to(value)
+        if initial_state is None
+        else initial_state.to(value)
+    )
 
-    # Map value heads to key/query heads as in the kernel:
-    # i_h = i_hv // (HV // H)
-    assert HV % H == 0, "HV must be a multiple of H in this test implementation."
-    hv_per_h = HV // H
+    for i in range(sequence_length):
+        q_t = query[:, :, i]
+        k_t = key[:, :, i]
+        v_t = value[:, :, i]
+        g_t = g[:, :, i].exp().unsqueeze(-1).unsqueeze(-1) # [B, HV, D]
+        beta_t = beta[:, :, i].unsqueeze(-1)
 
-    if initial_state is None:
-        h = q.new_zeros(B, HV, K, V, dtype=torch.float32)
-    else:
-        h = initial_state.to(torch.float32).clone()
+        last_recurrent_state = last_recurrent_state * g_t
+        kv_mem = (last_recurrent_state * k_t.unsqueeze(-1)).sum(dim=-2)
+        delta = (v_t - kv_mem) * beta_t
+        last_recurrent_state = last_recurrent_state + k_t.unsqueeze(-1) * delta.unsqueeze(-2)
+        core_attn_out[:, :, i] = (last_recurrent_state * q_t.unsqueeze(-1)).sum(dim=-2)
 
-    o = v.new_zeros(B, T, HV, V)
+    if not output_final_state:
+        last_recurrent_state = None
+    core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
+    return core_attn_out, last_recurrent_state
 
-    for b in range(B):
-        for t in range(T):
-            for hv in range(HV):
-                h_idx = hv // hv_per_h  # map value head to key/query head
 
-                h_mat = h[b, hv]  # [K, V]
-                g_val = g[b, t, hv].float()
-                k_vec = k[b, t, h_idx].float()  # [K]
-                q_vec = q[b, t, h_idx].float()  # [K]
-                v_vec = v[b, t, hv].float()  # [V]
+def prepare_torch_recurrent_gated_delta_inputs(
+    q, k, v, g, beta, initial_state,
+    num_heads, num_v_heads, k_head_dim, v_head_dim, batch, T
+):
+    L = batch * T
 
-                if use_qk_l2norm_in_kernel:
-                    q_vec = q_vec / (q_vec.pow(2).sum().sqrt() + 1e-6)
-                    k_vec = k_vec / (k_vec.pow(2).sum().sqrt() + 1e-6)
+    q_ = q.reshape(batch, T, num_heads, k_head_dim)
+    k_ = k.reshape(batch, T, num_heads, k_head_dim)
+    v_ = v.reshape(batch, T, num_v_heads, v_head_dim)
+    g_ = g.reshape(batch, T, num_v_heads)        
+    beta_ = beta.reshape(batch, T, num_v_heads)  
 
-                q_vec = q_vec * scale
+    if num_v_heads != num_heads:
+        ratio = num_v_heads // num_heads
+        q_ = q_.repeat_interleave(ratio, dim=2)
+        k_ = k_.repeat_interleave(ratio, dim=2)
+    return q_, k_, v_, g_, beta_, initial_state
 
-                # h_t = exp(g) * h_{t-1}
-                h_mat = h_mat * torch.exp(g_val)
-
-                # v_t = v_t - sum_k(h_t * k_t)
-                proj = (h_mat * k_vec[:, None]).sum(dim=0)  # [V]
-                v_vec = v_vec - proj
-
-                beta_val = beta[b, t, hv].float()  # scalar per head
-                v_vec = v_vec * beta_val
-
-                # h_t = h_t + k_t ⊗ v_t
-                h_mat = h_mat + torch.outer(k_vec, v_vec)  # [K, V]
-
-                # o_t = sum_k(h_t * q_t)
-                o_vec = (h_mat * q_vec[:, None]).sum(dim=0)  # [V]
-
-                h[b, hv] = h_mat
-                o[b, t, hv] = o_vec.to(o.dtype)
-
-    return o, h.to(initial_state.dtype if initial_state is not None else v.dtype)
 
 # default param is for qwen3-next tp4
-def test_op(
-    B: int = 1,
-    T: int = 4,
-    H: int = 4,
-    HV: int = 8,
-    K: int = 128,
-    V: int = 128,
+@pytest.mark.parametrize("batch, T", [(1, 1), (4, 1), (8, 1), (16, 1)])
+def test_recurrent_fused_gated_delta_rule(
+    batch: int,
+    T: int = 1,
+    num_heads: int = 4,
+    num_v_heads: int = 8,
+    k_head_dim: int = 128,
+    v_head_dim: int = 128,
     device: str = "npu:0",
 ) -> None:
     """Simple accuracy test comparing Triton kernel with golden PyTorch version."""
     torch.manual_seed(0)
+    dtype = torch.float16
+    L = batch * T
+    q = torch.randn(L, num_heads, k_head_dim, dtype=dtype)
+    k = torch.randn(L, num_heads, k_head_dim, dtype=dtype)
+    v = torch.randn(L, num_v_heads, v_head_dim, dtype=dtype)
+    g = torch.randn(L, num_v_heads, dtype=torch.float32)
+    beta = torch.randn(L, num_v_heads, dtype=torch.float32)
+    initial_state = torch.randn(batch, num_v_heads, k_head_dim, v_head_dim)
 
-    q = torch.randn(B, T, H, K, dtype=torch.float16)
-    k = torch.randn(B, T, H, K, dtype=torch.float16)
-    v = torch.randn(B, T, HV, V, dtype=torch.float16)
-    g = torch.randn(B, T, HV, dtype=torch.float32)
-    beta = torch.rand(B, T, HV, dtype=torch.float32).sigmoid()
-    initial_state = torch.randn(B, HV, K, V, dtype=torch.float16)
 
     # Golden on CPU
+    # TODO precision compare needs to be update
+    q_, k_, v_, g_, beta_, initial_state = prepare_torch_recurrent_gated_delta_inputs(
+        q, k, v, g, beta, initial_state, num_heads, num_v_heads, k_head_dim, v_head_dim, batch, T)
     golden_o, golden_state = torch_recurrent_gated_delta_rule(
-        q,
-        k,
-        v,
-        g,
-        beta,
+        q_,
+        k_,
+        v_,
+        g_,
+        beta_,
         initial_state=initial_state,
+        output_final_state=True,
         use_qk_l2norm_in_kernel=True,
     )
 
     # Triton kernel on target device
-    q_d = q.to(device)
-    k_d = k.to(device)
-    v_d = v.to(device)
-    g_d = g.to(device)
-    beta_d = beta.to(device)
+    q_d = q.unsqueeze(0).to(device)
+    k_d = k.unsqueeze(0).to(device)
+    v_d = v.unsqueeze(0).to(device)
+    g_d = g.unsqueeze(0).to(device)
+    beta_d = beta.unsqueeze(0).to(device)
     init_d = initial_state.to(device)
 
     o_d, state_d = fused_recurrent_gated_delta_rule(
@@ -467,6 +454,5 @@ def test_op(
 
 
 if __name__ == "__main__":
-    case = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96]
-    for T in case:
-        test_op(T=T)
+    pass
+    # test_

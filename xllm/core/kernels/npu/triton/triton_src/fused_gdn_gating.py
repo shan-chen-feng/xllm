@@ -3,6 +3,7 @@ import triton
 import torch_npu
 import triton.language as tl
 import torch.nn.functional as F
+import pytest
 
 # 当前TP4 num_v_head(NUM_HEADS)数量为8
 @triton.jit
@@ -88,20 +89,20 @@ def fused_gdn_gating(
     )
     return g, beta_output
 
-def test_op(num_tokens, num_v_heads = 8):
+# default params is for qwen3-next tp4
+@pytest.mark.parametrize("num_tokens", [(1), (3), (7), (16)])
+def test_gdn_gating(num_tokens, num_v_heads = 8):
     A_log = torch.randn((num_v_heads), dtype = torch.float32)
     a = torch.randn((num_tokens, num_v_heads), dtype = torch.float16)
     b = torch.randn((num_tokens, num_v_heads), dtype = torch.float16)
     dt_bias = torch.ones((num_v_heads), dtype = torch.float32)
     golden_g, golden_beta = torch_fused_gdn_gating(A_log, a, b, dt_bias)
     npu_g, npu_beta = fused_gdn_gating(A_log.npu(), a.npu(), b.npu(), dt_bias.npu())
-    print(f"npu_g:{npu_g}")
-    print(f"npu_beta:{npu_beta}")
     assert torch.allclose(golden_g, npu_g.cpu(), atol = 0.001, rtol = 0.001)
     assert torch.allclose(golden_beta, npu_beta.cpu(), atol = 0.001, rtol = 0.001)
     print("test pass")
 
 if __name__ == '__main__':
-    # pass
-    test_op(3)
+    pass
+    # test_op(3)
 

@@ -15,12 +15,9 @@
  */
 
 #include "npu_triton_fused_gdn_gating.h"
-
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-
 #include <cmath>
 #include <limits>
-
 #include "experiment/runtime/runtime/rt.h"
 #include "kernel_launchers.h"
 
