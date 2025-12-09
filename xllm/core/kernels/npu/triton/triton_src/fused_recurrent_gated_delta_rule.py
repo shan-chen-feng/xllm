@@ -368,31 +368,11 @@ def torch_recurrent_gated_delta_rule(
     core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
     return core_attn_out, last_recurrent_state
 
-
-def prepare_torch_recurrent_gated_delta_inputs(
-    q, k, v, g, beta, initial_state,
-    num_heads, num_v_heads, k_head_dim, v_head_dim, batch, T
-):
-    L = batch * T
-
-    q_ = q.reshape(batch, T, num_heads, k_head_dim)
-    k_ = k.reshape(batch, T, num_heads, k_head_dim)
-    v_ = v.reshape(batch, T, num_v_heads, v_head_dim)
-    g_ = g.reshape(batch, T, num_v_heads)        
-    beta_ = beta.reshape(batch, T, num_v_heads)  
-
-    if num_v_heads != num_heads:
-        ratio = num_v_heads // num_heads
-        q_ = q_.repeat_interleave(ratio, dim=2)
-        k_ = k_.repeat_interleave(ratio, dim=2)
-    return q_, k_, v_, g_, beta_, initial_state
-
-
 # default param is for qwen3-next tp4
 @pytest.mark.parametrize("batch, T", [(1, 1), (4, 1), (8, 1), (16, 1)])
 def test_recurrent_fused_gated_delta_rule(
     batch: int,
-    T: int = 1,
+    T: int,
     num_heads: int = 4,
     num_v_heads: int = 8,
     k_head_dim: int = 128,
@@ -403,36 +383,36 @@ def test_recurrent_fused_gated_delta_rule(
     torch.manual_seed(0)
     dtype = torch.float16
     L = batch * T
-    q = torch.randn(L, num_heads, k_head_dim, dtype=dtype)
-    k = torch.randn(L, num_heads, k_head_dim, dtype=dtype)
-    v = torch.randn(L, num_v_heads, v_head_dim, dtype=dtype)
-    g = torch.randn(L, num_v_heads, dtype=torch.float32)
-    beta = torch.randn(L, num_v_heads, dtype=torch.float32)
-    initial_state = torch.randn(batch, num_v_heads, k_head_dim, v_head_dim)
+    q = torch.randn(batch, T, num_heads, k_head_dim, dtype=dtype)
+    k = torch.randn(batch, T, num_heads, k_head_dim, dtype=dtype)
+    v = torch.randn(batch, T, num_v_heads, v_head_dim, dtype=dtype)
+    g = torch.randn(batch, T, num_v_heads, dtype=torch.float32)
+    beta = torch.randn(batch, T, num_v_heads, dtype=torch.float32)
+    initial_state = torch.randn(batch, T, num_v_heads, k_head_dim, v_head_dim, dtype=torch.float32)
 
-
-    # Golden on CPU
-    # TODO precision compare needs to be update
-    q_, k_, v_, g_, beta_, initial_state = prepare_torch_recurrent_gated_delta_inputs(
-        q, k, v, g, beta, initial_state, num_heads, num_v_heads, k_head_dim, v_head_dim, batch, T)
+    if num_v_heads // num_heads > 1:
+        q_ = q.repeat_interleave(num_v_heads // num_heads, dim=2)
+        k_ = k.repeat_interleave(num_v_heads // num_heads, dim=2)
     golden_o, golden_state = torch_recurrent_gated_delta_rule(
         q_,
         k_,
-        v_,
-        g_,
-        beta_,
+        v,
+        g,
+        beta,
         initial_state=initial_state,
         output_final_state=True,
         use_qk_l2norm_in_kernel=True,
     )
 
     # Triton kernel on target device
-    q_d = q.unsqueeze(0).to(device)
-    k_d = k.unsqueeze(0).to(device)
-    v_d = v.unsqueeze(0).to(device)
-    g_d = g.unsqueeze(0).to(device)
-    beta_d = beta.unsqueeze(0).to(device)
+    q_d = q.reshape(1, L, num_heads, k_head_dim).to(device)
+    k_d = k.reshape(1, L, num_heads, k_head_dim).to(device)
+    v_d = v.reshape(1, L, num_v_heads, v_head_dim).to(device)
+    g_d = g.reshape(1, L, num_v_heads).to(device)
+    beta_d = beta.reshape(1, L, num_v_heads).to(device)
     init_d = initial_state.to(device)
+    culen = [i for i in range(0, batch + 1)]
+    cu_seqlens = torch.LongTensor(culen).to(device)
 
     o_d, state_d = fused_recurrent_gated_delta_rule(
         q=q_d,
@@ -441,18 +421,19 @@ def test_recurrent_fused_gated_delta_rule(
         g=g_d,
         beta=beta_d,
         initial_state=init_d,
+        cu_seqlens=cu_seqlens,
         inplace_final_state=False,
         use_qk_l2norm_in_kernel=True,
     )
 
     o = o_d.cpu()
     state = state_d.cpu()
-
-    assert torch.allclose(golden_o, o, atol=1e-2, rtol=1e-2), "Output mismatch"
+    o = o.reshape(golden_o.shape)
+    assert torch.allclose(golden_o, o, atol=1e-3, rtol=1e-3), "Output mismatch"
     assert torch.allclose(golden_state, state, atol=1e-2, rtol=1e-2), "State mismatch"
-    print(f"fused_recurrent_gated_delta_rule: test passed for T={T}")
+    print(f"fused_recurrent_gated_delta_rule: test passed for batch={batch}, T={T}")
 
 
 if __name__ == "__main__":
     pass
-    # test_
+    # test_recurrent_fused_gated_delta_rule(batch=1, T=1)

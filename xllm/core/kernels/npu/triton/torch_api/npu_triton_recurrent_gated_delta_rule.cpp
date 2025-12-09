@@ -58,7 +58,7 @@ int64_t cdiv(int64_t a, int64_t div) {
 }  // namespace
 
 // default use_qk_l2norm_in_kernel is True
-std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
+std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
     const torch::Tensor& q,
     const torch::Tensor& k,
     const torch::Tensor& v,

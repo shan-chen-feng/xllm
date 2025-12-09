@@ -14,17 +14,17 @@
  * ==============================================================================
  */
 
- #pragma once
+#pragma once
 
- #include <torch/torch.h>
- #include <torch_npu/csrc/aten/NPUNativeFunctions.h>
- #include <torch_npu/csrc/core/npu/NPUStream.h>
- #include <torch_npu/torch_npu.h>
- #include <c10/util/Optional.h>
- 
+#include <c10/util/Optional.h>
+#include <torch/torch.h>
+#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+#include <torch_npu/torch_npu.h>
+
 namespace xllm::kernel::npu {
 
-std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
+std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
     const torch::Tensor& q,
     const torch::Tensor& k,
     const torch::Tensor& v,
@@ -36,10 +36,6 @@ std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
     const c10::optional<torch::Tensor>& cu_seqlens = c10::nullopt,
     const c10::optional<torch::Tensor>& ssm_state_indices = c10::nullopt,
     const c10::optional<torch::Tensor>& num_accepted_tokens = c10::nullopt,
-    bool use_qk_l2norm_in_kernel = false
-);
+    bool use_qk_l2norm_in_kernel = false);
 
 }  // namespace xllm::kernel::npu
- 
- 
- 

@@ -100,7 +100,7 @@ def test_gdn_gating(num_tokens, num_v_heads = 8):
     npu_g, npu_beta = fused_gdn_gating(A_log.npu(), a.npu(), b.npu(), dt_bias.npu())
     assert torch.allclose(golden_g, npu_g.cpu(), atol = 0.001, rtol = 0.001)
     assert torch.allclose(golden_beta, npu_beta.cpu(), atol = 0.001, rtol = 0.001)
-    print("test pass")
+    print(f"test pass for num_tokens={num_tokens}")
 
 if __name__ == '__main__':
     pass
