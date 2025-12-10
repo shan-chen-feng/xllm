@@ -46,75 +46,66 @@ std::pair<torch::Tensor, torch::Tensor> torch_recurrent_gated_delta_rule(
     const torch::Tensor& beta,
     const c10::optional<torch::Tensor>& initial_state,
     bool output_final_state,
-    bool use_qk_l2norm_in_kernel = false) {
-  auto initial_dtype = query.dtype();
+    bool use_qk_l2norm_in_kernel) {
 
-  torch::Tensor q, k, v, b, g_float;
-  if (use_qk_l2norm_in_kernel) {
-    q = l2norm(query, -1, 1e-6f)
-            .transpose(1, 2)
-            .contiguous()
-            .to(torch::kFloat32);
-    k = l2norm(key, -1, 1e-6f).transpose(1, 2).contiguous().to(torch::kFloat32);
-  } else {
-    q = query.transpose(1, 2).contiguous().to(torch::kFloat32);
-    k = key.transpose(1, 2).contiguous().to(torch::kFloat32);
-  }
-  v = value.transpose(1, 2).contiguous().to(torch::kFloat32);
-  b = beta.transpose(1, 2).contiguous().to(torch::kFloat32);
-  g_float = g.transpose(1, 2).contiguous().to(torch::kFloat32);
+    auto initial_dtype = query.scalar_type();
+    auto device = query.device();
+    torch::Tensor query_norm = query;
+    torch::Tensor key_norm = key;
 
-  int64_t batch_size = k.size(0);
-  int64_t num_heads = k.size(1);
-  int64_t sequence_length = k.size(2);
-  int64_t k_head_dim = k.size(3);
-  int64_t v_head_dim = v.size(3);
+    if (use_qk_l2norm_in_kernel) {
+        query_norm = l2norm(query, -1, 1e-6);
+        key_norm = l2norm(key, -1, 1e-6);
+    }
 
-  float scale = 1.0f / std::sqrt(static_cast<float>(q.size(3)));
-  q = q * scale;
+    auto query_ = query_norm.transpose(1, 2).contiguous().to(torch::kFloat32);
+    auto key_ = key_norm.transpose(1, 2).contiguous().to(torch::kFloat32);
+    auto value_ = value.transpose(1, 2).contiguous().to(torch::kFloat32);
+    auto g_ = g.transpose(1, 2).contiguous().to(torch::kFloat32);
+    auto beta_ = beta.transpose(1, 2).contiguous().to(torch::kFloat32);
 
-  auto core_attn_out = torch::zeros(
-      {batch_size, num_heads, sequence_length, v_head_dim},
-      torch::TensorOptions().dtype(torch::kFloat32).device(value.device()));
+    int64_t batch_size = key_.size(0);
+    int64_t num_heads = key_.size(1);
+    int64_t sequence_length = key_.size(2);
+    int64_t k_head_dim = key_.size(3);
+    int64_t v_head_dim = value_.size(3);
 
-  torch::Tensor last_recurrent_state;
-  if (initial_state.has_value()) {
-    last_recurrent_state = initial_state.value().to(torch::kFloat32).clone();
-  } else {
-    last_recurrent_state = torch::zeros(
-        {batch_size, num_heads, k_head_dim, v_head_dim},
-        torch::TensorOptions().dtype(torch::kFloat32).device(value.device()));
-  }
+    float scale = 1.0f / std::sqrt(static_cast<float>(k_head_dim));
+    query_ = query_ * scale;
 
-  for (int64_t i = 0; i < sequence_length; ++i) {
-    auto q_t = q.index({torch::indexing::Slice(), torch::indexing::Slice(), i});
-    auto k_t = k.index({torch::indexing::Slice(), torch::indexing::Slice(), i});
-    auto v_t = v.index({torch::indexing::Slice(), torch::indexing::Slice(), i});
-    auto g_t =
-        g_float.index({torch::indexing::Slice(), torch::indexing::Slice(), i})
-            .exp()
-            .unsqueeze(-1)
-            .unsqueeze(-1);
-    auto beta_t =
-        b.index({torch::indexing::Slice(), torch::indexing::Slice(), i})
-            .unsqueeze(-1);
+    auto core_attn_out = torch::zeros({batch_size, num_heads, sequence_length, v_head_dim}, value_.options());
+    torch::Tensor last_recurrent_state;
 
-    last_recurrent_state = last_recurrent_state * g_t;
-    auto kv_mem = (last_recurrent_state * k_t.unsqueeze(-1)).sum(-2);
-    auto delta = (v_t - kv_mem) * beta_t;
-    last_recurrent_state =
-        last_recurrent_state + k_t.unsqueeze(-1) * delta.unsqueeze(-2);
-    core_attn_out.index(
-        {torch::indexing::Slice(), torch::indexing::Slice(), i}) =
-        (last_recurrent_state * q_t.unsqueeze(-1)).sum(-2);
-  }
+    if (initial_state.has_value() && initial_state.value().defined()) {
+        last_recurrent_state = initial_state.value().to(torch::kFloat32).to(device).contiguous();
+    } else {
+        last_recurrent_state = torch::zeros({batch_size, num_heads, k_head_dim, v_head_dim}, value_.options());
+    }
 
-  if (!output_final_state) {
-    last_recurrent_state = torch::Tensor();
-  }
+    for (int64_t i = 0; i < sequence_length; ++i) {
+        auto q_t = query_.select(2, i);
+        auto k_t = key_.select(2, i);
+        auto v_t = value_.select(2, i);
+        auto g_t = g_.select(2, i).exp().unsqueeze(-1).unsqueeze(-1);
+        auto beta_t = beta_.select(2, i).unsqueeze(-1);
 
-  core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype);
-  return std::make_pair(core_attn_out, last_recurrent_state);
+        last_recurrent_state = last_recurrent_state * g_t;
+        auto k_t_expanded = k_t.unsqueeze(-1);
+        auto kv_mem = (last_recurrent_state * k_t_expanded).sum(-2);
+        auto delta = (v_t - kv_mem) * beta_t;
+        auto delta_expanded = delta.unsqueeze(-2);
+        last_recurrent_state = last_recurrent_state + k_t_expanded * delta_expanded;
+        auto q_t_expanded = q_t.unsqueeze(-1);
+        auto out_t = (last_recurrent_state * q_t_expanded).sum(-2);
+        core_attn_out.slice(2, i, i + 1) = out_t.unsqueeze(2);
+    }
+
+    if (!output_final_state) {
+        last_recurrent_state = torch::Tensor();
+    }
+
+    core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype);
+    return std::make_pair(core_attn_out, last_recurrent_state);
 }
 
 class TritonRecurrentGatedDeltaRuleTest : public ::testing::Test {

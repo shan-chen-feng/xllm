@@ -292,6 +292,9 @@ bool KernelRegistry::register_binary(KernelInfo& info,
   binary.length = binary_size;
   if (info.mix_mode == "aiv") {
     binary.magic = RT_DEV_BINARY_MAGIC_ELF_AIVEC;
+  } else if (info.mix_mode == "aic") {
+    // TODO when kernel type is aicube, magic value will be RT_DEV_BINARY_MAGIC_ELF_AICUBE
+    binary.magic = RT_DEV_BINARY_MAGIC_ELF_AICUBE;
   } else {
     binary.magic = RT_DEV_BINARY_MAGIC_ELF;
   }
