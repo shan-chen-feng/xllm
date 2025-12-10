@@ -125,6 +125,16 @@ class TritonRecurrentGatedDeltaRuleTest : public ::testing::Test {
 
     torch::manual_seed(42);
     torch_npu::init_npu(device_str_);
+    kernel_name_ = "fused_recurrent_gated_delta_rule_fwd_kernel";
+    binary_filename_ = "fused_recurrent_gated_delta_rule_fwd_kernel.npubin";
+    binary_path_ = GetKernelBinaryPath(binary_filename_);
+    auto& loader = KernelLoader::get_instance();
+    auto handle = loader.get_kernel(kernel_name_);
+    if (!handle.is_valid()) {
+      handle = loader.load_kernel(kernel_name_, binary_path_);
+    }
+    ASSERT_TRUE(handle.is_valid()) << "Failed to load Kernel: " << kernel_name_
+                                   << " from " << binary_path_;
   }
 
   void TearDown() override {
@@ -139,6 +149,9 @@ class TritonRecurrentGatedDeltaRuleTest : public ::testing::Test {
   torch::TensorOptions tensor_options_;
   bool npu_available_ = false;
   std::string device_str_ = "npu:" + std::to_string(kDeviceId);
+  std::string binary_filename_;
+  std::string kernel_name_;
+  std::string binary_path_;
 };
 
 TEST_F(TritonRecurrentGatedDeltaRuleTest, MultiBatchTest) {
@@ -155,132 +168,82 @@ TEST_F(TritonRecurrentGatedDeltaRuleTest, MultiBatchTest) {
   constexpr int64_t v_head_dim = 128;
   constexpr bool use_qk_l2norm_in_kernel = true;
 
-  auto q = torch::randn(
-      {batch, T, num_heads, k_head_dim},
-      torch::TensorOptions().dtype(torch::kFloat16).device(device));
-  auto k = torch::randn(
-      {batch, T, num_heads, k_head_dim},
-      torch::TensorOptions().dtype(torch::kFloat16).device(device));
-  auto v = torch::randn(
-      {batch, T, num_v_heads, v_head_dim},
-      torch::TensorOptions().dtype(torch::kFloat16).device(device));
-  auto g = torch::randn(
-      {batch, T, num_v_heads},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device));
-  auto beta = torch::randn(
-      {batch, T, num_v_heads},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device));
-  auto initial_state = torch::randn(
-      {batch, T, num_v_heads, k_head_dim, v_head_dim},
-      torch::TensorOptions().dtype(torch::kFloat32).device(device));
+  torch::manual_seed(0);
+  auto dtype = torch::kFloat16;
+  auto L = batch * T;
+  
+  auto q = torch::randn({batch, T, num_heads, k_head_dim}, dtype);
+  auto k = torch::randn({batch, T, num_heads, k_head_dim}, dtype);
+  auto v = torch::randn({batch, T, num_v_heads, v_head_dim}, dtype);
+  auto g = torch::randn({batch, T, num_v_heads}, torch::kFloat32);
+  auto beta = torch::randn({batch, T, num_v_heads}, torch::kFloat32);
+  auto initial_state = torch::randn({batch, num_v_heads, k_head_dim, v_head_dim}, torch::kFloat32);
 
-  int64_t L = batch * T;
-  auto q_flat = q.reshape({1, L, num_heads, k_head_dim});
-  auto k_flat = k.reshape({1, L, num_heads, k_head_dim});
-  auto v_flat = v.reshape({1, L, num_v_heads, v_head_dim});
-  auto g_flat = g.reshape({1, L, num_v_heads});
-  auto beta_flat = beta.reshape({1, L, num_v_heads});
-
-  std::vector<int64_t> cu_seqlens_vec;
-  for (int64_t i = 0; i <= batch; ++i) {
-    cu_seqlens_vec.push_back(i * T);
-  }
-  auto cu_seqlens =
-      torch::tensor(cu_seqlens_vec,
-                    torch::TensorOptions().dtype(torch::kInt64).device(device));
-
-  auto initial_state_reshaped = initial_state.index({torch::indexing::Slice(),
-                                                     0,
-                                                     torch::indexing::Slice(),
-                                                     torch::indexing::Slice(),
-                                                     torch::indexing::Slice()});
-
-  auto q_cpu = q.cpu();
-  auto k_cpu = k.cpu();
-  auto v_cpu = v.cpu();
-  auto g_cpu = g.cpu();
-  auto beta_cpu = beta.cpu();
-  auto initial_state_cpu = initial_state.cpu();
-
-  torch::Tensor q_golden = q_cpu;
-  torch::Tensor k_golden = k_cpu;
-  if (num_v_heads > num_heads) {
-    int64_t repeat_factor = num_v_heads / num_heads;
-    q_golden = q_cpu.repeat_interleave(repeat_factor, 2);
-    k_golden = k_cpu.repeat_interleave(repeat_factor, 2);
+  torch::Tensor q_expanded = q, k_expanded = k;
+  if (num_v_heads / num_heads > 1) {
+      q_expanded = q.repeat_interleave(num_v_heads / num_heads, 2);
+      k_expanded = k.repeat_interleave(num_v_heads / num_heads, 2);
   }
 
-  auto initial_state_golden =
-      initial_state_cpu.index({torch::indexing::Slice(),
-                               0,
-                               torch::indexing::Slice(),
-                               torch::indexing::Slice(),
-                               torch::indexing::Slice()});
+  auto [golden_o, golden_state] = torch_recurrent_gated_delta_rule(
+    q_expanded, k_expanded, v, g, beta,
+    initial_state,
+    true,
+    true
+  );
 
-  auto [torch_o, torch_state] =
-      torch_recurrent_gated_delta_rule(q_golden,
-                                       k_golden,
-                                       v_cpu,
-                                       g_cpu,
-                                       beta_cpu,
-                                       c10::make_optional(initial_state_golden),
-                                       true,
-                                       use_qk_l2norm_in_kernel);
+  // Apply correct reshape operations as in original test
+  auto q_d = q.reshape({1, L, num_heads, k_head_dim}).to(device);
+  auto k_d = k.reshape({1, L, num_heads, k_head_dim}).to(device);
+  auto v_d = v.reshape({1, L, num_v_heads, v_head_dim}).to(device);
+  auto g_d = g.reshape({1, L, num_v_heads}).to(device);
+  auto beta_d = beta.reshape({1, L, num_v_heads}).to(device);
+  auto init_d = initial_state.to(device);
 
-  auto npu_stream = c10_npu::getCurrentNPUStream(0);
-  auto [triton_o, triton_state] = npu_fused_recurrent_gated_delta_rule(
-      q_flat,
-      k_flat,
-      v_flat,
-      g_flat,
-      c10::make_optional(beta_flat),
-      c10::nullopt,
-      c10::make_optional(initial_state_reshaped),
+  // Create cu_seqlens [0, 1, 2, ..., batch] as in original test
+  std::vector<int64_t> culen;
+  culen.reserve(batch + 1);
+  for (int i = 0; i <= batch; ++i) {
+      culen.push_back(i);
+  }
+  auto cu_seqlens = torch::tensor(culen, torch::kInt64).to(device);
+
+  // Calculate scale factor
+  float scale_val = 1.0f / std::sqrt(static_cast<float>(k_head_dim));
+  auto npu_stream = c10_npu::getCurrentNPUStream(kDeviceId);
+  
+  // Call NPU kernel 
+  auto [o_d, state_d] = npu_fused_recurrent_gated_delta_rule(
+      q_d, k_d, v_d, g_d,
+      beta_d,
+      scale_val,
+      init_d,
       false,
-      c10::make_optional(cu_seqlens),
+      cu_seqlens,
       c10::nullopt,
       c10::nullopt,
-      use_qk_l2norm_in_kernel);
+      use_qk_l2norm_in_kernel
+  );
   aclrtSynchronizeStream(npu_stream.stream());
 
-  auto triton_o_reshaped =
-      triton_o.reshape({batch, T, num_v_heads, v_head_dim});
-  auto triton_o_cpu = triton_o_reshaped.cpu();
-  auto triton_state_cpu = triton_state.cpu();
+  // Reshape output to match golden implementation shape
+  auto o = o_d.cpu().reshape(golden_o.sizes());
+  auto state = state_d.cpu();
+  
+  // Compare results
+  auto output_diff = (golden_o - o).abs().max().item<float>();
+  EXPECT_LT(output_diff, 1e-3) 
+      << "Output mismatch: max diff = " << output_diff
+      << ", shape: " << o.sizes()
+      << ", golden range [" << golden_o.min().item<float>() << ", " << golden_o.max().item<float>() << "]"
+      << ", actual range [" << o.min().item<float>() << ", " << o.max().item<float>() << "]";
 
-  torch::Tensor triton_state_reshaped;
-  if (triton_state_cpu.dim() == 4) {
-    int64_t L = batch * T;
-    if (triton_state_cpu.size(0) == L) {
-      std::vector<torch::Tensor> state_slices;
-      for (int64_t i = 0; i < batch; ++i) {
-        int64_t last_token_idx = (i + 1) * T - 1;
-        state_slices.push_back(
-            triton_state_cpu.index({last_token_idx,
-                                    torch::indexing::Slice(),
-                                    torch::indexing::Slice(),
-                                    torch::indexing::Slice()}));
-      }
-      triton_state_reshaped = torch::stack(state_slices, 0);
-    } else {
-      triton_state_reshaped = triton_state_cpu;
-    }
-  } else {
-    triton_state_reshaped = triton_state_cpu;
-  }
-
-  auto o_diff = torch::abs(torch_o - triton_o_cpu);
-  float o_max_diff = torch::max(o_diff).template item<float>();
-  EXPECT_LT(o_max_diff, kTolerance) << "Output: max diff (" << o_max_diff
-                                    << ") > tolerance (" << kTolerance << ")";
-
-  if (torch_state.defined() && triton_state_reshaped.defined()) {
-    auto state_diff = torch::abs(torch_state - triton_state_reshaped);
-    float state_max_diff = torch::max(state_diff).template item<float>();
-    EXPECT_LT(state_max_diff, kStateTolerance)
-        << "State: max diff (" << state_max_diff << ") > tolerance ("
-        << kStateTolerance << ")";
-  }
+  auto state_diff = (golden_state - state).abs().max().item<float>();
+  EXPECT_LT(state_diff, 1e-2)
+      << "State mismatch: max diff = " << state_diff
+      << ", shape: " << state.sizes()
+      << ", golden state range [" << golden_state.min().item<float>() << ", " << golden_state.max().item<float>() << "]"
+      << ", actual state range [" << state.min().item<float>() << ", " << state.max().item<float>() << "]";
 }
 
 }  // namespace xllm::kernel::npu
