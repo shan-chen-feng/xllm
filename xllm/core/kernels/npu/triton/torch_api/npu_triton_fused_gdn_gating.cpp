@@ -20,6 +20,7 @@
 #include <limits>
 #include "experiment/runtime/runtime/rt.h"
 #include "kernel_launchers.h"
+#include "utils.h"
 
 namespace xllm::kernel::npu {
 namespace {
@@ -95,14 +96,21 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
   void* aPtr = const_cast<void*>(a.data_ptr());
   void* bPtr = const_cast<void*>(b.data_ptr());
   void* dtBiasPtr = const_cast<void*>(dt_bias.data_ptr());
-
-  rtError_t ret = launchers::fused_gdn_gating_head8_kernel(
+  void* workspace_addr = nullptr;
+  void* sync_block_lock = nullptr;
+  auto ret = setup("fused_gdn_gating_head8_kernel", &workspace_addr, &sync_block_lock);
+  if (ret != ACL_ERROR_NONE) {
+    LOG(ERROR) << "Failed to setup workspace and sync block lock for kernel "
+    << "fused_gdn_gating_head8_kernel" << " : error=" << ret;
+    return std::make_pair(g, beta_output);
+  }
+  ret = launchers::fused_gdn_gating_head8_kernel(
       stream,
       gridX,
       gridY,
       gridZ,
-      nullptr,
-      nullptr,
+      workspace_addr,
+      sync_block_lock,
       gPtr,
       betaOutputPtr,
       ALogPtr,
@@ -110,11 +118,11 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_gdn_gating(
       bPtr,
       dtBiasPtr,
       seq_len);
-
-  TORCH_CHECK(ret == RT_ERROR_NONE,
-              "launch_fused_gdn_gating_kernel failed with error ",
-              ret);
-
+  if (ret != ACL_ERROR_NONE) {
+    LOG(ERROR) << "Failed to launch kernel "
+    << "fused_gdn_gating_head8_kernel" << " : error=" << ret;
+  }
+  cleanup(workspace_addr, sync_block_lock);
   return std::make_pair(g, beta_output);
 }
 

@@ -56,83 +56,20 @@
       return RT_ERROR_INVALID_VALUE;                                           \
     }                                                                          \
                                                                                \
-    int64_t workspaceSize = -1;                                                \
-    int64_t lockInitValue = -1;                                                \
-    int64_t lockNum = -1;                                                      \
-    xllm::kernel::npu::KernelLoader::get_instance().get_kernel_workspace_config(   \
-        #kernel_name,                                                          \
-        workspaceSize,                                                         \
-        lockInitValue,                                                         \
-        lockNum);                                                              \
-                                                                               \
     uint32_t blockNum = gridX * gridY * gridZ;                                 \
-                                                                               \
-    void* actual_workspace_addr = workspace_addr;                              \
-    if (workspace_addr == nullptr && workspaceSize > 0) {                      \
-      uint64_t totalWorkSpaceSize = workspaceSize * blockNum;                  \
-      rtError_t ret =                                                          \
-          rtMalloc(reinterpret_cast<void**>(&actual_workspace_addr),           \
-                   totalWorkSpaceSize,                                         \
-                   RT_MEMORY_HBM,                                              \
-                   0);                                                         \
-      if (ret != RT_ERROR_NONE) {                                              \
-        LOG(ERROR) << "Failed to allocate workspace for kernel '"              \
-                   << #kernel_name << "': error=" << ret;                      \
-        return ret;                                                            \
-      }                                                                        \
-    }                                                                          \
-                                                                               \
-    void* actual_syncBlockLock = syncBlockLock;                                \
-    if (syncBlockLock == nullptr && lockNum > 0) {                             \
-      uint64_t syncBlockLockSize = lockNum * sizeof(int64_t);                  \
-      rtError_t ret =                                                          \
-          rtMalloc(reinterpret_cast<void**>(&actual_syncBlockLock),            \
-                   syncBlockLockSize,                                          \
-                   RT_MEMORY_HBM,                                              \
-                   0);                                                         \
-      if (ret != RT_ERROR_NONE) {                                              \
-        LOG(ERROR) << "Failed to allocate syncBlockLock for kernel '"          \
-                   << #kernel_name << "': error=" << ret;                      \
-        if (actual_workspace_addr != workspace_addr) {                         \
-          rtFree(actual_workspace_addr);                                       \
-        }                                                                      \
-        return ret;                                                            \
-      }                                                                        \
-      std::vector<int64_t> lockInitData(lockNum, lockInitValue);               \
-      ret = rtMemcpy(actual_syncBlockLock,                                     \
-                     syncBlockLockSize,                                        \
-                     reinterpret_cast<void*>(lockInitData.data()),             \
-                     syncBlockLockSize,                                        \
-                     RT_MEMCPY_HOST_TO_DEVICE);                                \
-      if (ret != RT_ERROR_NONE) {                                              \
-        LOG(ERROR) << "Failed to initialize syncBlockLock for kernel '"        \
-                   << #kernel_name << "': error=" << ret;                      \
-        rtFree(actual_syncBlockLock);                                          \
-        if (actual_workspace_addr != workspace_addr) {                         \
-          rtFree(actual_workspace_addr);                                       \
-        }                                                                      \
-        return ret;                                                            \
-      }                                                                        \
-    }                                                                          \
                                                                                \
     void* ffts_addr = nullptr;                                                 \
     uint32_t ffts_len = 0;                                                     \
     rtError_t ret = rtGetC2cCtrlAddr((uint64_t*)&ffts_addr, &ffts_len);        \
     if (ret != RT_ERROR_NONE) {                                                \
       LOG(ERROR) << "rtGetC2cCtrlAddr failed: " << ret;                        \
-      if (actual_syncBlockLock != syncBlockLock) {                             \
-        rtFree(actual_syncBlockLock);                                          \
-      }                                                                        \
-      if (actual_workspace_addr != workspace_addr) {                           \
-        rtFree(actual_workspace_addr);                                         \
-      }                                                                        \
       return ret;                                                              \
     }                                                                          \
                                                                                \
     _##kernel_name##_Args args = {                                             \
         ffts_addr,                                                             \
-        actual_syncBlockLock,                                                  \
-        actual_workspace_addr ARG_LIST_MACRO(_DECLARE_ARG_VALUE),              \
+        syncBlockLock,                                                         \
+        workspace_addr ARG_LIST_MACRO(_DECLARE_ARG_VALUE),                    \
         gridX,                                                                 \
         gridY,                                                                 \
         gridZ};                                                                \
@@ -147,12 +84,6 @@
     if (ret != RT_ERROR_NONE) {                                                \
       LOG(ERROR) << "rtKernelLaunch failed for '" << #kernel_name              \
                  << "': " << ret;                                              \
-      if (actual_syncBlockLock != syncBlockLock) {                             \
-        rtFree(actual_syncBlockLock);                                          \
-      }                                                                        \
-      if (actual_workspace_addr != workspace_addr) {                           \
-        rtFree(actual_workspace_addr);                                         \
-      }                                                                        \
       return ret;                                                              \
     }                                                                          \
                                                                                \

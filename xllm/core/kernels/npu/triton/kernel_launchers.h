@@ -49,9 +49,9 @@ REG_KERNEL_LAUNCHER(fused_gdn_gating_head8_kernel, FUSED_GDN_GATING_ARG_LIST)
   OP(int32_t, N)                                      \
   OP(int32_t, T)
 
-REG_KERNEL_ARGS(fused_recurrent_gated_delta_rule_kernel,
+REG_KERNEL_ARGS(fused_recurrent_gated_delta_rule_fwd_kernel,
                 FUSED_RECURRENT_GATED_DELTA_RULE_ARG_LIST)
-REG_KERNEL_LAUNCHER(fused_recurrent_gated_delta_rule_kernel,
+REG_KERNEL_LAUNCHER(fused_recurrent_gated_delta_rule_fwd_kernel,
                     FUSED_RECURRENT_GATED_DELTA_RULE_ARG_LIST)
 
 }  // namespace launchers

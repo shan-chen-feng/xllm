@@ -24,6 +24,7 @@
 
 #include "experiment/runtime/runtime/rt.h"
 #include "kernel_launchers.h"
+#include "utils.h"
 
 namespace xllm::kernel::npu {
 namespace {
@@ -182,13 +183,21 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
                                       ? num_accepted_tokens.value().data_ptr()
                                       : nullptr;
 
-  auto ret = launchers::fused_recurrent_gated_delta_rule_kernel(
+  void* workspace_addr = nullptr;
+  void* sync_block_lock = nullptr;
+  auto ret = setup("fused_recurrent_gated_delta_rule_fwd_kernel", &workspace_addr, &sync_block_lock);
+  if (ret != ACL_ERROR_NONE) {
+    LOG(ERROR) << "Failed to setup workspace and sync block lock for kernel "
+    << "fused_recurrent_gated_delta_rule_fwd_kernel" << " : error=" << ret;
+    return std::make_pair(o, final_state);
+  }
+  ret = launchers::fused_recurrent_gated_delta_rule_fwd_kernel(
       stream,
       gridX,
       gridY,
       gridZ,
-      nullptr,
-      nullptr,
+      workspace_addr,
+      sync_block_lock,
       q_ptr,
       k_ptr,
       v_ptr,
@@ -204,10 +213,11 @@ std::pair<torch::Tensor, torch::Tensor> npu_fused_recurrent_gated_delta_rule(
       static_cast<int32_t>(N),
       static_cast<int32_t>(seq));
 
-  TORCH_CHECK(
-      ret == RT_ERROR_NONE,
-      "launch_fused_recurrent_gated_delta_rule_kernel failed with error ",
-      ret);
+  if (ret != ACL_ERROR_NONE) {
+    LOG(ERROR) << "Failed to launch kernel "
+    << "fused_recurrent_gated_delta_rule_fwd_kernel" << " : error=" << ret;
+  }
+  cleanup(workspace_addr, sync_block_lock);
 
   o = o.squeeze(0);
   return std::make_pair(o, final_state);
