@@ -9,10 +9,6 @@ elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQ
     set(PLATFORM "aarch64-linux")
 endif()
 
-set(TORCH_API_HDRS
-  torch_api/npu_triton_fused_gdn_gating.h
-  torch_api/npu_triton_recurrent_gated_delta_rule.h
-)
 
 set(TORCH_API_SRCS
   torch_api/npu_triton_fused_gdn_gating.cpp
@@ -28,12 +24,13 @@ cc_library(
     kernel_loader.h
     macros.h
     kernel_launchers.h
-    ${TORCH_API_HDRS}
+    torch_api/triton_ops_api.h
+    torch_api/utils.h
   INCLUDES
     ${ASCEND_HOME_PATH}/${PLATFORM}/include/experiment/platform
     ${ASCEND_HOME_PATH}/${PLATFORM}/include/experiment/msprof
   LINKOPTS
-    "${ASCEND_HOME_PATH}/lib64/libruntime.so"
+    "$ENV{ASCEND_HOME_PATH}/lib64/libruntime.so"
   SRCS
     kernel_handle.cpp
     kernel_registry.cpp

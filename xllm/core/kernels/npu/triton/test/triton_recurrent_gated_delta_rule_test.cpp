@@ -20,9 +20,11 @@
 #include <torch/torch.h>
 #include <torch_npu/torch_npu.h>
 
+#include <optional>
+
 #include "kernel_loader.h"
 #include "test_utils.h"
-#include "torch_api/npu_triton_recurrent_gated_delta_rule.h"
+#include "torch_api/triton_ops_api.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 
 namespace xllm::kernel::npu {
@@ -44,7 +46,7 @@ std::pair<torch::Tensor, torch::Tensor> torch_recurrent_gated_delta_rule(
     const torch::Tensor& value,
     const torch::Tensor& g,
     const torch::Tensor& beta,
-    const c10::optional<torch::Tensor>& initial_state,
+    const std::optional<torch::Tensor>& initial_state,
     bool output_final_state,
     bool use_qk_l2norm_in_kernel) {
 
@@ -220,8 +222,8 @@ TEST_F(TritonRecurrentGatedDeltaRuleTest, MultiBatchTest) {
       init_d,
       false,
       cu_seqlens,
-      c10::nullopt,
-      c10::nullopt,
+      std::nullopt,
+      std::nullopt,
       use_qk_l2norm_in_kernel
   );
   aclrtSynchronizeStream(npu_stream.stream());

@@ -23,6 +23,7 @@
 
 #include "experiment/runtime/runtime/rt.h"
 #include "kernel_loader.h"
+#include "torch_api/utils.h"
 
 #define RT_ERROR_INVALID_VALUE -1
 #define _DECLARE_STRUCT_FIELD(type, name) \
@@ -33,7 +34,7 @@
 #define REG_KERNEL_ARGS(kernel_name, ARG_LIST_MACRO)     \
   struct __attribute__((packed)) _##kernel_name##_Args { \
     void* ffts_addr __attribute__((aligned(8)));         \
-    void* syncBlockLock __attribute__((aligned(8)));     \
+    void* sync_block_lock __attribute__((aligned(8)));     \
     void* workspace_addr __attribute__((aligned(8)));    \
     ARG_LIST_MACRO(_DECLARE_STRUCT_FIELD)                \
     int32_t gridX __attribute__((aligned(4)));           \
@@ -48,7 +49,7 @@
       int32_t gridY,                                                           \
       int32_t gridZ,                                                           \
       void* workspace_addr,                                                    \
-      void* syncBlockLock ARG_LIST_MACRO(_DECLARE_PARAM)) {                    \
+      void* sync_block_lock ARG_LIST_MACRO(_DECLARE_PARAM)) {                    \
     auto kernelHandle = xllm::kernel::npu::KernelLoader::get_instance().           \
                             get_kernel(#kernel_name);                          \
     if (!kernelHandle.is_valid()) {                                            \
@@ -66,14 +67,21 @@
       return ret;                                                              \
     }                                                                          \
                                                                                \
+    ret = xllm::kernel::npu::setup(#kernel_name, &workspace_addr,             \
+       &sync_block_lock, blockNum);                                            \
+    if (ret != ACL_ERROR_NONE) {                                              \
+      LOG(ERROR) << "Failed to setup workspace and sync block lock for kernel " \
+      << #kernel_name << " : error=" << ret;                                  \
+      return ret;                                                              \
+    }                                                                          \
     _##kernel_name##_Args args = {                                             \
         ffts_addr,                                                             \
-        syncBlockLock,                                                         \
+        sync_block_lock,                                                         \
         workspace_addr ARG_LIST_MACRO(_DECLARE_ARG_VALUE),                    \
         gridX,                                                                 \
         gridY,                                                                 \
         gridZ};                                                                \
-                                                                               \
+                                                                              \
     ret = rtKernelLaunch(kernelHandle.get(),                                   \
                          blockNum,                                             \
                          static_cast<void*>(&args),                            \
@@ -84,8 +92,10 @@
     if (ret != RT_ERROR_NONE) {                                                \
       LOG(ERROR) << "rtKernelLaunch failed for '" << #kernel_name              \
                  << "': " << ret;                                              \
+      xllm::kernel::npu::cleanup(workspace_addr, sync_block_lock);             \ 
       return ret;                                                              \
     }                                                                          \
+    xllm::kernel::npu::cleanup(workspace_addr, sync_block_lock);               \
                                                                                \
     return RT_ERROR_NONE;                                                      \
   }

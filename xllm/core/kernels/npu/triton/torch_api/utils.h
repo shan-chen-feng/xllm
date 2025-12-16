@@ -19,15 +19,18 @@
 #include "acl/acl.h"
 
 namespace xllm::kernel::npu {
-    
-aclError setup(const char *kernel_name, void** workspace_addr, void** sync_block_lock) {
+
+inline aclError setup(const char* kernel_name,
+                      void** workspace_addr,
+                      void** sync_block_lock,
+                      uint32_t block_num) {
     int64_t workspace_size = -1;
     int64_t lock_init_value = 0;
     int64_t lock_num = -1;
     KernelLoader::get_instance().get_kernel_workspace_config(kernel_name, 
         workspace_size, lock_init_value, lock_num);
     if (workspace_size > 0) {
-        // TODO workspacesize need to be * blockNum
+        workspace_size *= block_num;
         auto ret = aclrtMalloc(workspace_addr, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST);
         if (ret != ACL_ERROR_NONE) {
             LOG(ERROR) << "Failed to allocate workspace for kernel "
@@ -61,7 +64,7 @@ aclError setup(const char *kernel_name, void** workspace_addr, void** sync_block
     return ACL_ERROR_NONE;
 }
 
-void cleanup(void* workspace_addr, void* sync_block_lock) {
+inline void cleanup(void* workspace_addr, void* sync_block_lock) {
     if (workspace_addr != nullptr) {
         aclrtFree(workspace_addr);
         workspace_addr = nullptr;

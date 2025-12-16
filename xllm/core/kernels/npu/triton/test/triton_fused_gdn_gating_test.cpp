@@ -21,7 +21,7 @@
 
 #include <glog/logging.h>
 
-#include "torch_api/npu_triton_fused_gdn_gating.h"
+#include "torch_api/triton_ops_api.h"
 #include "kernel_loader.h"
 #include "test_utils.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"

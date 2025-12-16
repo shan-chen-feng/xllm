@@ -5,7 +5,7 @@ import triton.language as tl
 import torch.nn.functional as F
 import pytest
 
-# 当前TP4 num_v_head(NUM_HEADS)数量为8
+# current for qwen3-next TP4 num_v_head(NUM_HEADS) is 8
 @triton.jit
 def fused_gdn_gating_head8_kernel(
     g,

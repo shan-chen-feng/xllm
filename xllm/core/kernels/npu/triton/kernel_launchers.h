@@ -43,8 +43,6 @@ REG_KERNEL_LAUNCHER(fused_gdn_gating_head8_kernel, FUSED_GDN_GATING_ARG_LIST)
   OP(void*, h0)                                       \
   OP(void*, ht)                                       \
   OP(void*, cu_seqlens)                               \
-  OP(void*, ssm_state_indices)                        \
-  OP(void*, num_accepted_tokens)                      \
   OP(float, scale)                                    \
   OP(int32_t, N)                                      \
   OP(int32_t, T)
