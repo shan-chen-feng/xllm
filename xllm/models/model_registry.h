@@ -26,13 +26,13 @@ limitations under the License.
 #include "core/framework/model/dit_model.h"
 #include "core/framework/model/embedding_lm.h"
 #include "core/framework/model/embedding_vlm.h"
-#include "core/framework/model/mm_embedding_vlm.h"
 #include "core/framework/model_context.h"
 #include "core/framework/tokenizer/tokenizer_args.h"
 #include "core/util/json_reader.h"
 #include "core/util/type_traits.h"  // IWYU pragma: keep
 #include "processors/image_processor.h"
 #include "processors/input_processor.h"
+#include "processors/feature_extractor.h"
 
 namespace xllm {
 
@@ -48,9 +48,6 @@ using EmbeddingLMFactory =
 using EmbeddingVLMFactory =
     std::function<std::unique_ptr<EmbeddingVLM>(const ModelContext& context)>;
 
-using MMEmbeddingVLMFactory =
-    std::function<std::unique_ptr<MMEmbeddingVLM>(const ModelContext& context)>;
-
 using DiTModelFactory =
     std::function<std::unique_ptr<DiTModel>(const DiTModelContext& context)>;
 
@@ -59,6 +56,9 @@ using InputProcessorFactory =
 
 using ImageProcessorFactory =
     std::function<std::unique_ptr<ImageProcessor>(const ModelArgs& args)>;
+
+using FeatureExtractorFactory =
+    std::function<std::unique_ptr<FeatureExtractor>(const ModelArgs& args)>;
 
 using ModelArgsLoader =
     std::function<bool(const JsonReader& json, ModelArgs* args)>;
@@ -75,10 +75,10 @@ struct ModelMeta {
   CausalVLMFactory causal_vlm_factory;
   EmbeddingLMFactory embedding_lm_factory;
   EmbeddingVLMFactory embedding_vlm_factory;
-  MMEmbeddingVLMFactory mm_embedding_vlm_factory;
   DiTModelFactory dit_model_factory;
   InputProcessorFactory input_processor_factory;
   ImageProcessorFactory image_processor_factory;
+  FeatureExtractorFactory feature_extractor_factory;
   ModelArgsLoader model_args_loader;
   QuantArgsLoader quant_args_loader;
   TokenizerArgsLoader tokenizer_args_loader;
@@ -102,9 +102,6 @@ class ModelRegistry {
   static void register_vlm_embedding_factory(const std::string& name,
                                              EmbeddingVLMFactory factory);
 
-  static void register_mm_embedding_vlm_factory(const std::string& name,
-                                                MMEmbeddingVLMFactory factory);
-
   static void register_dit_model_factory(const std::string& name,
                                          DiTModelFactory factory);
 
@@ -119,8 +116,12 @@ class ModelRegistry {
 
   static void register_input_processor_factory(const std::string& name,
                                                InputProcessorFactory factory);
+  
   static void register_image_processor_factory(const std::string& name,
                                                ImageProcessorFactory factory);
+  
+  static void register_feature_extractor_factory(const std::string& name,
+                                               FeatureExtractorFactory factory);
 
   static CausalLMFactory get_causallm_factory(const std::string& name);
 
@@ -129,9 +130,6 @@ class ModelRegistry {
   static EmbeddingLMFactory get_embeddinglm_factory(const std::string& name);
 
   static EmbeddingVLMFactory get_embeddingvlm_factory(const std::string& name);
-
-  static MMEmbeddingVLMFactory get_mm_embedding_vlm_factory(
-      const std::string& name);
 
   static DiTModelFactory get_dit_model_factory(const std::string& name);
 
@@ -145,6 +143,9 @@ class ModelRegistry {
       const std::string& name);
 
   static ImageProcessorFactory get_image_processor_factory(
+      const std::string& name);
+
+  static FeatureExtractorFactory get_feature_extractor_factory(
       const std::string& name);
 
   static std::string get_model_backend(const std::string& name);
@@ -162,9 +163,6 @@ std::unique_ptr<EmbeddingLM> create_lm_embedding_model(
     const ModelContext& context);
 
 std::unique_ptr<EmbeddingVLM> create_vlm_embedding_model(
-    const ModelContext& context);
-
-std::unique_ptr<MMEmbeddingVLM> create_vlm_mm_embedding_model(
     const ModelContext& context);
 
 std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
@@ -232,22 +230,6 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 #define REGISTER_EMBEDDING_VLM_MODEL(ModelType, ModelClass) \
   REGISTER_EMBEDDING_VLM_MODEL_WITH_VARNAME(ModelType, ModelType, ModelClass)
 
-#define REGISTER_MM_EMBEDDING_VLM_MODEL_WITH_VARNAME(                    \
-    VarName, ModelType, ModelClass)                                      \
-  const bool VarName##_registered = []() {                               \
-    ModelRegistry::register_mm_embedding_vlm_factory(                    \
-        #ModelType, [](const ModelContext& context) {                    \
-          ModelClass model(context);                                     \
-          model->eval();                                                 \
-          return std::make_unique<xllm::MMEmbeddingVLMImpl<ModelClass>>( \
-              std::move(model), context.get_tensor_options());           \
-        });                                                              \
-    return true;                                                         \
-  }()
-
-#define REGISTER_MM_EMBEDDING_VLM_MODEL(ModelType, ModelClass) \
-  REGISTER_MM_EMBEDDING_VLM_MODEL_WITH_VARNAME(ModelType, ModelType, ModelClass)
-
 #define REGISTER_DIT_MODEL_WITH_VARNAME(VarName, ModelType, ModelClass) \
   const bool VarName##_registered = []() {                              \
     ModelRegistry::register_dit_model_factory(                          \
@@ -290,6 +272,20 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 #define REGISTER_IMAGE_PROCESSOR(ModelType, ImageProcessorClass) \
   REGISTER_IMAGE_PROCESSOR_WITH_VARNAME(                         \
       ModelType, ModelType, ImageProcessorClass)
+
+#define REGISTER_FEATURE_EXTRACTOR_WITH_VARNAME(                \
+    VarName, ModelType, FeatureExtractorClass)                  \
+  const bool VarName##_feature_extractor_registered = []() {    \
+    ModelRegistry::register_feature_extractor_factory(          \
+        #ModelType, [](const ModelArgs& args) {                 \
+          return std::make_unique<FeatureExtractorClass>(args); \
+        });                                                     \
+    return true;                                                \
+  }()
+
+#define REGISTER_FEATURE_EXTRACTOR(ModelType, FeatureExtractorClass) \
+  REGISTER_FEATURE_EXTRACTOR_WITH_VARNAME(                           \
+      ModelType, ModelType, FeatureExtractorClass)
 
 // Macro to register a model args loader with the ModelRegistry
 #define REGISTER_MODEL_ARGS_LOADER_WITH_VARNAME(VarName, ModelType, Loader) \
@@ -371,6 +367,61 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
     } else {                                                   \
       args->arg_name() = __VA_ARGS__();                        \
     }                                                          \
+  }()
+
+#define LOAD_ARG_WITH_PREFIX_JSON(json_prefix, ...)                         \
+  [&] {                                                                     \
+    auto prefix_json_data = json.data();                                    \
+    const std::vector<std::string> keys = absl::StrSplit(json_prefix, '.'); \
+                                                                            \
+    for (const auto& k : keys) {                                            \
+      if (prefix_json_data.contains(k)) {                                   \
+        prefix_json_data = prefix_json_data[k];                             \
+      } else {                                                              \
+        LOG(WARNING)                                                        \
+           <<  "config.json doesn't contains key: " << json_prefix          \
+           <<  ". The parameters wouldn't be loaded, "                      \
+           <<  "please check your config";                                  \
+        return;                                                             \
+      }                                                                     \
+    }                                                                       \
+                                                                            \
+    if (prefix_json_data.is_null() || !prefix_json_data.is_object()) {      \
+        LOG(WARNING)                                                        \
+           <<  "The value of provided key: " << json_prefix                 \
+           <<  " is not a json object, please use LOAD_ARG_OR to "          \
+           <<  "initialize the parameter";                                  \
+        return;                                                             \
+    }                                                                       \
+    auto prefix_json = JsonReader(prefix_json_data);                        \
+    __VA_ARGS__();                                                          \
+  }()
+
+#define LOAD_ARG_OR_PREFIX(arg_name, json_name, default_value)                     \
+  [&] {                                                                            \
+    auto value = args->arg_name();                                                 \
+    using value_type = remove_optional_t<decltype(value)>;                         \
+    args->arg_name() = prefix_json.value_or<value_type>(json_name, default_value); \
+  }()
+
+#define LOAD_ARG_PREFIX(arg_name, json_name)                          \
+  [&] {                                                               \
+    auto value = args->arg_name();                                    \
+    using value_type = remove_optional_t<decltype(value)>;            \
+    if (auto data_value = prefix_json.value<value_type>(json_name)) { \
+      args->arg_name() = data_value.value();                          \
+    }                                                                 \
+  }()
+
+#define LOAD_ARG_OR_FUNC_PREFIX(arg_name, json_name, ...)             \
+  [&] {                                                               \
+    auto value = args->arg_name();                                    \
+    using value_type = remove_optional_t<decltype(value)>;            \
+    if (auto data_value = prefix_json.value<value_type>(json_name)) { \
+      args->arg_name() = data_value.value();                          \
+    } else {                                                          \
+      args->arg_name() = __VA_ARGS__();                               \
+    }                                                                 \
   }()
 
 #define SET_ARG(arg_name, value) [&] { args->arg_name() = value; }()
