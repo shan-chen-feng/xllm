@@ -13,6 +13,7 @@ endif()
 set(TORCH_API_SRCS
   torch_api/npu_triton_fused_gdn_gating.cpp
   torch_api/npu_triton_recurrent_gated_delta_rule.cpp
+  torch_api/npu_triton_causal_conv1d_update.cpp
 )
 
 cc_library(
