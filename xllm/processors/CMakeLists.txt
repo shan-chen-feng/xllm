@@ -27,6 +27,9 @@ cc_library(
     glm4v_image_processor.h
     pywarpper_image_processor.h
     input_processor.h
+    audio_utils.h
+    feature_extractor.h
+    feature_extraction_whisper.h
   SRCS
     image_processor.cpp
     clip_image_processor.cpp
@@ -34,6 +37,8 @@ cc_library(
     qwen2_vl_image_processor.cpp
     glm4v_image_processor.cpp
     pywarpper_image_processor.cpp
+    feature_extractor.cpp
+    feature_extraction_whisper.cpp
   DEPS
     ${BASE_DEPS}
 )

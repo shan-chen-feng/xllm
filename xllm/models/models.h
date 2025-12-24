@@ -41,6 +41,9 @@ limitations under the License.
 #include "vlm/npu/qwen2_vl_embedding.h"  // IWYU pragma: keep
 #include "vlm/npu/qwen3_vl.h"            // IWYU pragma: keep
 #include "vlm/npu/qwen3_vl_moe.h"        // IWYU pragma: keep
+#include "vlm/npu/qwen3_omni_moe_thinker.h" // IWYU pragma: keep
+//#include "vlm/npu/qwen3_omni_moe_talker.h"  // IWYU pragma: keep
+#include "vlm/npu/qwen3_omni_moe.h"         // IWYU pragma: keep
 #elif defined(USE_MLU)
 #include "llm/deepseek_mtp.h"  // IWYU pragma: keep
 #include "llm/deepseek_v2.h"   // IWYU pragma: keep

@@ -110,6 +110,18 @@ VLMMaster::VLMMaster(const Options& options)
     image_processor_ = image_processor_factory(model_args_);
   }
 
+  if (model_args_.has_feature_extractor()) {
+     auto feature_extractor_factory =
+         ModelRegistry::get_feature_extractor_factory(model_args_.model_type());
+     if (feature_extractor_factory == nullptr) {
+       LOG(WARNING) << "No feature extractor defined for model type: "
+                    << model_args_.model_type();
+     } else {
+       feature_extractor_ = feature_extractor_factory(model_args_);
+       std::vector<torch::Tensor> feats= {torch::Tensor()};
+     }
+  }
+
   // construct tokenizer and handling threads
   tokenizer_ = engine_->tokenizer()->clone();
   threadpool_ =
@@ -222,6 +234,13 @@ void VLMMaster::handle_request(const std::vector<Message>& messages,
                         "Image processor process failed.");
     return;
   }
+  
+  //if (!mm_inputs.empty() && !feature_extractor_->process(mm_inputs, mm_data)) {
+  //  LOG(ERROR) << " feature extractor process failed.";
+  //  CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+  //                      "Image processor process failed.");
+  //  return;    
+  //}
 
   this->handle_request(messages, mm_data, sp, callback);
 }
