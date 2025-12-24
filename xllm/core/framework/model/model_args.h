@@ -158,6 +158,46 @@ struct ModelArgs {
   PROPERTY(bool, output_router_logits) = false;
   PROPERTY(int32_t, rope_scaling) = -1;
   PROPERTY(float, router_aux_loss_coef) = 0.001f;
+ 
+  //qwen3 omni
+  PROPERTY(int64_t, talker_text_hidden_size) = 1;
+  PROPERTY(int64_t, talker_text_vocab_size) = 1;
+  PROPERTY(int64_t, thinker_hidden_size) = 1;
+  PROPERTY(int64_t, talker_text_intermediate_size) = 1;
+
+  // qwen3_omni whisper_processor related args
+  PROPERTY(bool, has_feature_extractor) = false;
+  PROPERTY(int64_t, mm_audio_feature_size) = 0;
+  PROPERTY(int64_t, mm_audio_sampling_rate) = 0;
+  PROPERTY(int64_t, mm_audio_hop_length) = 0;
+  PROPERTY(int64_t, mm_audio_chunk_length) = 0;
+  PROPERTY(int64_t, mm_audio_n_fft) = 0;
+  PROPERTY(double, mm_audio_padding_value) = 0.0;
+  PROPERTY(double, mm_audio_dither) = 0.0;
+  PROPERTY(bool, mm_audio_return_attention_mask) = false;
+  PROPERTY(std::string, mm_audio_padding_side) = "right";
+
+  PROPERTY(bool, mm_audio_truncation) = false;
+  PROPERTY(int64_t, mm_audio_padding_strategy) = 0;
+  PROPERTY(int64_t, mm_audio_max_length) = 0;
+  PROPERTY(int64_t, mm_audio_pad_to_multiple_of) = 0;
+  PROPERTY(bool, mm_audio_do_normalize) = false;
+  PROPERTY(bool, mm_audio_return_token_timestamps) = false;
+
+  // qwen3_omni audio_encoder related args
+  PROPERTY(int64_t, audio_token_id) = 0;
+  PROPERTY(int64_t, mm_audio_num_attention_heads) = 0;
+  PROPERTY(int64_t, mm_audio_hidden_size) = 0;
+  PROPERTY(int64_t, mm_audio_downsample_hidden_size) = 0;
+  PROPERTY(int64_t, mm_audio_d_model) = 0;
+  PROPERTY(int64_t, mm_audio_num_mel_bins) = 0;
+  PROPERTY(int64_t, mm_audio_max_source_positions) = 0;
+  PROPERTY(bool, mm_audio_scale_embedding) = false;
+  PROPERTY(int64_t, mm_audio_n_window) = 0;
+  PROPERTY(int64_t, mm_audio_n_window_infer) = 0;
+  PROPERTY(int64_t, mm_audio_conv_chunksize) = 0;
+  PROPERTY(int64_t, mm_audio_encoder_layers) = 0;
+  PROPERTY(int64_t, mm_audio_output_dim) = 0;
 
   // Vision model's dropout
   PROPERTY(float, mm_dropout) = 0.0f;
@@ -393,6 +433,7 @@ struct ModelArgs {
   PROPERTY(float, max_shift) = 0;
   PROPERTY(int64_t, base_image_seq_len) = 0;
   PROPERTY(int64_t, max_image_seq_len) = 0;
+
 };
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
@@ -600,6 +641,36 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", base_image_seq_len: " << args.base_image_seq_len();
   os << ", max_image_seq_len: " << args.max_image_seq_len();
   os << "]";
+  os << ", has_feature_extractor: " << args.has_feature_extractor();
+  os << ", mm_audio_feature_size: " << args.mm_audio_feature_size();
+  os << ", mm_audio_sampling_rate: " << args.mm_audio_sampling_rate();
+  os << ", mm_audio_hop_length: " << args.mm_audio_hop_length();
+  os << ", mm_audio_chunk_length: " << args.mm_audio_chunk_length();
+  os << ", mm_audio_n_fft: " << args.mm_audio_n_fft();
+  os << ", mm_audio_padding_value: " << args.mm_audio_padding_value();
+  os << ", mm_audio_dither: " << args.mm_audio_dither();
+  os << ", mm_audio_return_attention_mask: " << args.mm_audio_return_attention_mask();
+  os << ", mm_audio_padding_side: " << args.mm_audio_padding_side();
+  os << ", mm_audio_truncation: " << args.mm_audio_truncation();
+  os << ", mm_audio_padding_strategy: " << args.mm_audio_padding_strategy();
+  os << ", mm_audio_max_length: " << args.mm_audio_max_length();
+  os << ", mm_audio_pad_to_multiple_of: " << args.mm_audio_pad_to_multiple_of();
+  os << ", mm_audio_do_normalize: " << args.mm_audio_do_normalize();
+  os << ", mm_audio_return_token_timestamps: " << args.mm_audio_return_token_timestamps();
+
+  os << ", audio_token_id: " << args.audio_token_id();
+  os << ", mm_audio_num_attention_heads: " << args.mm_audio_num_attention_heads();
+  os << ", mm_audio_hidden_size: " << args.mm_audio_hidden_size();
+  os << ", mm_audio_downsample_hidden_size: " << args.mm_audio_downsample_hidden_size();
+  os << ", mm_audio_d_model: " << args.mm_audio_d_model();
+  os << ", mm_audio_num_mel_bins: " << args.mm_audio_num_mel_bins();
+  os << ", mm_audio_max_source_positions: " << args.mm_audio_max_source_positions();
+  os << ", mm_audio_scale_embedding: " << args.mm_audio_scale_embedding();
+  os << ", mm_audio_n_window: " << args.mm_audio_n_window();
+  os << ", mm_audio_n_window_infer: " << args.mm_audio_n_window_infer();
+  os << ", mm_audio_conv_chunksize: " << args.mm_audio_conv_chunksize();
+  os << ", mm_audio_encoder_layers: " << args.mm_audio_encoder_layers();
+  os << ", mm_audio_output_dim: " << args.mm_audio_output_dim();
   return os;
 }
 

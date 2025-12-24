@@ -385,6 +385,22 @@ class Qwen3MoeForCausalLMImpl : public torch::nn::Module {
     lm_head_->merge_loaded_weights();
   }
 
+  void load_shared_model(std::shared_ptr<ModelLoader> loader,
+                  std::string prefix = "model." /*llm model weight prefix*/) {
+    for (const auto& state_dict : loader->get_state_dicts()) {
+      model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
+      lm_head_->load_state_dict(state_dict->get_dict_with_prefix("lm_head."));
+    }
+
+    // verify
+    model_->verify_loaded_weights(prefix);
+    lm_head_->verify_loaded_weights("lm_head.");
+
+    model_->merge_loaded_weights();
+    lm_head_->merge_loaded_weights();
+  }
+
+
   virtual void prepare_expert_weight(int32_t layer_id,
                                      const std::vector<int32_t>& expert_ids) {
     return;
