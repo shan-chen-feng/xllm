@@ -31,9 +31,9 @@ limitations under the License.
 #include "core/framework/tokenizer/tokenizer_args.h"
 #include "core/util/json_reader.h"
 #include "core/util/type_traits.h"  // IWYU pragma: keep
+#include "processors/feature_extractor.h"
 #include "processors/image_processor.h"
 #include "processors/input_processor.h"
-#include "processors/feature_extractor.h"
 
 namespace xllm {
 
@@ -124,12 +124,13 @@ class ModelRegistry {
 
   static void register_input_processor_factory(const std::string& name,
                                                InputProcessorFactory factory);
-  
+
   static void register_image_processor_factory(const std::string& name,
                                                ImageProcessorFactory factory);
- 
-  static void register_feature_extractor_factory(const std::string& name,
-                                               FeatureExtractorFactory factory);
+
+  static void register_feature_extractor_factory(
+      const std::string& name,
+      FeatureExtractorFactory factory);
 
   static CausalLMFactory get_causallm_factory(const std::string& name);
 
@@ -155,10 +156,10 @@ class ModelRegistry {
 
   static ImageProcessorFactory get_image_processor_factory(
       const std::string& name);
-  
+
   static FeatureExtractorFactory get_feature_extractor_factory(
       const std::string& name);
-  
+
   static std::string get_model_backend(const std::string& name);
 
  private:
@@ -401,26 +402,26 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 
 #define SET_ARG(arg_name, value) [&] { args->arg_name() = value; }()
 
-#define LOAD_ARG_WITH_PREFIX_JSON(json_prefix, ...)                         \
-  [&] {                                                                     \
-    auto prefix_json_data = json.sub_json(json_prefix);                     \
-    if (!prefix_json_data.has_value()) {                                    \
-       LOG(WARNING)                                                         \
-           <<  "config.json doesn't contains a sub json strsuct"            \
-           <<  "that starts with the key: " << json_prefix                  \
-           <<  ". The parameters wouldn't be loaded, "                      \ 
-           <<  "please check your config";                                  \
-       return;                                                              \
-    }                                                                       \
-    auto prefix_json = JsonReader(prefix_json_data.value());                \
-    __VA_ARGS__();                                                          \
+#define LOAD_ARG_WITH_PREFIX_JSON(json_prefix, ...)                     \
+  [&] {                                                                 \
+    auto prefix_json_data = json.sub_json(json_prefix);                 \
+    if (!prefix_json_data.has_value()) {                                \
+      LOG(WARNING) << "config.json doesn't contains a sub json strsuct" \
+                   << "that starts with the key: " << json_prefix       \
+                   << ". The parameters wouldn't be loaded, "                      \ 
+           << "please check your config";                               \
+      return;                                                           \
+    }                                                                   \
+    auto prefix_json = JsonReader(prefix_json_data.value());            \
+    __VA_ARGS__();                                                      \
   }()
 
-#define LOAD_ARG_OR_PREFIX(arg_name, json_name, default_value)                     \
-  [&] {                                                                            \
-    auto value = args->arg_name();                                                 \
-    using value_type = remove_optional_t<decltype(value)>;                         \
-    args->arg_name() = prefix_json.value_or<value_type>(json_name, default_value); \
+#define LOAD_ARG_OR_PREFIX(arg_name, json_name, default_value)      \
+  [&] {                                                             \
+    auto value = args->arg_name();                                  \
+    using value_type = remove_optional_t<decltype(value)>;          \
+    args->arg_name() =                                              \
+        prefix_json.value_or<value_type>(json_name, default_value); \
   }()
 
 #define LOAD_ARG_PREFIX(arg_name, json_name)                          \
@@ -442,6 +443,5 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
       args->arg_name() = __VA_ARGS__();                               \
     }                                                                 \
   }()
-
 
 }  // namespace xllm

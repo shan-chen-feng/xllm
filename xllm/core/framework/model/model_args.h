@@ -158,8 +158,8 @@ struct ModelArgs {
   PROPERTY(bool, output_router_logits) = false;
   PROPERTY(int32_t, rope_scaling) = -1;
   PROPERTY(float, router_aux_loss_coef) = 0.001f;
- 
-  //qwen3 omni
+
+  // qwen3 omni
   PROPERTY(int64_t, talker_text_hidden_size) = 1;
   PROPERTY(int64_t, talker_text_vocab_size) = 1;
   PROPERTY(int64_t, thinker_hidden_size) = 1;
@@ -434,6 +434,35 @@ struct ModelArgs {
   PROPERTY(int64_t, base_image_seq_len) = 0;
   PROPERTY(int64_t, max_image_seq_len) = 0;
 
+  // qwen3_omni_code2wavargs
+  PROPERTY(int64_t, code2wav_config_codebook_size) = 2048;
+  PROPERTY(int64_t, code2wav_config_hidden_size) = 1024;
+  PROPERTY(int64_t, code2wav_config_max_position_embeddings) = 8000;
+  PROPERTY(double, code2wav_config_rope_theta) = 10000.0;
+  PROPERTY(int64_t, code2wav_config_num_attention_heads) = 16;
+  PROPERTY(int64_t, code2wav_config_num_key_value_heads) = 16;
+  PROPERTY(bool, code2wav_config_attention_bias) = false;
+  PROPERTY(int64_t, code2wav_config_sliding_window) = 72;
+  PROPERTY(int64_t, code2wav_config_intermediate_size) = 3072;
+  PROPERTY(std::string, code2wav_config_hidden_act) = std::string("silu");
+  PROPERTY(double, code2wav_config_layer_scale_initial_scale) = 0.01;
+  PROPERTY(double, code2wav_config_rms_norm_eps) = 1e-5;
+  PROPERTY(int64_t, code2wav_config_num_hidden_layers) = 8;
+  PROPERTY(int64_t, code2wav_config_num_quantizers) = 16;
+  PROPERTY(int64_t, code2wav_config_decoder_dim) = 1536;
+  PROPERTY(double, code2wav_config_attention_dropout) = 0.0;
+  PROPERTY(std::vector<int>,
+           code2wav_config_upsampling_ratios_vec) = std::vector<int> {
+    2,
+    2
+  };
+  PROPERTY(std::vector<int>,
+           code2wav_config_upsample_rates_vec) = std::vector<int> {
+    8,
+    5,
+    4,
+    3
+  };
 };
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
@@ -649,22 +678,27 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", mm_audio_n_fft: " << args.mm_audio_n_fft();
   os << ", mm_audio_padding_value: " << args.mm_audio_padding_value();
   os << ", mm_audio_dither: " << args.mm_audio_dither();
-  os << ", mm_audio_return_attention_mask: " << args.mm_audio_return_attention_mask();
+  os << ", mm_audio_return_attention_mask: "
+     << args.mm_audio_return_attention_mask();
   os << ", mm_audio_padding_side: " << args.mm_audio_padding_side();
   os << ", mm_audio_truncation: " << args.mm_audio_truncation();
   os << ", mm_audio_padding_strategy: " << args.mm_audio_padding_strategy();
   os << ", mm_audio_max_length: " << args.mm_audio_max_length();
   os << ", mm_audio_pad_to_multiple_of: " << args.mm_audio_pad_to_multiple_of();
   os << ", mm_audio_do_normalize: " << args.mm_audio_do_normalize();
-  os << ", mm_audio_return_token_timestamps: " << args.mm_audio_return_token_timestamps();
+  os << ", mm_audio_return_token_timestamps: "
+     << args.mm_audio_return_token_timestamps();
 
   os << ", audio_token_id: " << args.audio_token_id();
-  os << ", mm_audio_num_attention_heads: " << args.mm_audio_num_attention_heads();
+  os << ", mm_audio_num_attention_heads: "
+     << args.mm_audio_num_attention_heads();
   os << ", mm_audio_hidden_size: " << args.mm_audio_hidden_size();
-  os << ", mm_audio_downsample_hidden_size: " << args.mm_audio_downsample_hidden_size();
+  os << ", mm_audio_downsample_hidden_size: "
+     << args.mm_audio_downsample_hidden_size();
   os << ", mm_audio_d_model: " << args.mm_audio_d_model();
   os << ", mm_audio_num_mel_bins: " << args.mm_audio_num_mel_bins();
-  os << ", mm_audio_max_source_positions: " << args.mm_audio_max_source_positions();
+  os << ", mm_audio_max_source_positions: "
+     << args.mm_audio_max_source_positions();
   os << ", mm_audio_scale_embedding: " << args.mm_audio_scale_embedding();
   os << ", mm_audio_n_window: " << args.mm_audio_n_window();
   os << ", mm_audio_n_window_infer: " << args.mm_audio_n_window_infer();
