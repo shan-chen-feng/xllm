@@ -61,7 +61,7 @@ torch::Tensor MPositionHelper::get_positions() {
       second_per_grid_ts = res.value();
     
     torch::Tensor feature_attention_mask;
-    if (auto res = mm_data.get<torch::Tensor>("feature_attention_mask"))
+    if (auto res = mm_data.get<torch::Tensor>("attention_mask"))
       feature_attention_mask = res.value();
 
     torch::Tensor feat_length;
@@ -145,11 +145,11 @@ std::tuple<torch::Tensor, int> MPositionHelper::get_positions_omni(
   video_grid_thw.print();
         
   int seq_len = input_ids.size(0);
-  
+  LOG(INFO) << "after size"; 
 
-  if (seq_len > 0 && (image_grid_thw.defined() || video_grid_thw.defined() || audio_seqlens.defined())){ 
+  if (seq_len > 0 && (image_grid_thw.defined() || video_grid_thw.defined())){ 
     torch::Tensor second_per_grids;
-    if (video_grid_thw.numel() > 0) {
+    if (video_grid_thw.defined()) {
         double fps = args_.mm_fps();
         int temporal_patch_size = args_.mm_temporal_patch_size();
         double second_per_grid_ts_value = temporal_patch_size/fps;
@@ -165,7 +165,7 @@ std::tuple<torch::Tensor, int> MPositionHelper::get_positions_omni(
     std::cout << vision_start_indices;
   
     torch::Tensor vision_tokens;
-    if (vision_start_indices.numel() > 0) {
+    if (vision_start_indices.defined()) {
         vision_tokens = input_ids.index({
             vision_start_indices + 1
         });
@@ -207,7 +207,8 @@ std::tuple<torch::Tensor, int> MPositionHelper::get_positions_omni(
             
         int ed_vision_start = seq_len + 1;
         int ed_audio_start = seq_len + 1;
-            
+        LOG(INFO) << ed_vision_start;
+        LOG(INFO) << ed_audio_start; 
         if (remain_videos > 0 || remain_images > 0) {
             auto it = std::find(input_tokens_vec.begin() + st, input_tokens_vec.end(), 
                                vision_start_token_id);
@@ -226,16 +227,21 @@ std::tuple<torch::Tensor, int> MPositionHelper::get_positions_omni(
             }
         }
         LOG(INFO) << 3;
+        LOG(INFO) << ed_vision_start;
+        LOG(INFO) << ed_audio_start; 
         int min_ed = std::min(ed_vision_start, ed_audio_start);
         int text_len = min_ed - st;
-                    
+        LOG(INFO) << "text_len";
+        LOG(INFO) << min_ed;
+        LOG(INFO) << st;
+        
         if (text_len != 0) {
             auto text_pos_ids = torch::arange(text_len, torch::kInt32)
                 .view({1, -1}).expand({3, -1}) + st_idx;
             llm_pos_ids_list.push_back(text_pos_ids);
             st_idx += text_len;
         }
-                    
+        LOG(INFO) << "3.1"; 
         int bos_len, eos_len;
         if (min_ed == ed_vision_start && ed_vision_start + 1 == ed_audio_start) {
             bos_len = 2;
@@ -247,6 +253,7 @@ std::tuple<torch::Tensor, int> MPositionHelper::get_positions_omni(
                     
         auto bos_pos_ids = torch::arange(bos_len, torch::kInt32)
             .view({1, -1}).expand({3, -1}) + st_idx;
+        LOG(INFO) << "3.2";
         llm_pos_ids_list.push_back(bos_pos_ids);
         st_idx += bos_len;
         LOG(INFO) << 4;
@@ -392,12 +399,15 @@ std::tuple<torch::Tensor, int> MPositionHelper::get_positions_omni(
     return {llm_positions, mrope_position_delta}; 
     
   } else {
-    input_ids = input_ids.unsqueeze(0).expand({3, -1, -1});
-    auto max_position_ids = std::get<0>(input_ids.max(0, false)).max(-1, true);
+    LOG(INFO) << "inside else";
+    auto text_pos_ids = torch::arange(input_ids.size(0), torch::kInt32)
+                .view({1, -1}).expand({3, -1});
+    auto max_position_ids = std::get<0>(text_pos_ids.max(0, false)).max(-1, true);
+    std::cout << std::get<0>(max_position_ids);
     auto mrope_position_deltas = std::get<0>(max_position_ids).item<int>()+ 1 - 
                                         input_ids.size(0);
             
-    return std::make_tuple(input_ids, mrope_position_deltas);
+    return std::make_tuple(text_pos_ids, mrope_position_deltas);
   }
  
             
