@@ -16,7 +16,7 @@ limitations under the License.
 
 #include "json_reader.h"
 
-//#include <glog/logging.h>
+#include <glog/logging.h>
 
 #include <filesystem>
 #include <fstream>
