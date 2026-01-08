@@ -315,7 +315,7 @@ public:
  
         auto cu_seqlens = torch::tensor(cu_chunk_lens, 
             torch::TensorOptions().device(aftercnn_lens_calc.device()).dtype(torch::kInt32))
-            .cumsum(-1).to(torch::kInt32);
+            .to(torch::kInt32);
         LOG(INFO) << 11;
         ModelInputParams& input_params_new =
            const_cast<ModelInputParams&>(input_params);
@@ -1075,7 +1075,7 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Mo
       const std::optional<Qwen3_OmniAudioInputs>& audio_input, 
       const ModelInputParams& input_params) {
     auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
-    
+    torch::save(inputs_embeds, "inputs_embeds_cpp.pt");    
     torch::Tensor multimodal_mask;
     std::vector<torch::Tensor> multimodal_deep_stacks;
     if (image_input) {
@@ -1088,8 +1088,15 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Mo
       // merge
       multimodal_mask = torch::isin(input_ids, model_args_.image_token_id());
       inputs_embeds.index_put_({multimodal_mask}, image_embeds);
+      torch::save(image_embeds, "image_embeds_cpp.pt");
+      torch::save(image_input->pixel_values, "pixel_values_cpp.pt");
     }
     if (video_input) {
+      /*
+      auto pixel_values_videos = torch::ones({6240, 1536});
+      auto state_dict = StateDictFromSafeTensor::load("/export/home/shanchenfeng/xllm_build/xllm_qwen_embed/qwen_omni_code/pixel_values_videos_py_load.pt");
+      bool is_conv_out_weight_loaded_ = false;      weight::load_weight(*state_dict, "raw_video", pixel_values_videos, is_conv_out_weight_loaded_);
+      */
       // visual
       auto [video_embeds, video_deep_stacks] =
           visual_(video_input->pixel_values_videos.to(options_),
@@ -1098,8 +1105,8 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Mo
       // merge
       auto video_mask = torch::isin(input_ids, model_args_.video_token_id());
       inputs_embeds.index_put_({video_mask}, video_embeds);
-      
-      
+      torch::save(video_embeds, "video_embeds_cpp.pt");
+      torch::save(video_input->pixel_values_videos, "pixel_values_videos_cpp.pt"); 
       if (multimodal_mask.defined() && !multimodal_deep_stacks.empty()){
         torch::Tensor visual_pos_masks = video_mask | multimodal_mask;
 
@@ -1138,8 +1145,18 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Mo
       auto bool_mask = audio_input->feature_attention_mask.to(torch::kBool);
       auto input_features = permuted.index({bool_mask}).permute({1, 0}).to(options_);
       auto audio_features = audio_tower_->forward(input_features, input_params, feature_lens);
+      /* 
+      auto state_dict = StateDictFromSafeTensor::load("/export/home/shanchenfeng/xllm_build/xllm_qwen_embed/qwen_omni_code/audio_features_py_load.pt");
+      auto input_featss = torch::ones({38, 2048});
+      bool is_conv_out_weight_loaded_ = false;
+      weight::load_weight(*state_dict, "raw_speech", audio_features, is_conv_out_weight_loaded_);
+      audio_features=audio_features.to(options_);
+      */
       auto audio_mask = torch::isin(input_ids, model_args_.audio_token_id());
-      //inputs_embeds.index_put_({audio_mask}, audio_features);
+      LOG(INFO) << "audio_mask shape";
+      std::cout << audio_mask.sum(-1);
+      inputs_embeds.index_put_({audio_mask}, audio_features);
+      torch::save(audio_features, "audio_features_cpp.pt");
     }
 
     if (multimodal_mask.defined())
@@ -1147,7 +1164,8 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Mo
     if (!multimodal_deep_stacks.empty())
       input_params.deep_stacks = multimodal_deep_stacks; 
      
-    
+    torch::save(inputs_embeds, "final_inputs_embeds_cpp.pt");
+    //std::exit(0);
     return inputs_embeds;
   }
 

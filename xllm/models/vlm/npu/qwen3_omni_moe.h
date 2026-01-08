@@ -39,6 +39,8 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
   }
 
   void process(std::string& prompt, const MMData& mm_data) override {
+    prompt = "<|im_start|>user\please describe the audio<|audio_start|><|audio_pad|><|audio_end|><|im_end|>\n<|im_start|>assistant";
+    prompt = "<|im_start|>user\nplease describe the audio<|vision_start|><|image_pad|><|vision_end|><|vision_start|><|video_pad|><|vision_end|><|audio_start|><|audio_pad|><|audio_end|><|im_end|>\n<|im_start|>assistant\n";
     LOG(INFO) << prompt;
     torch::Tensor image_grid_thw;
     if (auto res = mm_data.get<torch::Tensor>("image_grid_thw"))
@@ -49,7 +51,7 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
       video_grid_thw = res.value();
 
     torch::Tensor feature_attention_mask;
-    if (auto res = mm_data.get<torch::Tensor>("feature_attention_mask"))
+    if (auto res = mm_data.get<torch::Tensor>("attention_mask"))
       feature_attention_mask = res.value();
     
     torch::Tensor feat_length;
