@@ -16,7 +16,6 @@ limitations under the License.
 
 #pragma once
 #include <absl/strings/str_split.h>
-#include <glog/logging.h>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -65,9 +64,6 @@ class JsonReader {
   template <typename T, typename T2>
   T value_or(const std::string& key, T2 default_value) const {
     if (auto data = value<T>(key)) {
-      LOG(INFO) << "hhhh";
-      LOG(INFO) << key;
-      LOG(INFO) << data.value();
       return data.value();
     }
     // may introduce implicit conversion from T2 to T
