@@ -111,15 +111,15 @@ VLMMaster::VLMMaster(const Options& options)
   }
 
   if (model_args_.has_feature_extractor()) {
-     auto feature_extractor_factory =
-         ModelRegistry::get_feature_extractor_factory(model_args_.model_type());
-     if (feature_extractor_factory == nullptr) {
-       LOG(WARNING) << "No feature extractor defined for model type: "
-                    << model_args_.model_type();
-     } else {
-       feature_extractor_ = feature_extractor_factory(model_args_);
-       std::vector<torch::Tensor> feats= {torch::Tensor()};
-     }
+    auto feature_extractor_factory =
+        ModelRegistry::get_feature_extractor_factory(model_args_.model_type());
+    if (feature_extractor_factory == nullptr) {
+      LOG(WARNING) << "No feature extractor defined for model type: "
+                   << model_args_.model_type();
+    } else {
+      feature_extractor_ = feature_extractor_factory(model_args_);
+      std::vector<torch::Tensor> feats = {torch::Tensor()};
+    }
   }
 
   // construct tokenizer and handling threads
@@ -432,7 +432,7 @@ std::shared_ptr<Request> VLMMaster::generate_request(
     LOG(ERROR) << " feature extractor process failed.";
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "Image processor process failed.");
-    return;
+    return nullptr;
   }
 
   auto prompt = chat_template_->apply(messages);
