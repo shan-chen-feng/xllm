@@ -16,7 +16,7 @@ limitations under the License.
 
 #pragma once
 #include <absl/strings/str_split.h>
-
+#include <glog/logging.h>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -37,6 +37,14 @@ namespace xllm {
 //
 class JsonReader {
  public:
+  JsonReader() = default;
+
+  explicit JsonReader(nlohmann::json&& json_data)
+        : data_(std::move(json_data)) {}
+    
+  JsonReader(const nlohmann::json& json_data)
+        : data_(json_data) {}
+  
   // parse the json file, return true if success
   bool parse(const std::string& json_file_path);
 
@@ -57,6 +65,9 @@ class JsonReader {
   template <typename T, typename T2>
   T value_or(const std::string& key, T2 default_value) const {
     if (auto data = value<T>(key)) {
+      LOG(INFO) << "hhhh";
+      LOG(INFO) << key;
+      LOG(INFO) << data.value();
       return data.value();
     }
     // may introduce implicit conversion from T2 to T
@@ -81,6 +92,23 @@ class JsonReader {
       return std::nullopt;
     }
     return data.get<T>();
+  }
+
+  std::optional<nlohmann::json> sub_json(const std::string& key) const {
+    const std::vector<std::string> keys = absl::StrSplit(key, '.'); 
+    nlohmann::json sub_data = data_;
+    for (const auto& k : keys) {
+      if (sub_data.contains(k)) {
+        sub_data = sub_data[k];         
+      } else {                                                              
+        return std::nullopt;                                
+      }                                                                     
+    }                                                                       
+                                                                            
+    if (sub_data.is_null() || !sub_data.is_object()) {      
+        return std::nullopt;                                          
+    }
+    return sub_data;
   }
 
   nlohmann::json data() const { return data_; }

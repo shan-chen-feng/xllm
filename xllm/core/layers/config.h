@@ -118,6 +118,10 @@ UNIFY_CLASS_NAME(Qwen3_VisionLayerImpl, Qwen3VisionEncoderLayerImpl)
 #endif
 
 #if defined(USE_NPU)
+#include "npu/npu_qwen3_audio_encoder_layer_impl.h"
+#endif
+
+#if defined(USE_NPU)
 #include "npu/npu_siglip_encoder_layer_impl.h"
 #else
 REGISTER_NOT_IMPLEMENTED_CLASS(SiglipEncoderLayerImpl);
