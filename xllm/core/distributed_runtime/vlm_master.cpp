@@ -431,7 +431,7 @@ std::shared_ptr<Request> VLMMaster::generate_request(
   if (!mm_inputs.empty() && !feature_extractor_->process(mm_inputs, mm_data)) {
     LOG(ERROR) << " feature extractor process failed.";
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Image processor process failed.");
+                        "Feature extractor process failed.");
     return nullptr;
   }
 
