@@ -122,11 +122,13 @@ bool MMData::foreach (MMDataItem::IVisitor& v) {
   if (!hold<MMItemVec>()) return false;
 
   auto& vec = items<MMItemVec>();
+  LOG(INFO) << "before visit";
   for (auto& item : vec) {
     if (!v.visit(item)) {
       return false;
     }
   }
+  LOG(INFO) << "after visit";
   return true;
 }
 
@@ -134,13 +136,14 @@ bool MMData::foreach (MMDictItem::IVisitor& v) {
   if (!valid()) return false;
 
   if (!hold<MMDict>()) return false;
-
+  LOG(INFO) << "before visit it";
   auto& dict = items<MMDict>();
   for (auto& pair : dict) {
     if (!v.visit(pair.first, pair.second)) {
       return false;
     }
   }
+  LOG(INFO) << "after visit it";
   return true;
 }
 
@@ -149,18 +152,22 @@ bool MMData::foreach (IItemVisitor& v) {
 
   if (hold<MMItemVec>()) {
     auto& vec = items<MMItemVec>();
+    LOG(INFO) << "before visit it";
     for (auto& item : vec) {
       if (!v.visit(item)) {
         return false;
       }
     }
+    LOG(INFO) << "after visit it";
   } else if (hold<MMDict>()) {
     auto& dict = items<MMDict>();
+    LOG(INFO) << "before visit dict";
     for (auto& pair : dict) {
       if (!v.visit(pair.first, pair.second)) {
         return false;
       }
     }
+    LOG(INFO) << "after visit dict";
   }
   return true;
 }

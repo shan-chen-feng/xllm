@@ -90,6 +90,7 @@ bool EncoderInputGatherVisitor::visit(MMDataItem& item) {
 
 bool EncoderInputGatherVisitor::finish(MMBatchData& mm_data) {
   MMDict dict;
+  LOG(INFO) << "before safe_concat";
   for (const auto& pair : datas_) {
     torch::Tensor tar;
     if (safe_concat(pair.second, tar)) {
@@ -117,6 +118,7 @@ bool EncoderOutputScatterVisitor::visit(MMDataItem& item) {
     prefix = "video|";
     idx = &video_idx;
   } else if (item.type() == MMType::AUDIO) {
+    LOG(INFO) << "inside visit audio";
     prefix = "audio|";
     idx = &audio_idx;
   } else {
@@ -125,6 +127,8 @@ bool EncoderOutputScatterVisitor::visit(MMDataItem& item) {
   }
 
   for (const auto& [key, value] : data_) {
+    LOG(INFO) << "key is " << key;
+    LOG(INFO) << "prefix is " << prefix;
     const auto& vec = std::get<std::vector<torch::Tensor>>(value);
     if (absl::StartsWith(key, prefix)) {
       std::string name = key.substr(prefix.length());
