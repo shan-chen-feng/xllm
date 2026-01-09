@@ -159,7 +159,9 @@ struct ModelArgs {
   PROPERTY(int32_t, rope_scaling) = -1;
   PROPERTY(float, router_aux_loss_coef) = 0.001f;
 
-  // qwen3_omni_moe_thinker
+  // qwen3_omni_moe_thinker related args
+
+  // qwen3_omni qwen25vl video processor args
   PROPERTY(int64_t, mm_position_id_per_seconds) = 0;
   PROPERTY(double, mm_fps) = 0;
 
