@@ -184,7 +184,7 @@ struct ModelArgs {
   PROPERTY(bool, mm_audio_return_token_timestamps) = false;
 
   // qwen3_omni audio_encoder related args
-  PROPERTY(int64_t, audio_token_id) = 0;
+  PROPERTY(int32_t, audio_token_id) = 0;
   PROPERTY(int64_t, audio_start_token_id) = 0;
   PROPERTY(int64_t, audio_end_token_id) = 0;
   PROPERTY(int64_t, mm_audio_num_attention_heads) = 0;

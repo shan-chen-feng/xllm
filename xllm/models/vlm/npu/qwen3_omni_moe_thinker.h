@@ -23,74 +23,73 @@ limitations under the License.
 #include <c10/core/ScalarType.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
+#include <unistd.h>
 
 #include <unordered_map>
 
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context.h"
-#include "core/layers/lm_head.h"
+#include "core/layers/npu/npu_lm_head_impl.h"
+#include "core/layers/npu/npu_qwen3_vision_encoder_layer_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
-#include "core/layers/qwen3_vision_encode_layer.h"
 #include "core/layers/qwen3_audio_encode_layer.h"
+#include "framework/state_dict/state_dict.h"
 #include "models/llm/npu/qwen3_moe.h"
 #include "models/model_registry.h"
+#include "processors/feature_extraction_whisper.h"
 #include "processors/input_processor.h"
 #include "processors/qwen2_vl_image_processor.h"
-#include "processors/feature_extraction_whisper.h"
 #include "qwen2_5_vl.h"
 #include "qwen3_vl.h"
-#include "xllm_kernels/core/include/atb_speed/log.h"
 #include "torch_npu/csrc/core/npu/register/OptionRegister.h"
-
-#include "framework/state_dict/state_dict.h"
-#include <unistd.h>
+#include "xllm_kernels/core/include/atb_speed/log.h"
 
 namespace xllm {
 
-void SetDefaultAllowInternalFromatDisable()
-{
-    auto allow_internal_format = c10_npu::option::GetOption("ALLOW_INTERNAL_FORMAT");
-    if (allow_internal_format.has_value() && allow_internal_format.value() != "") {
-        return;
-    }
+void SetDefaultAllowInternalFromatDisable() {
+  auto allow_internal_format =
+      c10_npu::option::GetOption("ALLOW_INTERNAL_FORMAT");
+  if (allow_internal_format.has_value() &&
+      allow_internal_format.value() != "") {
+    return;
+  }
 
-    c10_npu::option::SetOption("ALLOW_INTERNAL_FORMAT", "disable");
-    ASCEND_LOGI("Set ALLOW_INTERNAL_FORMAT default value disable.");
+  c10_npu::option::SetOption("ALLOW_INTERNAL_FORMAT", "disable");
+  ASCEND_LOGI("Set ALLOW_INTERNAL_FORMAT default value disable.");
 }
 
-
 class SinusoidsPositionEmbeddingImpl : public torch::nn::Module {
-public:
-    SinusoidsPositionEmbeddingImpl(int64_t length, int64_t channels, double max_timescale = 10000.0) {
-        if (channels % 2 != 0) {
-            CHECK(false)
-              << "SinusoidsPositionEmbedding needs even channels input";
-        }
-        
-        double log_timescale_increment = std::log(max_timescale) / (channels / 2 - 1);
-        torch::Tensor inv_timescales = torch::exp(-log_timescale_increment * 
-            torch::arange(channels / 2)).to(torch::kFloat32);
-        
-        torch::Tensor scaled_time = torch::arange(length).unsqueeze(1) * inv_timescales.unsqueeze(0);
-        
-        pos_embedding_ = torch::cat({
-            torch::sin(scaled_time),
-            torch::cos(scaled_time)
-        }, 1);
-        
+ public:
+  SinusoidsPositionEmbeddingImpl(int64_t length,
+                                 int64_t channels,
+                                 double max_timescale = 10000.0) {
+    if (channels % 2 != 0) {
+      CHECK(false) << "SinusoidsPositionEmbedding needs even channels input";
     }
-    
-    torch::Tensor forward(int64_t seqlen) {
-        return pos_embedding_.slice(0, 0, seqlen);
-    }
-    
-private:
-   torch::Tensor pos_embedding_;
+
+    double log_timescale_increment =
+        std::log(max_timescale) / (channels / 2 - 1);
+    torch::Tensor inv_timescales =
+        torch::exp(-log_timescale_increment * torch::arange(channels / 2))
+            .to(torch::kFloat32);
+
+    torch::Tensor scaled_time =
+        torch::arange(length).unsqueeze(1) * inv_timescales.unsqueeze(0);
+
+    pos_embedding_ =
+        torch::cat({torch::sin(scaled_time), torch::cos(scaled_time)}, 1);
+  }
+
+  torch::Tensor forward(int64_t seqlen) {
+    return pos_embedding_.slice(0, 0, seqlen);
+  }
+
+ private:
+  torch::Tensor pos_embedding_;
 };
 
 TORCH_MODULE(SinusoidsPositionEmbedding);
-
 
 class Qwen3_Omni_Moe_Thinker_AudioBlockImpl : public torch::nn::Module {
  public:
@@ -105,12 +104,8 @@ class Qwen3_Omni_Moe_Thinker_AudioBlockImpl : public torch::nn::Module {
                         std::vector<int>& cu_seq_len_vec,
                         ModelInputParams& input_params,
                         int node_id) {
-    return encoder_layer_(x,
-                          cu_seq_len,
-                          cu_seq_len_vec,
-                          input_params,
-                          node_id);
-  }     
+    return encoder_layer_(x, cu_seq_len, cu_seq_len_vec, input_params, node_id);
+  }
 
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict) {
@@ -132,256 +127,290 @@ class Qwen3_Omni_Moe_Thinker_AudioBlockImpl : public torch::nn::Module {
 };
 TORCH_MODULE(Qwen3_Omni_Moe_Thinker_AudioBlock);
 
-
 class Qwen3_Omni_Moe_Thinker_AudioTransformerImpl : public torch::nn::Module {
-public:
-    Qwen3_Omni_Moe_Thinker_AudioTransformerImpl(const ModelContext& context){
-        auto model_args = context.get_model_args();
-        options_ = context.get_tensor_options();
-        auto downsample_hidden_size = model_args.mm_audio_downsample_hidden_size();
-        embed_dim_ = model_args.mm_audio_d_model();
-        num_mel_bins_ = model_args.mm_audio_num_mel_bins();
-        max_source_positions_ = model_args.mm_audio_max_source_positions();
-        embed_scale_ = model_args.mm_audio_scale_embedding() ? std::sqrt(embed_dim_) : 1.0;
-        n_window_ = model_args.mm_audio_n_window();
-        
-        positional_embedding_ = register_module(
-            "positional_embedding",
-            SinusoidsPositionEmbedding(max_source_positions_, embed_dim_)
-        );
-        
-        layers_ = register_module("layers", torch::nn::ModuleList());        
-        for (int64_t i = 0; i < model_args.mm_audio_encoder_layers(); ++i) {
-            auto layer = Qwen3_Omni_Moe_Thinker_AudioBlock(context);
-            layers_->push_back(layer);
-        }
-        
-        ln_post_ = register_module("ln_post", 
-            torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim_})
-                                      .elementwise_affine(true)));
-         
-        conv2d1_ = register_module("conv2d1",
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(1, downsample_hidden_size, 3)
-                .stride(2).padding(1).bias(true)));
-        
-        conv2d2_ = register_module("conv2d2",
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(
-                downsample_hidden_size, downsample_hidden_size, 3)
-                .stride(2).padding(1).bias(true)));
-        
-        conv2d3_ = register_module("conv2d3",
-            torch::nn::Conv2d(torch::nn::Conv2dOptions(
-                downsample_hidden_size, downsample_hidden_size, 3)
-                .stride(2).padding(1).bias(true)));
-        
-        int64_t conv_output_dim = ((((num_mel_bins_ + 1) / 2 + 1) / 2 + 1) / 2);
- 
-        conv_out_ = register_module("conv_out",
-            torch::nn::Linear(
-                torch::nn::LinearOptions(downsample_hidden_size * conv_output_dim, embed_dim_)
-                    .bias(false)));
-        
-        proj1_ = register_module("proj1",
-            torch::nn::Linear(
-                torch::nn::LinearOptions(embed_dim_, embed_dim_)
-                    .bias(true)));
-        
-        
-        proj2_ = register_module("proj2",
-            torch::nn::Linear(
-                torch::nn::LinearOptions(embed_dim_, model_args.mm_audio_output_dim())
-                    .bias(true)));
-        
-        n_window_infer_ = model_args.mm_audio_n_window_infer();
-        conv_chunksize_ = model_args.mm_audio_conv_chunksize();
-        
-    }
-    
-    torch::Tensor forward(
-        const torch::Tensor& input_features,
-        const ModelInputParams& input_params,
-        const torch::Tensor& feature_lens = torch::Tensor()) {
-        
-        auto aftercnn_lens_calc = get_feat_extract_output_lengths(feature_lens);
-        
-        auto chunk_num = torch::ceil(feature_lens / (n_window_ * 2)).to(torch::kLong);
-        int64_t total_chunks = chunk_num.sum().item<int64_t>();
-        
-        auto chunk_lengths = torch::full(
-            {total_chunks},
-            n_window_ * 2,
-            torch::TensorOptions().dtype(torch::kLong).device(feature_lens.device()));
-        
-        auto padded_chunk_num = torch::nn::functional::pad(chunk_num, torch::nn::functional::PadFuncOptions({1, 0}).value(-1));
-        auto tail_chunk_index = padded_chunk_num.cumsum(0).slice(0, 1);
-        
-        auto remainder = feature_lens % (n_window_ * 2);
-        chunk_lengths.index_put_({torch::indexing::TensorIndex(tail_chunk_index)}, remainder);
-        chunk_lengths.index_put_({torch::indexing::TensorIndex(chunk_lengths == 0)}, n_window_ * 2);
-        
-        auto input_t = input_features.t();
-        auto chunk_lengths_list = chunk_lengths.to(torch::kCPU).contiguous();
-       
-        auto chunk_lengths_cpu = chunk_lengths.to(torch::kCPU).contiguous();
-        std::cout << chunk_lengths_cpu;    
-        at::IntArrayRef split_sizes(
-            chunk_lengths_cpu.data_ptr<int64_t>(),
-            static_cast<size_t>(chunk_lengths_cpu.size(0))
-        );
-    
-        auto chunk_list = input_t.split_with_sizes(split_sizes, 0); 
-        
-        auto padded_feature = torch::nn::utils::rnn::pad_sequence(chunk_list, true)
-            .transpose(1, 2);
-        torch::save(padded_feature, "padded_feature.pt");        
-        auto feature_lens_after_cnn = get_feat_extract_output_lengths(chunk_lengths.to(torch::kLong));
-        LOG(INFO) << 2;   
-        std::vector<torch::Tensor> mask_tensors;
-        for (int64_t i = 0; i < feature_lens_after_cnn.size(0); ++i) {
-            int64_t length = feature_lens_after_cnn[i].item<int64_t>();
-            LOG(INFO) << length;
-            mask_tensors.push_back(torch::ones(
-                {length},
-                torch::TensorOptions().dtype(torch::kBool).device(padded_feature.device())));
-        }
-        LOG(INFO) << 3;
-        auto padded_mask_after_cnn = torch::nn::utils::rnn::pad_sequence(mask_tensors, true);
-        
-        padded_feature = padded_feature.unsqueeze(1);
-        
-        std::vector<torch::Tensor> padded_embeds;
-        int64_t batch_size = padded_feature.size(0);
-        LOG(INFO) << 4;
-        int64_t counter=0;
-        for (int64_t start = 0; start < batch_size; start += conv_chunksize_) {
-            int64_t end = std::min(start + conv_chunksize_, batch_size);
-            LOG(INFO) << start;
-            LOG(INFO) << end;
-            
-            auto chunk = padded_feature.slice(0, start, end);
-            if(counter==0)
-               torch::save(conv2d1_(chunk), "conv1.pt");
-            auto embed = torch::gelu(conv2d1_(chunk));
-            if(counter==0)
-               torch::save(embed, "gelu.pt");
-            embed = torch::gelu(conv2d2_(embed));
-            embed = torch::gelu(conv2d3_(embed));
-            if(counter==0)
-               torch::save(embed, "final_conv.pt");
-            counter+=1;
-            
-            padded_embeds.push_back(embed);
-        }
-        LOG(INFO) << 5;
-        auto padded_embed = torch::cat(padded_embeds, 0);
-        
-        auto [b, c, f, t] = std::make_tuple(
-            padded_embed.size(0),
-            padded_embed.size(1),
-            padded_embed.size(2),
-            padded_embed.size(3));
-        
-        auto reshaped = padded_embed.permute({0, 3, 1, 2}).contiguous().view({b, t, c * f});
-        padded_embed = conv_out_(reshaped);
-        LOG(INFO) << 6;
-        auto pos_embed = positional_embedding_->forward(padded_embed.size(1))
-            .unsqueeze(0)
-            .to(options_.device(), padded_embed.dtype());
-        
-        padded_embed = padded_embed + pos_embed;
-        
-        auto hidden_states = padded_embed.masked_select(
-            padded_mask_after_cnn.unsqueeze(-1).expand_as(padded_embed))
-            .view({-1, padded_embed.size(-1)});
-        LOG(INFO) <<  padded_mask_after_cnn.size(-1); 
-        auto window_aftercnn = padded_mask_after_cnn.size(-1) * 
-            (n_window_infer_ / (n_window_ * 2));
-        
-        std::vector<int> cu_chunk_lens = {};
-        for (int64_t i = 0; i < aftercnn_lens_calc.size(0); ++i) {
-            int64_t cnn_len =  static_cast<int>(aftercnn_lens_calc[i].item<long>());
-            LOG(INFO) << 8;
-            int64_t full_windows = cnn_len / window_aftercnn;
-            LOG(INFO) << 9;
-            for (int64_t j = 0; j < full_windows; ++j) {
-                cu_chunk_lens.push_back(window_aftercnn);
-            }
-            int64_t remainder = cnn_len % window_aftercnn;
-            if (remainder != 0) {
-                cu_chunk_lens.push_back(remainder);
-            }
-        }
-        LOG(INFO) << 10;
- 
-        auto cu_seqlens = torch::tensor(cu_chunk_lens, 
-            torch::TensorOptions().device(aftercnn_lens_calc.device()).dtype(torch::kInt32))
-            .to(torch::kInt32);
-        LOG(INFO) << 11;
-        ModelInputParams& input_params_new =
-           const_cast<ModelInputParams&>(input_params);
-        torch::Tensor cu_seqlens_cpu = cu_seqlens.cpu();
-        LOG(INFO) << 12;
-        std::cout << cu_seqlens;
-        std::vector<int> cu_seqlens_vec(
-           cu_seqlens_cpu.data_ptr<int>(),  // full seqlen vec
-           cu_seqlens_cpu.data_ptr<int>() + cu_seqlens_cpu.numel());
-        LOG(INFO) << 13;
-        torch::save(hidden_states, "hidden_states.py");
-        
-        for (int idx = 0; idx < layers_->size(); ++idx) {
-            hidden_states = layers_[idx]->as<Qwen3_Omni_Moe_Thinker_AudioBlock>()->forward(hidden_states,
-                                   cu_seqlens,
-                                   cu_seqlens_vec,
-                                   input_params_new,
-                                   idx);
-        }
-        torch::save(hidden_states, "hidden_states_after.py"); 
-        
-        hidden_states = ln_post_(hidden_states);
-        hidden_states = proj1_(hidden_states);
-        hidden_states = torch::gelu(hidden_states);
-        hidden_states = proj2_(hidden_states);
-        
-        return hidden_states;
-    }
-    
-    void load_state_dict(const StateDict& state_dict) {
-        weight::load_weight(state_dict, "conv_out.weight", conv_out_->weight, is_conv_out_weight_loaded_);
-        weight::load_weight(state_dict, "proj1.weight", proj1_->weight, is_proj1_weight_loaded_);
-        weight::load_weight(state_dict, "proj1.bias", proj1_->bias, is_proj1_bias_loaded_); 
-        weight::load_weight(state_dict, "proj2.weight", proj2_->weight, is_proj2_weight_loaded_);
-        weight::load_weight(state_dict, "proj2.bias", proj2_->bias, is_proj2_bias_loaded_);
-        
-        weight::load_weight(state_dict, "conv2d1.weight", conv2d1_->weight, is_conv2d1_weight_loaded_);
-        weight::load_weight(state_dict, "conv2d1.bias", conv2d1_->bias, is_conv2d1_bias_loaded_);
-        weight::load_weight(state_dict, "conv2d2.weight", conv2d2_->weight, is_conv2d2_weight_loaded_);
-        weight::load_weight(state_dict, "conv2d2.bias", conv2d2_->bias, is_conv2d2_bias_loaded_);
-        weight::load_weight(state_dict, "conv2d3.weight", conv2d3_->weight, is_conv2d3_weight_loaded_);
-        weight::load_weight(state_dict, "conv2d3.bias", conv2d3_->bias, is_conv2d3_bias_loaded_);
-        
-        weight::load_weight(state_dict, "ln_post.weight", ln_post_->weight, is_ln_post_weight_loaded_);
-        weight::load_weight(state_dict, "ln_post.bias", ln_post_->bias, is_ln_post_bias_loaded_);
-        for (size_t idx = 0; idx < layers_->size(); idx++) {
-           auto prefix = "layers." + std::to_string(idx) + ".";
-           layers_[idx]->as<Qwen3_Omni_Moe_Thinker_AudioBlock>()->load_state_dict(
-               state_dict.get_dict_with_prefix(prefix));
-        } 
-    } 
+ public:
+  Qwen3_Omni_Moe_Thinker_AudioTransformerImpl(const ModelContext& context) {
+    auto model_args = context.get_model_args();
+    options_ = context.get_tensor_options();
+    auto downsample_hidden_size = model_args.mm_audio_downsample_hidden_size();
+    embed_dim_ = model_args.mm_audio_d_model();
+    num_mel_bins_ = model_args.mm_audio_num_mel_bins();
+    max_source_positions_ = model_args.mm_audio_max_source_positions();
+    embed_scale_ =
+        model_args.mm_audio_scale_embedding() ? std::sqrt(embed_dim_) : 1.0;
+    n_window_ = model_args.mm_audio_n_window();
 
-#if defined(USE_NPU)      
+    positional_embedding_ = register_module(
+        "positional_embedding",
+        SinusoidsPositionEmbedding(max_source_positions_, embed_dim_));
+
+    layers_ = register_module("layers", torch::nn::ModuleList());
+    for (int64_t i = 0; i < model_args.mm_audio_encoder_layers(); ++i) {
+      auto layer = Qwen3_Omni_Moe_Thinker_AudioBlock(context);
+      layers_->push_back(layer);
+    }
+
+    ln_post_ = register_module(
+        "ln_post",
+        torch::nn::LayerNorm(torch::nn::LayerNormOptions({embed_dim_})
+                                 .elementwise_affine(true)));
+
+    conv2d1_ = register_module(
+        "conv2d1",
+        torch::nn::Conv2d(torch::nn::Conv2dOptions(1, downsample_hidden_size, 3)
+                              .stride(2)
+                              .padding(1)
+                              .bias(true)));
+
+    conv2d2_ = register_module(
+        "conv2d2",
+        torch::nn::Conv2d(torch::nn::Conv2dOptions(
+                              downsample_hidden_size, downsample_hidden_size, 3)
+                              .stride(2)
+                              .padding(1)
+                              .bias(true)));
+
+    conv2d3_ = register_module(
+        "conv2d3",
+        torch::nn::Conv2d(torch::nn::Conv2dOptions(
+                              downsample_hidden_size, downsample_hidden_size, 3)
+                              .stride(2)
+                              .padding(1)
+                              .bias(true)));
+
+    int64_t conv_output_dim = ((((num_mel_bins_ + 1) / 2 + 1) / 2 + 1) / 2);
+
+    conv_out_ = register_module(
+        "conv_out",
+        torch::nn::Linear(
+            torch::nn::LinearOptions(downsample_hidden_size * conv_output_dim,
+                                     embed_dim_)
+                .bias(false)));
+
+    proj1_ = register_module(
+        "proj1",
+        torch::nn::Linear(
+            torch::nn::LinearOptions(embed_dim_, embed_dim_).bias(true)));
+
+    proj2_ = register_module(
+        "proj2",
+        torch::nn::Linear(torch::nn::LinearOptions(
+                              embed_dim_, model_args.mm_audio_output_dim())
+                              .bias(true)));
+
+    n_window_infer_ = model_args.mm_audio_n_window_infer();
+    conv_chunksize_ = model_args.mm_audio_conv_chunksize();
+  }
+
+  torch::Tensor forward(const torch::Tensor& input_features,
+                        const ModelInputParams& input_params,
+                        const torch::Tensor& feature_lens = torch::Tensor()) {
+    auto aftercnn_lens_calc = get_feat_extract_output_lengths(feature_lens);
+
+    auto chunk_num =
+        torch::ceil(feature_lens / (n_window_ * 2)).to(torch::kLong);
+    int64_t total_chunks = chunk_num.sum().item<int64_t>();
+
+    auto chunk_lengths = torch::full({total_chunks},
+                                     n_window_ * 2,
+                                     torch::TensorOptions()
+                                         .dtype(torch::kLong)
+                                         .device(feature_lens.device()));
+
+    auto padded_chunk_num = torch::nn::functional::pad(
+        chunk_num, torch::nn::functional::PadFuncOptions({1, 0}).value(-1));
+    auto tail_chunk_index = padded_chunk_num.cumsum(0).slice(0, 1);
+
+    auto remainder = feature_lens % (n_window_ * 2);
+    chunk_lengths.index_put_({torch::indexing::TensorIndex(tail_chunk_index)},
+                             remainder);
+    chunk_lengths.index_put_({torch::indexing::TensorIndex(chunk_lengths == 0)},
+                             n_window_ * 2);
+
+    auto input_t = input_features.t();
+    auto chunk_lengths_list = chunk_lengths.to(torch::kCPU).contiguous();
+
+    auto chunk_lengths_cpu = chunk_lengths.to(torch::kCPU).contiguous();
+    std::cout << chunk_lengths_cpu;
+    at::IntArrayRef split_sizes(chunk_lengths_cpu.data_ptr<int64_t>(),
+                                static_cast<size_t>(chunk_lengths_cpu.size(0)));
+
+    auto chunk_list = input_t.split_with_sizes(split_sizes, 0);
+
+    auto padded_feature =
+        torch::nn::utils::rnn::pad_sequence(chunk_list, true).transpose(1, 2);
+    torch::save(padded_feature, "padded_feature.pt");
+    auto feature_lens_after_cnn =
+        get_feat_extract_output_lengths(chunk_lengths.to(torch::kLong));
+    LOG(INFO) << 2;
+    std::vector<torch::Tensor> mask_tensors;
+    for (int64_t i = 0; i < feature_lens_after_cnn.size(0); ++i) {
+      int64_t length = feature_lens_after_cnn[i].item<int64_t>();
+      LOG(INFO) << length;
+      mask_tensors.push_back(torch::ones({length},
+                                         torch::TensorOptions()
+                                             .dtype(torch::kBool)
+                                             .device(padded_feature.device())));
+    }
+    LOG(INFO) << 3;
+    auto padded_mask_after_cnn =
+        torch::nn::utils::rnn::pad_sequence(mask_tensors, true);
+
+    padded_feature = padded_feature.unsqueeze(1);
+
+    std::vector<torch::Tensor> padded_embeds;
+    int64_t batch_size = padded_feature.size(0);
+    LOG(INFO) << 4;
+    int64_t counter = 0;
+    for (int64_t start = 0; start < batch_size; start += conv_chunksize_) {
+      int64_t end = std::min(start + conv_chunksize_, batch_size);
+      LOG(INFO) << start;
+      LOG(INFO) << end;
+
+      auto chunk = padded_feature.slice(0, start, end);
+      if (counter == 0) torch::save(conv2d1_(chunk), "conv1.pt");
+      auto embed = torch::gelu(conv2d1_(chunk));
+      if (counter == 0) torch::save(embed, "gelu.pt");
+      embed = torch::gelu(conv2d2_(embed));
+      embed = torch::gelu(conv2d3_(embed));
+      if (counter == 0) torch::save(embed, "final_conv.pt");
+      counter += 1;
+
+      padded_embeds.push_back(embed);
+    }
+    LOG(INFO) << 5;
+    auto padded_embed = torch::cat(padded_embeds, 0);
+
+    auto [b, c, f, t] = std::make_tuple(padded_embed.size(0),
+                                        padded_embed.size(1),
+                                        padded_embed.size(2),
+                                        padded_embed.size(3));
+
+    auto reshaped =
+        padded_embed.permute({0, 3, 1, 2}).contiguous().view({b, t, c * f});
+    padded_embed = conv_out_(reshaped);
+    LOG(INFO) << 6;
+    auto pos_embed = positional_embedding_->forward(padded_embed.size(1))
+                         .unsqueeze(0)
+                         .to(options_.device(), padded_embed.dtype());
+
+    padded_embed = padded_embed + pos_embed;
+
+    auto hidden_states =
+        padded_embed
+            .masked_select(
+                padded_mask_after_cnn.unsqueeze(-1).expand_as(padded_embed))
+            .view({-1, padded_embed.size(-1)});
+    LOG(INFO) << padded_mask_after_cnn.size(-1);
+    auto window_aftercnn =
+        padded_mask_after_cnn.size(-1) * (n_window_infer_ / (n_window_ * 2));
+
+    std::vector<int> cu_chunk_lens = {};
+    for (int64_t i = 0; i < aftercnn_lens_calc.size(0); ++i) {
+      int64_t cnn_len = static_cast<int>(aftercnn_lens_calc[i].item<long>());
+      LOG(INFO) << 8;
+      int64_t full_windows = cnn_len / window_aftercnn;
+      LOG(INFO) << 9;
+      for (int64_t j = 0; j < full_windows; ++j) {
+        cu_chunk_lens.push_back(window_aftercnn);
+      }
+      int64_t remainder = cnn_len % window_aftercnn;
+      if (remainder != 0) {
+        cu_chunk_lens.push_back(remainder);
+      }
+    }
+    LOG(INFO) << 10;
+
+    auto cu_seqlens = torch::tensor(cu_chunk_lens,
+                                    torch::TensorOptions()
+                                        .device(aftercnn_lens_calc.device())
+                                        .dtype(torch::kInt32))
+                          .to(torch::kInt32);
+    LOG(INFO) << 11;
+    ModelInputParams& input_params_new =
+        const_cast<ModelInputParams&>(input_params);
+    torch::Tensor cu_seqlens_cpu = cu_seqlens.cpu();
+    LOG(INFO) << 12;
+    std::cout << cu_seqlens;
+    std::vector<int> cu_seqlens_vec(
+        cu_seqlens_cpu.data_ptr<int>(),  // full seqlen vec
+        cu_seqlens_cpu.data_ptr<int>() + cu_seqlens_cpu.numel());
+    LOG(INFO) << 13;
+    torch::save(hidden_states, "hidden_states.py");
+
+    for (int idx = 0; idx < layers_->size(); ++idx) {
+      hidden_states =
+          layers_[idx]->as<Qwen3_Omni_Moe_Thinker_AudioBlock>()->forward(
+              hidden_states, cu_seqlens, cu_seqlens_vec, input_params_new, idx);
+    }
+    torch::save(hidden_states, "hidden_states_after.py");
+
+    hidden_states = ln_post_(hidden_states);
+    hidden_states = proj1_(hidden_states);
+    hidden_states = torch::gelu(hidden_states);
+    hidden_states = proj2_(hidden_states);
+
+    return hidden_states;
+  }
+
+  void load_state_dict(const StateDict& state_dict) {
+    weight::load_weight(state_dict,
+                        "conv_out.weight",
+                        conv_out_->weight,
+                        is_conv_out_weight_loaded_);
+    weight::load_weight(
+        state_dict, "proj1.weight", proj1_->weight, is_proj1_weight_loaded_);
+    weight::load_weight(
+        state_dict, "proj1.bias", proj1_->bias, is_proj1_bias_loaded_);
+    weight::load_weight(
+        state_dict, "proj2.weight", proj2_->weight, is_proj2_weight_loaded_);
+    weight::load_weight(
+        state_dict, "proj2.bias", proj2_->bias, is_proj2_bias_loaded_);
+
+    weight::load_weight(state_dict,
+                        "conv2d1.weight",
+                        conv2d1_->weight,
+                        is_conv2d1_weight_loaded_);
+    weight::load_weight(
+        state_dict, "conv2d1.bias", conv2d1_->bias, is_conv2d1_bias_loaded_);
+    weight::load_weight(state_dict,
+                        "conv2d2.weight",
+                        conv2d2_->weight,
+                        is_conv2d2_weight_loaded_);
+    weight::load_weight(
+        state_dict, "conv2d2.bias", conv2d2_->bias, is_conv2d2_bias_loaded_);
+    weight::load_weight(state_dict,
+                        "conv2d3.weight",
+                        conv2d3_->weight,
+                        is_conv2d3_weight_loaded_);
+    weight::load_weight(
+        state_dict, "conv2d3.bias", conv2d3_->bias, is_conv2d3_bias_loaded_);
+
+    weight::load_weight(state_dict,
+                        "ln_post.weight",
+                        ln_post_->weight,
+                        is_ln_post_weight_loaded_);
+    weight::load_weight(
+        state_dict, "ln_post.bias", ln_post_->bias, is_ln_post_bias_loaded_);
+    for (size_t idx = 0; idx < layers_->size(); idx++) {
+      auto prefix = "layers." + std::to_string(idx) + ".";
+      layers_[idx]->as<Qwen3_Omni_Moe_Thinker_AudioBlock>()->load_state_dict(
+          state_dict.get_dict_with_prefix(prefix));
+    }
+  }
+
+#if defined(USE_NPU)
   void verify_loaded_weights(const std::string& prefix) {
     LOG(INFO) << "start transformer modify";
     CHECK(is_conv_out_weight_loaded_)
         << "weight is not loaded for " << "conv_out.weight";
     CHECK(is_proj1_weight_loaded_)
         << "weight is not loaded for " << "proj1.weight";
-    CHECK(is_proj1_bias_loaded_)
-        << "weight is not loaded for " << "proj1.bias";
+    CHECK(is_proj1_bias_loaded_) << "weight is not loaded for " << "proj1.bias";
     CHECK(is_proj2_weight_loaded_)
         << "weight is not loaded for " << "proj2.weight";
-    CHECK(is_proj2_bias_loaded_)
-        << "weight is not loaded for " << "proj2.bias";
-    
+    CHECK(is_proj2_bias_loaded_) << "weight is not loaded for " << "proj2.bias";
+
     CHECK(is_conv2d1_weight_loaded_)
         << "weight is not loaded for " << "conv2d1.weight";
     CHECK(is_conv2d1_bias_loaded_)
@@ -394,7 +423,7 @@ public:
         << "weight is not loaded for " << "conv2d3.weight";
     CHECK(is_conv2d3_bias_loaded_)
         << "weight is not loaded for " << "conv2d3.bias";
-    
+
     CHECK(is_ln_post_weight_loaded_)
         << "weight is not loaded for " << "ln_post.weight";
     CHECK(is_ln_post_bias_loaded_)
@@ -402,57 +431,59 @@ public:
     LOG(INFO) << "end transformer modify";
     for (int idx = 0; idx < layers_->size(); ++idx) {
       auto prefix = "layers." + std::to_string(idx) + ".";
-      layers_[idx]->as<Qwen3_Omni_Moe_Thinker_AudioBlock>()->verify_loaded_weights(prefix);
+      layers_[idx]
+          ->as<Qwen3_Omni_Moe_Thinker_AudioBlock>()
+          ->verify_loaded_weights(prefix);
     }
   }
 
   void merge_loaded_weights() {
     for (int idx = 0; idx < layers_->size(); ++idx) {
-      layers_[idx]->as<Qwen3_Omni_Moe_Thinker_AudioBlock>()->merge_loaded_weights();
+      layers_[idx]
+          ->as<Qwen3_Omni_Moe_Thinker_AudioBlock>()
+          ->merge_loaded_weights();
     }
   }
-#endif 
-private:
-    int64_t embed_dim_;
-    int64_t num_mel_bins_;
-    int64_t max_source_positions_;
-    double embed_scale_;
-    int64_t n_window_;
-    int64_t n_window_infer_;
-    int64_t conv_chunksize_;
-    torch::TensorOptions options_;
-    
-    SinusoidsPositionEmbedding positional_embedding_{nullptr};
-    torch::nn::ModuleList layers_{nullptr};
-    torch::nn::LayerNorm ln_post_{nullptr};
-    
-    torch::nn::Conv2d conv2d1_{nullptr};
-    torch::nn::Conv2d conv2d2_{nullptr};
-    torch::nn::Conv2d conv2d3_{nullptr};
-    
-    torch::nn::Linear conv_out_{nullptr};
-    torch::nn::Linear proj1_{nullptr};
-    torch::nn::Functional act_{nullptr};
-    torch::nn::Linear proj2_{nullptr};
-   
-    bool is_conv_out_weight_loaded_ = false;
-    bool is_conv2d1_weight_loaded_ = false;
-    bool is_conv2d1_bias_loaded_ = false;
-    bool is_conv2d2_weight_loaded_ = false;
-    bool is_conv2d2_bias_loaded_ = false;
-    bool is_conv2d3_weight_loaded_ = false;
-    bool is_conv2d3_bias_loaded_ = false;
-    bool is_ln_post_weight_loaded_ = false;
-    bool is_ln_post_bias_loaded_ = false;
-    bool is_proj1_weight_loaded_ = false;
-    bool is_proj1_bias_loaded_ = false;
-    bool is_proj2_weight_loaded_ = false;
-    bool is_proj2_bias_loaded_ = false;
+#endif
+ private:
+  int64_t embed_dim_;
+  int64_t num_mel_bins_;
+  int64_t max_source_positions_;
+  double embed_scale_;
+  int64_t n_window_;
+  int64_t n_window_infer_;
+  int64_t conv_chunksize_;
+  torch::TensorOptions options_;
+
+  SinusoidsPositionEmbedding positional_embedding_{nullptr};
+  torch::nn::ModuleList layers_{nullptr};
+  torch::nn::LayerNorm ln_post_{nullptr};
+
+  torch::nn::Conv2d conv2d1_{nullptr};
+  torch::nn::Conv2d conv2d2_{nullptr};
+  torch::nn::Conv2d conv2d3_{nullptr};
+
+  torch::nn::Linear conv_out_{nullptr};
+  torch::nn::Linear proj1_{nullptr};
+  torch::nn::Functional act_{nullptr};
+  torch::nn::Linear proj2_{nullptr};
+
+  bool is_conv_out_weight_loaded_ = false;
+  bool is_conv2d1_weight_loaded_ = false;
+  bool is_conv2d1_bias_loaded_ = false;
+  bool is_conv2d2_weight_loaded_ = false;
+  bool is_conv2d2_bias_loaded_ = false;
+  bool is_conv2d3_weight_loaded_ = false;
+  bool is_conv2d3_bias_loaded_ = false;
+  bool is_ln_post_weight_loaded_ = false;
+  bool is_ln_post_bias_loaded_ = false;
+  bool is_proj1_weight_loaded_ = false;
+  bool is_proj1_bias_loaded_ = false;
+  bool is_proj2_weight_loaded_ = false;
+  bool is_proj2_bias_loaded_ = false;
 };
 
 TORCH_MODULE(Qwen3_Omni_Moe_Thinker_AudioTransformer);
-
-
 
 class Qwen3_Omni_Moe_Thinker_VisionPatchEmbedImpl : public torch::nn::Module {
  public:
@@ -514,8 +545,8 @@ class Qwen3_Omni_Moe_Thinker_VisionBlockImpl : public torch::nn::Module {
  public:
   Qwen3_Omni_Moe_Thinker_VisionBlockImpl(const ModelContext& context) {
     // register submodules
-    encoder_layer_ = register_module("encoder_layer",
-                                     layer::Qwen3VisionEncoderLayer(context));
+    encoder_layer_ = register_module(
+        "encoder_layer", layer::NpuQwen3VisionEncoderLayer(context));
   }
 
   torch::Tensor forward(torch::Tensor& x,
@@ -548,13 +579,15 @@ class Qwen3_Omni_Moe_Thinker_VisionBlockImpl : public torch::nn::Module {
 #endif
 
  private:
-  layer::Qwen3VisionEncoderLayer encoder_layer_{nullptr};
+  layer::NpuQwen3VisionEncoderLayer encoder_layer_{nullptr};
 };
 TORCH_MODULE(Qwen3_Omni_Moe_Thinker_VisionBlock);
 
-class Qwen3_Omni_Moe_Thinker_VisionRotaryEmbeddingImpl : public torch::nn::Module {
+class Qwen3_Omni_Moe_Thinker_VisionRotaryEmbeddingImpl
+    : public torch::nn::Module {
  public:
-  Qwen3_Omni_Moe_Thinker_VisionRotaryEmbeddingImpl(const ModelContext& context) {
+  Qwen3_Omni_Moe_Thinker_VisionRotaryEmbeddingImpl(
+      const ModelContext& context) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
 
@@ -599,8 +632,9 @@ TORCH_MODULE(Qwen3_Omni_Moe_Thinker_VisionRotaryEmbedding);
 
 class Qwen3_Omni_Moe_Thinker_VisionPatchMergerImpl : public torch::nn::Module {
  public:
-  Qwen3_Omni_Moe_Thinker_VisionPatchMergerImpl(const ModelContext& context,
-                              bool use_postshuffle_norm = false) {
+  Qwen3_Omni_Moe_Thinker_VisionPatchMergerImpl(
+      const ModelContext& context,
+      bool use_postshuffle_norm = false) {
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto quant_args = context.get_quant_args();
@@ -749,12 +783,12 @@ class Qwen3_Omni_Moe_Thinker_VisionTransformerImpl : public torch::nn::Module {
     spatial_merge_unit_ =
         static_cast<int>(spatial_merge_size_ * spatial_merge_size_);
     num_grid_per_side_ = image_size_ / patch_size_;
-    
 
-    patch_embed_ =
-        register_module("patch_embed", Qwen3_Omni_Moe_Thinker_VisionPatchEmbed(context));
+    patch_embed_ = register_module(
+        "patch_embed", Qwen3_Omni_Moe_Thinker_VisionPatchEmbed(context));
     rotary_pos_emb_ =
-        register_module("rotary_pos_emb", Qwen3_Omni_Moe_Thinker_VisionRotaryEmbedding(context));
+        register_module("rotary_pos_emb",
+                        Qwen3_Omni_Moe_Thinker_VisionRotaryEmbedding(context));
 
     blocks_ = register_module("blocks", torch::nn::ModuleList());
     deepstack_mergers_ =
@@ -762,10 +796,12 @@ class Qwen3_Omni_Moe_Thinker_VisionTransformerImpl : public torch::nn::Module {
 
     emb_ = register_module(
         "embedding",
-        torch::nn::Embedding(static_cast<int>(std::pow(num_grid_per_side_, 2)), hidden_size_));
+        torch::nn::Embedding(static_cast<int>(std::pow(num_grid_per_side_, 2)),
+                             hidden_size_));
     emb_->weight.set_data(emb_->weight.to(options_));
 
-    merger_ = register_module("merger", Qwen3_Omni_Moe_Thinker_VisionPatchMerger(context));
+    merger_ = register_module(
+        "merger", Qwen3_Omni_Moe_Thinker_VisionPatchMerger(context));
 
     for (int32_t idx = 0; idx < model_args.mm_num_hidden_layers(); idx++) {
       auto block = Qwen3_Omni_Moe_Thinker_VisionBlock(context);
@@ -979,8 +1015,8 @@ class Qwen3_Omni_Moe_Thinker_VisionTransformerImpl : public torch::nn::Module {
 
     for (int idx = 0; idx < deepstack_merger_layers_.size(); ++idx) {
       deepstack_merger_layers_[idx]->load_state_dict(
-          state_dict.get_dict_with_prefix("merger_list." +
-                                          std::to_string(idx) + "."));
+          state_dict.get_dict_with_prefix("merger_list." + std::to_string(idx) +
+                                          "."));
     }
 
     const auto& emb_dict = state_dict.get_dict_with_prefix("pos_embed.");
@@ -1036,7 +1072,8 @@ class Qwen3_Omni_Moe_Thinker_VisionTransformerImpl : public torch::nn::Module {
   std::vector<Qwen3_Omni_Moe_Thinker_VisionBlock> layers_;
 
   torch::nn::ModuleList deepstack_mergers_{nullptr};
-  std::vector<Qwen3_Omni_Moe_Thinker_VisionPatchMerger> deepstack_merger_layers_;
+  std::vector<Qwen3_Omni_Moe_Thinker_VisionPatchMerger>
+      deepstack_merger_layers_;
   Qwen3_Omni_Moe_Thinker_VisionPatchMerger merger_{nullptr};
 
   torch::Tensor m_cos;
@@ -1047,135 +1084,37 @@ class Qwen3_Omni_Moe_Thinker_VisionTransformerImpl : public torch::nn::Module {
 };
 TORCH_MODULE(Qwen3_Omni_Moe_Thinker_VisionTransformer);
 
-
 using torch::indexing::None;
 using ISlice = torch::indexing::Slice;
 
 struct Qwen3_OmniAudioInputs {
   torch::Tensor input_features;
-  torch::Tensor feature_attention_mask;
+  torch::Tensor feat_length;
+  torch::Tensor feat_origin_lens;
 };
 
-class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Module {
+class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl
+    : public torch::nn::Module {
  public:
-  Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl(const ModelContext& context)
+  Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl(
+      const ModelContext& context)
       : model_args_(context.get_model_args()),
         options_(context.get_tensor_options()) {
-    visual_ = register_module("visual", Qwen3_Omni_Moe_Thinker_VisionTransformer(context));
-    audio_tower_ = register_module("audio_tower", Qwen3_Omni_Moe_Thinker_AudioTransformer(context));
+    visual_ = register_module(
+        "visual", Qwen3_Omni_Moe_Thinker_VisionTransformer(context));
+    audio_tower_ = register_module(
+        "audio_tower", Qwen3_Omni_Moe_Thinker_AudioTransformer(context));
     language_model_ =
         register_module("language_model", Qwen3MoeForCausalLM(context));
   }
 
-
-  torch::Tensor get_input_embeddings(
-      torch::Tensor input_ids,
-      const std::optional<Qwen3_VLImageInputs>& image_input,
-      const std::optional<Qwen3_VLVideoInputs>& video_input,
-      const std::optional<Qwen3_OmniAudioInputs>& audio_input, 
-      const ModelInputParams& input_params) {
-    auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
-    torch::save(inputs_embeds, "inputs_embeds_cpp.pt");    
-    torch::Tensor multimodal_mask;
-    std::vector<torch::Tensor> multimodal_deep_stacks;
-    if (image_input) {
-      // visual
-      auto [image_embeds, deep_stacks] =
-          visual_(image_input->pixel_values.to(options_),
-                  image_input->image_grid_thw,
-                  input_params);
-      multimodal_deep_stacks = deep_stacks;
-      // merge
-      multimodal_mask = torch::isin(input_ids, model_args_.image_token_id());
-      inputs_embeds.index_put_({multimodal_mask}, image_embeds);
-      torch::save(image_embeds, "image_embeds_cpp.pt");
-      torch::save(image_input->pixel_values, "pixel_values_cpp.pt");
-    }
-    if (video_input) {
-      /*
-      auto pixel_values_videos = torch::ones({6240, 1536});
-      auto state_dict = StateDictFromSafeTensor::load("/export/home/shanchenfeng/xllm_build/xllm_qwen_embed/qwen_omni_code/pixel_values_videos_py_load.pt");
-      bool is_conv_out_weight_loaded_ = false;      weight::load_weight(*state_dict, "raw_video", pixel_values_videos, is_conv_out_weight_loaded_);
-      */
-      // visual
-      auto [video_embeds, video_deep_stacks] =
-          visual_(video_input->pixel_values_videos.to(options_),
-                  video_input->video_grid_thw,
-                  input_params);
-      // merge
-      auto video_mask = torch::isin(input_ids, model_args_.video_token_id());
-      inputs_embeds.index_put_({video_mask}, video_embeds);
-      torch::save(video_embeds, "video_embeds_cpp.pt");
-      torch::save(video_input->pixel_values_videos, "pixel_values_videos_cpp.pt"); 
-      if (multimodal_mask.defined() && !multimodal_deep_stacks.empty()){
-        torch::Tensor visual_pos_masks = video_mask | multimodal_mask;
-
-        int pos_masks_sum = visual_pos_masks.sum().item<int64_t>();
-     
-        torch::Tensor image_mask_joint = multimodal_mask.index({visual_pos_masks});
-        torch::Tensor video_mask_joint = video_mask.index({visual_pos_masks});
-
-        std::vector<torch::Tensor> visual_embeds_multiscale_joint;
-
-        for (size_t i = 0; i < multimodal_deep_stacks.size(); i++) {
-          torch::Tensor img_embed = multimodal_deep_stacks[i];
-          torch::Tensor vid_embed = video_deep_stacks[i];
-    
-          int64_t embed_dim = img_embed.size(-1);
-    
-          torch::Tensor embed_joint = torch::zeros({pos_masks_sum, embed_dim}, 
-                                             img_embed.options());
-    
-          embed_joint.index_put_({image_mask_joint}, img_embed);
-          embed_joint.index_put_({video_mask_joint}, vid_embed);
-    
-          visual_embeds_multiscale_joint.push_back(embed_joint);
-        }
-        multimodal_mask = visual_pos_masks;
-        multimodal_deep_stacks = visual_embeds_multiscale_joint;
-          
-      } else {
-        multimodal_mask = video_mask;
-        multimodal_deep_stacks = video_deep_stacks;
-      }
-    }
-    if (audio_input) {
-      auto feature_lens = torch::sum(audio_input->feature_attention_mask, 1).to(options_.device(), torch::kLong);
-      auto permuted = audio_input->input_features.permute({0, 2, 1});
-      auto bool_mask = audio_input->feature_attention_mask.to(torch::kBool);
-      auto input_features = permuted.index({bool_mask}).permute({1, 0}).to(options_);
-      auto audio_features = audio_tower_->forward(input_features, input_params, feature_lens);
-      /* 
-      auto state_dict = StateDictFromSafeTensor::load("/export/home/shanchenfeng/xllm_build/xllm_qwen_embed/qwen_omni_code/audio_features_py_load.pt");
-      auto input_featss = torch::ones({38, 2048});
-      bool is_conv_out_weight_loaded_ = false;
-      weight::load_weight(*state_dict, "raw_speech", audio_features, is_conv_out_weight_loaded_);
-      audio_features=audio_features.to(options_);
-      */
-      auto audio_mask = torch::isin(input_ids, model_args_.audio_token_id());
-      LOG(INFO) << "audio_mask shape";
-      std::cout << audio_mask.sum(-1);
-      inputs_embeds.index_put_({audio_mask}, audio_features);
-      torch::save(audio_features, "audio_features_cpp.pt");
-    }
-
-    if (multimodal_mask.defined())
-      input_params.visual_pos_masks = multimodal_mask;
-    if (!multimodal_deep_stacks.empty())
-      input_params.deep_stacks = multimodal_deep_stacks; 
-     
-    torch::save(inputs_embeds, "final_inputs_embeds_cpp.pt");
-    //std::exit(0);
-    return inputs_embeds;
-  }
-
-  torch::Tensor forward(const torch::Tensor& tokens,
-                        const torch::Tensor& positions,
-                        std::vector<KVCache>& kv_caches,
-                        const ModelInputParams& input_params) {
-    torch::NoGradGuard no_grad;
+  void prepare_encoder_input(
+      const ModelInputParams& input_params,
+      std::optional<Qwen3_VLImageInputs>& image_inputs,
+      std::optional<Qwen3_VLVideoInputs>& video_inputs,
+      std::optional<Qwen3_OmniAudioInputs>& audio_inputs) {
+    LOG(INFO) << "start prepare_encoder_input";
     const auto& mm_data = input_params.mm_data;
-
     torch::Tensor pixel_values;
     if (const auto& res = mm_data.get<torch::Tensor>("pixel_values"))
       pixel_values = res.value();
@@ -1192,38 +1131,214 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Mo
     if (const auto& res = mm_data.get<torch::Tensor>("video_grid_thw"))
       video_grid_thw = res.value();
 
+    torch::Tensor second_per_grid_ts;
+    if (const auto& res = mm_data.get<torch::Tensor>("second_per_grid_ts"))
+      second_per_grid_ts = res.value();
+
     torch::Tensor input_features;
     if (const auto& res = mm_data.get<torch::Tensor>("input_features"))
       input_features = res.value();
 
-    torch::Tensor feature_attention_mask;
-    if (const auto& res = mm_data.get<torch::Tensor>("attention_mask"))
-      feature_attention_mask = res.value();
- 
-    LOG(INFO) << "input_features";    
-    input_features.print();
-    LOG(INFO) << "attention_mask";
-    feature_attention_mask.print();
- 
-    std::optional<Qwen3_VLImageInputs> image_inputs;
-    std::optional<Qwen3_VLVideoInputs> video_inputs;
-    std::optional<Qwen3_OmniAudioInputs> audio_inputs;  
- 
+    LOG(INFO) << "input_features " << input_features.defined();
+    torch::Tensor feat_length;
+    if (const auto& res = mm_data.get<torch::Tensor>("feat_length"))
+      feat_length = res.value();
+
+    torch::Tensor feat_origin_lens;
+    if (const auto& res = mm_data.get<torch::Tensor>("feat_origin_lens"))
+      feat_origin_lens = res.value();
+
+    LOG(INFO) << "feature_attention_mask " << feat_length.defined();
     if (pixel_values.defined() && image_grid_thw.defined())
       image_inputs = Qwen3_VLImageInputs{pixel_values, image_grid_thw};
-    
-    if (pixel_values_videos.defined() && video_grid_thw.defined())
-      video_inputs = Qwen3_VLVideoInputs{pixel_values_videos, video_grid_thw};
 
-    if (input_features.defined() && feature_attention_mask.defined())
-      audio_inputs = Qwen3_OmniAudioInputs{input_features, feature_attention_mask};
+    if (pixel_values_videos.defined() && video_grid_thw.defined() &&
+        second_per_grid_ts.defined())
+      video_inputs = Qwen3_VLVideoInputs{
+          pixel_values_videos, video_grid_thw, second_per_grid_ts};
 
-    auto inputs_embeds =
-        get_input_embeddings(tokens, image_inputs, video_inputs, 
-                             audio_inputs, input_params);
-    input_params.input_embedding = inputs_embeds;
+    if (input_features.defined() && feat_length.defined() &&
+        feat_origin_lens.defined())
+      audio_inputs =
+          Qwen3_OmniAudioInputs{input_features, feat_length, feat_origin_lens};
+  }
+
+  MMDict get_multimodal_embeddings(const ModelInputParams& input_params) {
+    std::optional<Qwen3_VLImageInputs> image_input;
+    std::optional<Qwen3_VLVideoInputs> video_input;
+    std::optional<Qwen3_OmniAudioInputs> audio_input;
+    LOG(INFO) << "start get_multimodal_embeddings";
+    prepare_encoder_input(input_params, image_input, video_input, audio_input);
+
+    MMDict multimodal_embeds;
+    auto merge_size = model_args_.mm_image_merge_size();
+    LOG(INFO) << "image0";
+    if (image_input) {
+      auto [image_embeds, deep_stacks] =
+          visual_(image_input->pixel_values.to(options_),
+                  image_input->image_grid_thw.to(options_.device()),
+                  input_params);
+      LOG(INFO) << "image1";
+
+      auto image_tokens =
+          (image_input->image_grid_thw.prod(-1) / merge_size / merge_size)
+              .cpu()
+              .contiguous()
+              .to(torch::kLong);
+      LOG(INFO) << "image2";
+      std::vector<int64_t> image_tokens_vec(
+          image_tokens.data_ptr<int64_t>(),
+          image_tokens.data_ptr<int64_t>() + image_tokens.numel());
+      multimodal_embeds["image|embedding"] =
+          image_embeds.split(image_tokens_vec, 0 /*dim*/);
+      LOG(INFO) << "image3";
+      for (size_t i = 0; i < deep_stacks.size(); ++i) {
+        multimodal_embeds[std::string("image|embedding|deepstack_") +
+                          std::to_string(i)] =
+            deep_stacks[i].split(image_tokens_vec, 0 /*dim*/);
+        LOG(INFO) << "image4";
+      }
+    }
+    if (video_input) {
+      LOG(INFO) << "video1";
+      video_input->video_grid_thw.print();
+      auto [video_embeds, deep_stacks] =
+          visual_(video_input->pixel_values_videos.to(options_),
+                  video_input->video_grid_thw.to(options_.device()),
+                  input_params);
+      LOG(INFO) << "video2";
+      auto video_tokens =
+          (video_input->video_grid_thw.prod(-1) / merge_size / merge_size)
+              .cpu()
+              .contiguous()
+              .to(torch::kLong);
+      LOG(INFO) << "video3";
+      std::vector<int64_t> video_tokens_vec(
+          video_tokens.data_ptr<int64_t>(),
+          video_tokens.data_ptr<int64_t>() + video_tokens.numel());
+      multimodal_embeds["video|embedding"] =
+          video_embeds.split(video_tokens_vec, 0 /*dim*/);
+      LOG(INFO) << "video4";
+      for (size_t i = 0; i < deep_stacks.size(); ++i) {
+        multimodal_embeds[std::string("video|embedding|deepstack_") +
+                          std::to_string(i)] =
+            deep_stacks[i].split(video_tokens_vec, 0 /*dim*/);
+      }
+    }
+    LOG(INFO) << "video5";
+    if (audio_input) {
+      LOG(INFO) << "audio 1";
+      LOG(INFO) << "mask before shape";
+      audio_input->feat_length.print();
+      LOG(INFO) << "audio before shape";
+      audio_input->input_features.print();
+
+      auto feat_origin_lens =
+          audio_input->feat_origin_lens.to(options_.device(), torch::kLong);
+
+      auto input_features =
+          audio_input->input_features.permute({1, 0}).to(options_);
+      LOG(INFO) << "audio after shape";
+      input_features.print();
+
+      auto audio_embeds =
+          audio_tower_->forward(input_features, input_params, feat_origin_lens);
+      LOG(INFO) << "audio 2";
+      /*
+      auto state_dict =
+      StateDictFromSafeTensor::load("/export/home/shanchenfeng/xllm_build/xllm_qwen_embed/qwen_omni_code/audio_features_py_load.pt");
+      auto input_featss = torch::ones({38, 2048});
+      bool is_conv_out_weight_loaded_ = false;
+      weight::load_weight(*state_dict, "raw_speech", audio_features,
+      is_conv_out_weight_loaded_); audio_features=audio_features.to(options_);
+      */
+      torch::save(audio_embeds, "audio_features_cpp.pt");
+      auto audio_tokens =
+          audio_input->feat_length.cpu().contiguous().to(torch::kLong);
+      LOG(INFO) << "audio 3";
+      std::vector<int64_t> feature_lens_vec(
+          audio_tokens.data_ptr<int64_t>(),
+          audio_tokens.data_ptr<int64_t>() + audio_tokens.numel());
+      LOG(INFO) << "audio 4";
+      multimodal_embeds["audio|embedding"] =
+          audio_embeds.split(feature_lens_vec, 0 /*dim*/);
+      LOG(INFO) << "audio 5";
+    }
+    return multimodal_embeds;
+  }
+
+  torch::Tensor generate_multimodal_mask(torch::Tensor input_ids) {
+    auto special_token_ids = torch::tensor(
+        {model_args_.image_token_id(), model_args_.video_token_id()},
+        input_ids.options().dtype(torch::kInt64));
+    LOG(INFO) << "generate_multimodal_mask";
+    auto is_multimodal = torch::isin(input_ids, special_token_ids);
+    return is_multimodal;
+  }
+
+  torch::Tensor generate_multimodal_mask_with_audio(torch::Tensor input_ids) {
+    auto special_token_ids =
+        torch::tensor({model_args_.image_token_id(),
+                       model_args_.video_token_id(),
+                       model_args_.audio_token_id()},
+                      input_ids.options().dtype(torch::kInt64));
+    LOG(INFO) << "generate_multimodal_mask";
+    auto is_multimodal = torch::isin(input_ids, special_token_ids);
+    return is_multimodal;
+  }
+
+  std::vector<torch::Tensor> get_deep_stacks(
+      const ModelInputParams& input_params) {
+    LOG(INFO) << "start get_deep_stacks";
+    const auto& mm_data = input_params.mm_data;
+    if (!mm_data.has("embedding|deepstack_0")) {
+      return {};
+    }
+
+    std::vector<torch::Tensor> deepstacks = {
+        mm_data.get<torch::Tensor>("embedding|deepstack_0").value(),
+        mm_data.get<torch::Tensor>("embedding|deepstack_1").value(),
+        mm_data.get<torch::Tensor>("embedding|deepstack_2").value()};
+    return deepstacks;
+  }
+
+  torch::Tensor merge_multimodal_embeddings(
+      torch::Tensor inputs_embeds,
+      const torch::Tensor& multimodal_embeds,
+      const torch::Tensor& is_multimodal) {
+    LOG(INFO) << "start merge_multimodal_embeddings";
+    inputs_embeds.index_put_({is_multimodal}, multimodal_embeds);
+    return inputs_embeds;
+  }
+
+  torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
+                                     const ModelInputParams& input_params) {
+    LOG(INFO) << "start get_input_embeddings";
+    const auto& mm_data = input_params.mm_data;
+    torch::Tensor multimodal_embeds;
+    if (const auto& emb = mm_data.get<torch::Tensor>("embedding")) {
+      multimodal_embeds = emb.value();
+    }
+    auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
+    if (!multimodal_embeds.defined()) {
+      return inputs_embeds;
+    }
+    auto is_multimodal = generate_multimodal_mask(input_ids);
+    auto is_multimodal_with_audio =
+        generate_multimodal_mask_with_audio(input_ids);
+    input_params.visual_pos_masks = is_multimodal;
+    inputs_embeds = merge_multimodal_embeddings(
+        inputs_embeds, multimodal_embeds, is_multimodal_with_audio);
+    return inputs_embeds;
+  }
+
+  torch::Tensor forward(const torch::Tensor& tokens,
+                        const torch::Tensor& positions,
+                        std::vector<KVCache>& kv_caches,
+                        const ModelInputParams& input_params) {
+    LOG(INFO) << "begin forward";
+    input_params.deep_stacks = std::move(get_deep_stacks(input_params));
     auto emb = language_model_(tokens, positions, kv_caches, input_params);
-
     return emb;
   }
 
@@ -1232,11 +1347,11 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Mo
     return language_model_->logits(hidden_states, seleted_idxes);
   }
 
-  void load_model(std::shared_ptr<ModelLoader> loader) {
+  void load_model(std::unique_ptr<ModelLoader> loader) {
     LOG(INFO) << "begin load models";
     for (const auto& state_dict : loader->get_state_dicts()) {
-      if(state_dict->get_tensor("thinker.lm_head.weight").defined()){
-         state_dict->rename_prefix_inplace("thinker.lm_head.", "lm_head.");
+      if (state_dict->get_tensor("thinker.lm_head.weight").defined()) {
+        state_dict->rename_prefix_inplace("thinker.lm_head.", "lm_head.");
       }
       LOG(INFO) << "load model for visual";
       visual_->load_state_dict(
@@ -1253,24 +1368,30 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Mo
     LOG(INFO) << "start audio verify";
     audio_tower_->verify_loaded_weights("thinker.audio_tower.");
     audio_tower_->merge_loaded_weights();
-    audio_tower_->to(options_.device(), torch::typeMetaToScalarType(options_.dtype()));
-    
+    audio_tower_->to(options_.device(),
+                     torch::typeMetaToScalarType(options_.dtype()));
+
 #endif
     LOG(INFO) << "start load language model";
     if (!model_args_.image_embedding_mode()) {
-      language_model_->load_shared_model(loader, "thinker.model.");
+      language_model_->load_model(std::move(loader), "thinker.model.");
     }
   }
 
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
-
-  layer::WordEmbedding get_word_embedding() {
-    return language_model_->get_word_embedding();
+  layer::NpuLmHead get_npu_lm_head() {
+    return language_model_->get_npu_lm_head();
   }
 
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    language_model_->set_word_embedding(word_embedding);
+  void set_npu_lm_head(layer::NpuLmHead& head) {
+    language_model_->set_npu_lm_head(head);
+  }
+
+  layer::NpuWordEmbedding get_npu_word_embedding() {
+    return language_model_->get_npu_word_embedding();
+  }
+
+  void set_npu_word_embedding(layer::NpuWordEmbedding& npu_word_embedding) {
+    language_model_->set_npu_word_embedding(npu_word_embedding);
   }
 
  private:
@@ -1279,125 +1400,120 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl : public torch::nn::Mo
   Qwen3_Omni_Moe_Thinker_VisionTransformer visual_{nullptr};
   Qwen3_Omni_Moe_Thinker_AudioTransformer audio_tower_{nullptr};
   Qwen3MoeForCausalLM language_model_{nullptr};
-  
 };
 TORCH_MODULE(Qwen3_Omni_Moe_Thinker_ForConditionalGeneration);
 
-
 REGISTER_INPUT_PROCESSOR(qwen3_omni_moe_thinker, Qwen2_5_VLInputProcessor);
-REGISTER_CAUSAL_VLM_MODEL(qwen3_omni_moe_thinker, Qwen3_Omni_Moe_Thinker_ForConditionalGeneration);
+REGISTER_CAUSAL_VLM_MODEL(qwen3_omni_moe_thinker,
+                          Qwen3_Omni_Moe_Thinker_ForConditionalGeneration);
 REGISTER_IMAGE_PROCESSOR(qwen3_omni_moe_thinker, Qwen2VLImageProcessor);
 REGISTER_FEATURE_EXTRACTOR(qwen3_omni_moe_thinker, WhisperFeatureExtractor);
 
 REGISTER_MODEL_ARGS(qwen3_omni_moe_thinker, [&] {
   LOAD_ARG_OR(model_type, "model_type", "qwen3_omni_moe");
-  
-  // feature extractor processor parameters 
+
+  // feature extractor processor parameters
   LOAD_ARG_OR(has_feature_extractor, "has_feature_extractor", true);
   LOAD_ARG_OR(mm_audio_truncation, "truncation", false);
   LOAD_ARG_OR(mm_audio_padding_strategy, "padding_strategy", 1);
   LOAD_ARG_OR(mm_audio_max_length, "max_length", -1);
   LOAD_ARG_OR(mm_audio_pad_to_multiple_of, "pad_to_multiple_of", -1);
   LOAD_ARG_OR(mm_audio_do_normalize, "do_normalize", false);
-  LOAD_ARG_OR(mm_audio_return_token_timestamps, "return_token_timestamps", false);  
+  LOAD_ARG_OR(
+      mm_audio_return_token_timestamps, "return_token_timestamps", false);
   LOAD_ARG_OR(mm_audio_return_attention_mask, "return_attention_mask", true);
   LOAD_ARG_OR(mm_use_audio_in_video, "use_audio_in_video", true);
   LOAD_ARG_OR(mm_position_id_per_seconds, "position_id_per_seconds", 13);
-  
-  // thinker config 
-  LOAD_ARG_WITH_PREFIX_JSON("thinker_config", [&]{
-      LOAD_ARG_OR_PREFIX(
-          vision_start_token_id, "vision_start_token_id", 151652);
-      LOAD_ARG_OR_PREFIX(
-          vision_end_token_id, "vision_end_token_id", 151653);
-      LOAD_ARG_OR_PREFIX(vision_token_id, "vision_token_id", 151654);
-      LOAD_ARG_OR_PREFIX(image_token_id, "image_token_id", 151655);
-      LOAD_ARG_OR_PREFIX(video_token_id, "video_token_id", 151656);
-      LOAD_ARG_OR_PREFIX(audio_token_id, "audio_token_id", 151675);
-      LOAD_ARG_OR_PREFIX(audio_start_token_id, "audio_start_token_id", 151669);
-      LOAD_ARG_OR_PREFIX(audio_end_token_id, "audio_end_token_id", 151670);
-      LOAD_ARG_OR_PREFIX(dtype, "dtype", "bfloat16"); 
-   });
-  
-  // thinker.text_config
-  LOAD_ARG_WITH_PREFIX_JSON("thinker_config.text_config", [&]{
-      LOAD_ARG_OR_PREFIX(attention_bias, "attention_bias", false);
-      LOAD_ARG_OR_PREFIX(attention_dropout, "attention_dropout", 0.0);
-      LOAD_ARG_OR_PREFIX(decoder_sparse_step, "decoder_sparse_step", 1);
 
-      LOAD_ARG_OR_PREFIX(bos_token_id, "bos_token_id", 151643);
-      LOAD_ARG_OR_PREFIX(eos_token_id, "eos_token_id", 151645);
-      LOAD_ARG_OR_PREFIX(hidden_act, "hidden_act", "silu");
-      LOAD_ARG_OR_PREFIX(hidden_size, "hidden_size", 2048);
-      LOAD_ARG_OR_PREFIX(intermediate_size, "intermediate_size", 768);
-      LOAD_ARG_OR_PREFIX(
-          max_position_embeddings, "max_position_embeddings", 65536);
-      LOAD_ARG_OR_PREFIX(max_window_layers, "max_window_layers", 28);
-      LOAD_ARG_OR_PREFIX(n_heads, "num_attention_heads", 32);
-      LOAD_ARG_OR_PREFIX(n_layers, "num_hidden_layers", 48);
-      LOAD_ARG_OR_PREFIX(n_kv_heads, "num_key_value_heads", 4);
-      LOAD_ARG_OR_PREFIX(rms_norm_eps, "rms_norm_eps", 1e-06);
-      LOAD_ARG_OR_PREFIX(sliding_window, "sliding_window", 32768);
-      LOAD_ARG_OR_PREFIX(tie_word_embeddings, "tie_word_embeddings", false);
-      LOAD_ARG_PREFIX(rope_scaling_mrope_section,
-               "rope_scaling.mrope_section");
-      LOAD_ARG_OR_PREFIX(initializer_range, "initializer_range", 0.02);
-      LOAD_ARG_OR_PREFIX(use_sliding_window, "use_sliding_window", false);
-      LOAD_ARG_OR_PREFIX(moe_intermediate_size, "moe_intermediate_size", 768);
-      LOAD_ARG_OR_PREFIX(norm_topk_prob, "norm_topk_prob", true);
-      LOAD_ARG_OR_PREFIX(num_experts, "num_experts", 128);
-      LOAD_ARG_OR_PREFIX(num_experts_per_tok, "num_experts_per_tok", 8);
-      LOAD_ARG_OR_FUNC_PREFIX(head_dim, "head_dim", [&] {
-        return args->hidden_size() / args->n_heads();
-      });
-      LOAD_ARG_OR_PREFIX(
-         rope_scaling_rope_type, "rope_scaling.type", "mrope");
-      LOAD_ARG_PREFIX(rope_scaling_mrope_section,
-           "rope_scaling.mrope_section");
-      LOAD_ARG_OR_PREFIX(rope_theta, "rope_theta", 1000000.0f);
-      LOAD_ARG_OR_PREFIX(vocab_size, "vocab_size", 152064);
-   });
+  // thinker config
+  LOAD_ARG_WITH_PREFIX_JSON("thinker_config", [&] {
+    LOAD_ARG_OR_PREFIX(vision_start_token_id, "vision_start_token_id", 151652);
+    LOAD_ARG_OR_PREFIX(vision_end_token_id, "vision_end_token_id", 151653);
+    LOAD_ARG_OR_PREFIX(vision_token_id, "vision_token_id", 151654);
+    LOAD_ARG_OR_PREFIX(image_token_id, "image_token_id", 151655);
+    LOAD_ARG_OR_PREFIX(video_token_id, "video_token_id", 151656);
+    LOAD_ARG_OR_PREFIX(audio_token_id, "audio_token_id", 151675);
+    LOAD_ARG_OR_PREFIX(audio_start_token_id, "audio_start_token_id", 151669);
+    LOAD_ARG_OR_PREFIX(audio_end_token_id, "audio_end_token_id", 151670);
+    LOAD_ARG_OR_PREFIX(dtype, "dtype", "bfloat16");
+  });
+
+  // thinker.text_config
+  LOAD_ARG_WITH_PREFIX_JSON("thinker_config.text_config", [&] {
+    LOAD_ARG_OR_PREFIX(attention_bias, "attention_bias", false);
+    LOAD_ARG_OR_PREFIX(attention_dropout, "attention_dropout", 0.0);
+    LOAD_ARG_OR_PREFIX(decoder_sparse_step, "decoder_sparse_step", 1);
+
+    LOAD_ARG_OR_PREFIX(bos_token_id, "bos_token_id", 151643);
+    LOAD_ARG_OR_PREFIX(eos_token_id, "eos_token_id", 151645);
+    LOAD_ARG_OR_PREFIX(hidden_act, "hidden_act", "silu");
+    LOAD_ARG_OR_PREFIX(hidden_size, "hidden_size", 2048);
+    LOAD_ARG_OR_PREFIX(intermediate_size, "intermediate_size", 768);
+    LOAD_ARG_OR_PREFIX(
+        max_position_embeddings, "max_position_embeddings", 65536);
+    LOAD_ARG_OR_PREFIX(max_window_layers, "max_window_layers", 28);
+    LOAD_ARG_OR_PREFIX(n_heads, "num_attention_heads", 32);
+    LOAD_ARG_OR_PREFIX(n_layers, "num_hidden_layers", 48);
+    LOAD_ARG_OR_PREFIX(n_kv_heads, "num_key_value_heads", 4);
+    LOAD_ARG_OR_PREFIX(rms_norm_eps, "rms_norm_eps", 1e-06);
+    LOAD_ARG_OR_PREFIX(sliding_window, "sliding_window", 32768);
+    LOAD_ARG_OR_PREFIX(tie_word_embeddings, "tie_word_embeddings", false);
+    LOAD_ARG_PREFIX(rope_scaling_mrope_section, "rope_scaling.mrope_section");
+    LOAD_ARG_OR_PREFIX(initializer_range, "initializer_range", 0.02);
+    LOAD_ARG_OR_PREFIX(use_sliding_window, "use_sliding_window", false);
+    LOAD_ARG_OR_PREFIX(moe_intermediate_size, "moe_intermediate_size", 768);
+    LOAD_ARG_OR_PREFIX(norm_topk_prob, "norm_topk_prob", true);
+    LOAD_ARG_OR_PREFIX(num_experts, "num_experts", 128);
+    LOAD_ARG_OR_PREFIX(num_experts_per_tok, "num_experts_per_tok", 8);
+    LOAD_ARG_OR_FUNC_PREFIX(head_dim, "head_dim", [&] {
+      return args->hidden_size() / args->n_heads();
+    });
+    LOAD_ARG_OR_PREFIX(rope_scaling_rope_type, "rope_scaling.type", "mrope");
+    LOAD_ARG_PREFIX(rope_scaling_mrope_section, "rope_scaling.mrope_section");
+    LOAD_ARG_OR_PREFIX(rope_theta, "rope_theta", 1000000.0f);
+    LOAD_ARG_OR_PREFIX(vocab_size, "vocab_size", 152064);
+  });
   LOG(INFO) << args->rope_scaling_mrope_section().size();
   // thinker.vision_config
-  LOAD_ARG_WITH_PREFIX_JSON("thinker_config.vision_config", [&]{
-      LOAD_ARG_OR_PREFIX(mm_num_hidden_layers, "depth", 27);
-      LOAD_ARG_OR_PREFIX(mm_hidden_act, "hidden_act", "gelu_pytorch_tanh");
-      LOAD_ARG_OR_PREFIX(mm_hidden_size, "hidden_size", 1152);
-      LOAD_ARG_OR_PREFIX(mm_intermediate_size, "intermediate_size", 4304);
-      LOAD_ARG_OR_PREFIX(mm_num_attention_heads, "num_heads", 16);
-      LOAD_ARG_OR_PREFIX(mm_num_channels, "in_channels", 3);
-      LOAD_ARG_OR_PREFIX(mm_projection_dim, "out_hidden_size", 2048);
-      LOAD_ARG_OR_PREFIX(mm_patch_size, "patch_size", 16);
-      LOAD_ARG_OR_PREFIX(mm_num_position_embeddings,
-                "num_position_embeddings",
-                2304);
-      LOAD_ARG_OR_PREFIX(mm_spatial_merge_size, "spatial_merge_size", 2);
-      LOAD_ARG_PREFIX(mm_deepstack_visual_indexes,
-               "deepstack_visual_indexes");
-      LOAD_ARG_OR_PREFIX(mm_temporal_patch_size, "temporal_patch_size", 2);
-      LOAD_ARG_OR_PREFIX(mm_image_size, "image_size", 768);
-  
+  LOAD_ARG_WITH_PREFIX_JSON("thinker_config.vision_config", [&] {
+    LOAD_ARG_OR_PREFIX(mm_num_hidden_layers, "depth", 27);
+    LOAD_ARG_OR_PREFIX(mm_hidden_act, "hidden_act", "gelu_pytorch_tanh");
+    LOAD_ARG_OR_PREFIX(mm_hidden_size, "hidden_size", 1152);
+    LOAD_ARG_OR_PREFIX(mm_intermediate_size, "intermediate_size", 4304);
+    LOAD_ARG_OR_PREFIX(mm_num_attention_heads, "num_heads", 16);
+    LOAD_ARG_OR_PREFIX(mm_num_channels, "in_channels", 3);
+    LOAD_ARG_OR_PREFIX(mm_projection_dim, "out_hidden_size", 2048);
+    LOAD_ARG_OR_PREFIX(mm_patch_size, "patch_size", 16);
+    LOAD_ARG_OR_PREFIX(
+        mm_num_position_embeddings, "num_position_embeddings", 2304);
+    LOAD_ARG_OR_PREFIX(mm_spatial_merge_size, "spatial_merge_size", 2);
+    LOAD_ARG_PREFIX(mm_deepstack_visual_indexes, "deepstack_visual_indexes");
+    LOAD_ARG_OR_PREFIX(mm_temporal_patch_size, "temporal_patch_size", 2);
+    LOAD_ARG_OR_PREFIX(mm_image_size, "image_size", 768);
 
-      LOAD_ARG_OR_FUNC_PREFIX(mm_head_dim, "head_dim", [&] {
-        return args->mm_hidden_size() / args->mm_num_attention_heads();
-      });
+    LOAD_ARG_OR_FUNC_PREFIX(mm_head_dim, "head_dim", [&] {
+      return args->mm_hidden_size() / args->mm_num_attention_heads();
+    });
   });
-  
+
   // thinker.audio_config
-  LOAD_ARG_WITH_PREFIX_JSON("thinker_config.audio_config", [&]{
-      LOAD_ARG_OR_PREFIX(mm_audio_num_attention_heads, "encoder_attention_heads", 20);
-      LOAD_ARG_OR_PREFIX(mm_audio_hidden_size, "d_model", 1280);
-      LOAD_ARG_OR_PREFIX(mm_audio_downsample_hidden_size, "downsample_hidden_size", 480);
-      LOAD_ARG_OR_PREFIX(mm_audio_d_model, "d_model", 1280);
-      LOAD_ARG_OR_PREFIX(mm_audio_num_mel_bins, "num_mel_bins", 128);
-      LOAD_ARG_OR_PREFIX(mm_audio_max_source_positions, "max_source_positions", 1500);
-      LOAD_ARG_OR_PREFIX(mm_audio_scale_embedding, "scale_embedding", false);
-      LOAD_ARG_OR_PREFIX(mm_audio_n_window, "n_window", 50);
-      LOAD_ARG_OR_PREFIX(mm_audio_n_window_infer, "n_window_infer", 800);
-      LOAD_ARG_OR_PREFIX(mm_audio_conv_chunksize, "conv_chunksize", 500);
-      //LOAD_ARG_OR_PREFIX(mm_audio_encoder_layers, "encoder_layers", 32);
-      LOAD_ARG_OR_PREFIX(mm_audio_encoder_layers, "encoder_layers", 0);
-      LOAD_ARG_OR_PREFIX(mm_audio_output_dim, "output_dim", 2048);
+  LOAD_ARG_WITH_PREFIX_JSON("thinker_config.audio_config", [&] {
+    LOAD_ARG_OR_PREFIX(
+        mm_audio_num_attention_heads, "encoder_attention_heads", 20);
+    LOAD_ARG_OR_PREFIX(mm_audio_hidden_size, "d_model", 1280);
+    LOAD_ARG_OR_PREFIX(
+        mm_audio_downsample_hidden_size, "downsample_hidden_size", 480);
+    LOAD_ARG_OR_PREFIX(mm_audio_d_model, "d_model", 1280);
+    LOAD_ARG_OR_PREFIX(mm_audio_num_mel_bins, "num_mel_bins", 128);
+    LOAD_ARG_OR_PREFIX(
+        mm_audio_max_source_positions, "max_source_positions", 1500);
+    LOAD_ARG_OR_PREFIX(mm_audio_scale_embedding, "scale_embedding", false);
+    LOAD_ARG_OR_PREFIX(mm_audio_n_window, "n_window", 50);
+    LOAD_ARG_OR_PREFIX(mm_audio_n_window_infer, "n_window_infer", 800);
+    LOAD_ARG_OR_PREFIX(mm_audio_conv_chunksize, "conv_chunksize", 500);
+    // LOAD_ARG_OR_PREFIX(mm_audio_encoder_layers, "encoder_layers", 32);
+    LOAD_ARG_OR_PREFIX(mm_audio_encoder_layers, "encoder_layers", 0);
+    LOAD_ARG_OR_PREFIX(mm_audio_output_dim, "output_dim", 2048);
   });
   LOG(INFO) << std::to_string(args->mm_audio_encoder_layers());
 });

@@ -27,18 +27,26 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
     temporal_patch_size_ = args.mm_temporal_patch_size();
     use_audio_in_video_ = args.mm_use_audio_in_video();
     video_second_per_grid_ = temporal_patch_size_ / fps_;
+    vision_start_token_id_ = args.vision_start_token_id();
+    vision_end_token_id_ = args.vision_end_token_id();
+    image_token_id_ = args.image_token_id();
+    video_token_id_ = args.video_token_id();
+    audio_start_token_id_ = args.audio_start_token_id();
+    audio_end_token_id_ = args.audio_end_token_id();
   }
 
   void process(std::string& prompt, const MMData& mm_data) override {
+    /*
     prompt =
-        "<|im_start|>user\please describe the "
+        "<|im_start|>user\nplease describe the "
         "audio<|audio_start|><|audio_pad|><|audio_end|><|im_end|>\n<|im_start|>"
-        "assistant";
+        "assistant\n";
     prompt =
         "<|im_start|>user\nplease describe the "
         "audio<|vision_start|><|image_pad|><|vision_end|><|vision_start|><|"
         "video_pad|><|vision_end|><|audio_start|><|audio_pad|><|audio_end|><|"
         "im_end|>\n<|im_start|>assistant\n";
+    */
     LOG(INFO) << prompt;
     torch::Tensor image_grid_thw;
     if (auto res = mm_data.get<torch::Tensor>("image_grid_thw"))
@@ -48,15 +56,10 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
     if (auto res = mm_data.get<torch::Tensor>("video_grid_thw"))
       video_grid_thw = res.value();
 
-    torch::Tensor feature_attention_mask;
-    if (auto res = mm_data.get<torch::Tensor>("attention_mask"))
-      feature_attention_mask = res.value();
-
     torch::Tensor feat_length;
-    if (feature_attention_mask.defined())
-      feat_length =
-          get_feat_extract_output_lengths(feature_attention_mask.sum(-1));
-
+    if (auto res = mm_data.get<torch::Tensor>("feat_length"))
+      feat_length = res.value();
+    LOG(INFO) << "after here";
     if (!image_grid_thw.defined() && !video_grid_thw.defined()) return;
 
     auto merge_length = merge_size_ * merge_size_;
@@ -211,6 +214,49 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
     prompt = std::move(data);
   }
 
+  void find_mm_spans(const std::vector<int>& prompt, MMData& mm_data) {
+    auto start = prompt.begin();
+    uint32_t global_mm_index = 0;
+    uint32_t offset = 0;
+    uint32_t length = 0;
+    auto& mm_items = mm_data.items<MMItemVec>();
+    while (true) {
+      auto vision_start_it =
+          std::find(start, prompt.end(), vision_start_token_id_);
+      auto vision_end_it = std::find(start, prompt.end(), vision_end_token_id_);
+      auto audio_start_it =
+          std::find(start, prompt.end(), audio_start_token_id_);
+      auto audio_end_it = std::find(start, prompt.end(), audio_end_token_id_);
+      // vision_start_it == audio_start_it when reach the end
+      if (vision_start_it == audio_start_it) {
+        break;
+      }
+      LOG(INFO) << "audio start id is" << audio_start_token_id_;
+      LOG(INFO) << "vision end id is" << *(vision_end_it + 1);
+
+      auto test = std::distance(prompt.begin(), audio_start_it);
+      LOG(INFO) << "audio pos " << test;
+      auto min_start_it = std::min(vision_start_it, audio_start_it);
+      auto min_end_it = std::min(vision_end_it, audio_end_it);
+      offset = std::distance(prompt.begin(), min_start_it);
+      length = std::distance(min_start_it + 1, min_end_it);
+      LOG(INFO) << "offset " << offset;
+      LOG(INFO) << "length " << length;
+      auto& item = mm_items[global_mm_index];
+      if (*min_start_it == vision_start_token_id_) {
+        if (*(min_start_it + 1) == image_token_id_) {
+          item.mutable_state().mutable_token_pos() = {offset + 1, length};
+        } else if (*(min_start_it + 1) == video_token_id_) {
+          item.mutable_state().mutable_token_pos() = {offset + 1, length};
+        }
+      } else {
+        item.mutable_state().mutable_token_pos() = {offset + 1, length};
+      }
+      global_mm_index++;
+      start = std::next(min_end_it);
+    }
+  }
+
  private:
   std::pair<TokenType, size_t> find_special_token(const std::string& prompt,
                                                   size_t begin) {
@@ -254,6 +300,13 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
   const std::string audio_bos_token_ = "<|audio_start|>";
   const std::string audio_eos_token_ = "<|audio_end|>";
 
+  int32_t vision_start_token_id_;
+  int32_t vision_end_token_id_;
+  int32_t image_token_id_;
+  int32_t video_token_id_;
+  int32_t audio_start_token_id_;
+  int32_t audio_end_token_id_;
+
   int merge_size_ = 0;
   int position_id_per_seconds_ = 13;
   double fps_ = 1.0;
@@ -289,28 +342,38 @@ class Qwen3_Omni_Moe_ForConditionalGenerationImpl : public torch::nn::Module {
     return thinker_->logits(hidden_states, seleted_idxes);
   }
 
-  void load_model(std::shared_ptr<ModelLoader> loader) {
+  void load_model(std::unique_ptr<ModelLoader> loader) {
     LOG(INFO) << "start load thinker model";
     // talker_->load_model(loader);
     thinker_->load_model(std::move(loader));
   }
 
-  layer::LmHead get_lm_head() { return thinker_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { thinker_->set_lm_head(head); }
-
-  layer::WordEmbedding get_word_embedding() {
-    return thinker_->get_word_embedding();
+  torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
+                                     const ModelInputParams& input_params) {
+    return thinker_->get_input_embeddings(input_ids, input_params);
   }
 
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    thinker_->set_word_embedding(word_embedding);
+  MMDict get_multimodal_embeddings(const ModelInputParams& input_params) {
+    return thinker_->get_multimodal_embeddings(input_params);
+  }
+  layer::NpuLmHead get_npu_lm_head() { return thinker_->get_npu_lm_head(); }
+
+  void set_npu_lm_head(layer::NpuLmHead& head) {
+    thinker_->set_npu_lm_head(head);
+  }
+
+  layer::NpuWordEmbedding get_npu_word_embedding() {
+    return thinker_->get_npu_word_embedding();
+  }
+
+  void set_npu_word_embedding(layer::NpuWordEmbedding& npu_word_embedding) {
+    thinker_->set_npu_word_embedding(npu_word_embedding);
   }
 
  private:
   ModelArgs model_args_;
   torch::TensorOptions options_;
   Qwen3_Omni_Moe_Thinker_ForConditionalGeneration thinker_{nullptr};
-  Qwen3_Omni_MoeTalkerForConditionalGeneration talker_{nullptr};
 };
 TORCH_MODULE(Qwen3_Omni_Moe_ForConditionalGeneration);
 
@@ -348,6 +411,8 @@ REGISTER_MODEL_ARGS(qwen3_omni_moe, [&] {
     LOAD_ARG_OR_PREFIX(image_token_id, "image_token_id", 151655);
     LOAD_ARG_OR_PREFIX(video_token_id, "video_token_id", 151656);
     LOAD_ARG_OR_PREFIX(audio_token_id, "audio_token_id", 151675);
+    LOAD_ARG_OR_PREFIX(audio_start_token_id, "audio_start_token_id", 151669);
+    LOAD_ARG_OR_PREFIX(audio_end_token_id, "audio_end_token_id", 151670);
     LOAD_ARG_OR_PREFIX(dtype, "dtype", "bfloat16");
   });
 
@@ -430,7 +495,6 @@ REGISTER_MODEL_ARGS(qwen3_omni_moe, [&] {
     LOAD_ARG_OR_PREFIX(mm_audio_encoder_layers, "encoder_layers", 32);
     LOAD_ARG_OR_PREFIX(mm_audio_output_dim, "output_dim", 2048);
   });
-  LOG(INFO) << std::to_string(args->mm_audio_encoder_layers());
 });
 
 }  // namespace xllm
