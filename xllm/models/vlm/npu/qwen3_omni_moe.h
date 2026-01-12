@@ -50,6 +50,7 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
     vision_end_token_id_ = args.vision_end_token_id();
     image_token_id_ = args.image_token_id();
     video_token_id_ = args.video_token_id();
+    audio_token_id_ = args.audio_token_id();
     audio_start_token_id_ = args.audio_start_token_id();
     audio_end_token_id_ = args.audio_end_token_id();
   }
@@ -65,12 +66,14 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
         "audio<|vision_start|><|image_pad|><|vision_end|><|vision_start|><|"
         "video_pad|><|vision_end|><|audio_start|><|audio_pad|><|audio_end|><|"
         "im_end|>\n<|im_start|>assistant\n";
+    */
     prompt =
         "<|im_start|>user\nplease describe the "
-        "audio<|vision_start|><|image_pad|><|vision_end|><|vision_start|><|audio_start|><|"
+        "audio<|vision_start|><|image_pad|><|vision_end|><|vision_start|><|"
+        "audio_start|><|"
         "video_pad|><|audio_pad|><|audio_end|><|vision_end|><|"
         "im_end|>\n<|im_start|>assistant\n";
-    */
+
     LOG(INFO) << prompt;
     torch::Tensor image_grid_thw;
     if (auto res = mm_data.get<torch::Tensor>("image_grid_thw"))
@@ -280,7 +283,8 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
       auto& item = mm_items[global_mm_index];
       // use_audio_in_video case, offset subtract the audio_start_token,
       // length subtract the audio_start_token and audio_end_token
-      if (*min_start_it == vision_start_token_id_ && (*(min_start_it + 1) == audio_token_id_){
+      if (*min_start_it == vision_start_token_id_ &&
+          (*(min_start_it + 1) == audio_token_id_)) {
         item.mutable_state().mutable_token_pos() = {offset + 2, length - 2};
       } else {
         item.mutable_state().mutable_token_pos() = {offset + 1, length};
@@ -337,6 +341,7 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
   int32_t vision_end_token_id_;
   int32_t image_token_id_;
   int32_t video_token_id_;
+  int32_t audio_token_id_;
   int32_t audio_start_token_id_;
   int32_t audio_end_token_id_;
 

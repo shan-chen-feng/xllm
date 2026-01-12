@@ -34,6 +34,7 @@ WhisperFeatureExtractor::WhisperFeatureExtractor(const ModelArgs& args)
   do_normalize_ = args.mm_audio_do_normalize();
   return_token_timestamps_ = args.mm_audio_return_token_timestamps();
   return_attention_mask_ = args.mm_audio_return_attention_mask();
+  use_audio_in_video_ = args.mm_use_audio_in_video();
   padding_ = static_cast<PaddingStrategy>(args.mm_audio_padding_strategy());
 
   if (args.mm_audio_pad_to_multiple_of() > 0)
@@ -178,15 +179,35 @@ bool WhisperFeatureExtractor::process(const MMInput& mm_inputs,
                                       MMData& mm_datas) {
   LOG(INFO) << "start process data";
   std::vector<torch::Tensor> raw_speech;
-
+  std::vector<torch::Tensor> raw_speech_in_video;
   for (const auto& input_item : mm_inputs) {
     if ((input_item.type_ & MMType::AUDIO) &&
         input_item.decode_audio_.defined()) {
       raw_speech.push_back(input_item.decode_audio_);
+    } else if ((input_item.type_ & MMType::VIDEO) &&
+               input_item.decode_audio_.defined() && use_audio_in_video_) {
+      raw_speech_in_video.push_back(input_item.decode_audio_);
     }
   }
   LOG(INFO) << "current audio size: " << raw_speech.size();
+  LOG(INFO) << "current audio in vidoe size" << raw_speech_in_video.size();
+  bool process_result;
+  if (!raw_speech.empty()) {
+    process_result = process_audio(mm_inputs, mm_datas, raw_speech, false);
+  }
+  if (!raw_speech_in_video.empty() && use_audio_in_video_) {
+    process_result =
+        process_result &
+        process_audio(mm_inputs, mm_datas, raw_speech_in_video, true);
+  }
+  return process_result;
+}
 
+bool WhisperFeatureExtractor::process_audio(
+    const MMInput& mm_inputs,
+    MMData& mm_datas,
+    std::vector<torch::Tensor> raw_speech,
+    bool audio_in_video) {
   int64_t batch_size = raw_speech.size();
 
   if (raw_speech.empty()) {
@@ -274,13 +295,21 @@ bool WhisperFeatureExtractor::process(const MMInput& mm_inputs,
   torch::save(batched_feature.get<torch::Tensor>("attention_mask").value()[0],
               "mask.pt");
 
-  for (int feat_idx = 0; feat_idx < batch_size; feat_idx++) {
-    auto& item = mm_datas.add(MMType::AUDIO);
+  MMItemPtrVec audio_feature_items;
+  if (audio_in_video) {
+    mm_datas.get(MMType::VIDEO, audio_feature_items);
+  } else {
+    mm_datas.get(MMType::AUDIO, audio_feature_items);
+  }
+  LOG(INFO) << "audio_in_video " << audio_in_video << " size "
+            << audio_feature_items.size();
+  for (int feat_idx = 0; feat_idx < audio_feature_items.size(); feat_idx++) {
+    auto& item = audio_feature_items[feat_idx];
     if (!return_attention_mask_) {
       auto input_features = input_features_extracted[feat_idx].permute({1, 0});
       auto feature_lens = torch::tensor({input_features.size(0)}, torch::kLong);
       auto feat_length = get_feat_extract_output_lengths(feature_lens);
-      item.set_data(
+      item->set_data(
           {{"input_features", input_features}, {"feat_length", feat_length}});
     } else {
       torch::Tensor feat_origin_lens =
@@ -303,12 +332,20 @@ bool WhisperFeatureExtractor::process(const MMInput& mm_inputs,
 
       feat_length.print();
       std::cout << feat_length;
-      item.set_data(
-          {{"input_features", input_features},
-           {"feat_length",
-            torch::tensor({feat_length.item<int>()}, torch::kLong)},
-           {"feat_origin_lens",
-            torch::tensor({feat_origin_lens.item<int>()}, torch::kLong)}});
+      if (audio_in_video) {
+        item->add("input_features_in_video", input_features);
+        item->add("feat_length",
+                  torch::tensor({feat_length.item<int>()}, torch::kLong));
+        item->add("feat_origin_lens",
+                  torch::tensor({feat_origin_lens.item<int>()}, torch::kLong));
+      } else {
+        item->set_data(
+            {{"input_features", input_features},
+             {"feat_length",
+              torch::tensor({feat_length.item<int>()}, torch::kLong)},
+             {"feat_origin_lens",
+              torch::tensor({feat_origin_lens.item<int>()}, torch::kLong)}});
+      }
     }
   }
 
