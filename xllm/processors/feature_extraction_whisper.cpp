@@ -185,6 +185,7 @@ bool WhisperFeatureExtractor::process(const MMInput& mm_inputs,
       raw_speech.push_back(input_item.decode_audio_);
     }
   }
+  LOG(INFO) << "current audio size: " << raw_speech.size();
 
   int64_t batch_size = raw_speech.size();
 

@@ -47,6 +47,7 @@ cc_library(
     loader/qwen2_vision_encoder_loader.h
     loader/qwen2dot5_vision_encoder_loader.h
     loader/qwen3_vision_encoder_loader.h
+    loader/qwen3_audio_encoder_loader.h
     loader/rms_norm_loader.h
     loader/siglip_encoder_loader.h
     loader/base_loader.h
@@ -92,6 +93,7 @@ cc_library(
     loader/qwen2_vision_encoder_loader.cpp
     loader/qwen2dot5_vision_encoder_loader.cpp
     loader/qwen3_vision_encoder_loader.cpp
+    loader/qwen3_audio_encoder_loader.cpp
     loader/rms_norm_loader.cpp
     loader/siglip_encoder_loader.cpp
     loader/base_loader.cpp
