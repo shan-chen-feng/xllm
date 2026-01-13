@@ -181,12 +181,15 @@ bool WhisperFeatureExtractor::process(const MMInput& mm_inputs,
   std::vector<torch::Tensor> raw_speech;
   std::vector<torch::Tensor> raw_speech_in_video;
   for (const auto& input_item : mm_inputs) {
-    if ((input_item.type_ & MMType::AUDIO) &&
-        input_item.decode_audio_.defined()) {
-      raw_speech.push_back(input_item.decode_audio_);
-    } else if ((input_item.type_ & MMType::VIDEO) &&
-               input_item.decode_audio_.defined() && use_audio_in_video_) {
+    // in use_audio_in_video case, input_item.type_ & MMType::VIDEO
+    // and input_item.type_ & MMType::AUDIO could both be true
+    // so we start with video type
+    if ((input_item.type_ & MMType::VIDEO) &&
+        input_item.decode_audio_.defined() && use_audio_in_video_) {
       raw_speech_in_video.push_back(input_item.decode_audio_);
+    } else if ((input_item.type_ & MMType::AUDIO) &&
+               input_item.decode_audio_.defined()) {
+      raw_speech.push_back(input_item.decode_audio_);
     }
   }
   LOG(INFO) << "current audio size: " << raw_speech.size();
@@ -333,7 +336,7 @@ bool WhisperFeatureExtractor::process_audio(
       feat_length.print();
       std::cout << feat_length;
       if (audio_in_video) {
-        item->add("input_features_in_video", input_features);
+        item->add("input_features", input_features);
         item->add("feat_length",
                   torch::tensor({feat_length.item<int>()}, torch::kLong));
         item->add("feat_origin_lens",

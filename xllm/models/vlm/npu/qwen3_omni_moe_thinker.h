@@ -27,6 +27,7 @@ limitations under the License.
 
 #include <unordered_map>
 
+#include "core/common/global_flags.h"
 #include "core/framework/kv_cache/kv_cache.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context.h"
@@ -1148,7 +1149,6 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl
     if (const auto& res = mm_data.get<torch::Tensor>("feat_origin_lens"))
       feat_origin_lens = res.value();
 
-    LOG(INFO) << "feature_attention_mask " << feat_length.defined();
     if (pixel_values.defined() && image_grid_thw.defined())
       image_inputs = Qwen3_VLImageInputs{pixel_values, image_grid_thw};
 
@@ -1169,7 +1169,6 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl
     std::optional<Qwen3_OmniAudioInputs> audio_input;
     LOG(INFO) << "start get_multimodal_embeddings";
     prepare_encoder_input(input_params, image_input, video_input, audio_input);
-
     MMDict multimodal_embeds;
     auto merge_size = model_args_.mm_image_merge_size();
     LOG(INFO) << "image0";
@@ -1264,6 +1263,54 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl
           audio_embeds.split(feature_lens_vec, 0 /*dim*/);
       LOG(INFO) << "audio 5";
     }
+    if (FLAGS_use_audio_in_video && video_input && audio_input) {
+      auto origin_audio_embeds = std::get<std::vector<torch::Tensor>>(
+          multimodal_embeds["audio|embedding"]);
+      auto origin_video_embeds = std::get<std::vector<torch::Tensor>>(
+          multimodal_embeds["video|embedding"]);
+      std::vector<torch::Tensor> audio_in_video_embeds;
+      audio_in_video_embeds.reserve(origin_video_embeds.size());
+      std::vector<torch::Tensor> audio_embeds;
+      audio_embeds.reserve(origin_audio_embeds.size() -
+                           origin_video_embeds.size());
+      size_t audio_index = 0;
+      size_t video_index = 0;
+
+      const auto& mm_data = input_params.mm_data;
+      const auto& mm_data_vec = mm_data.mm_data_vec();
+      for (const auto mm_data : mm_data_vec) {
+        const auto& mm_items = mm_data.items<MMItemVec>();
+        for (const auto& item : mm_items) {
+          if (item.type() & MMType::AUDIO) {
+            audio_embeds.emplace_back(origin_audio_embeds[audio_index++]);
+          } else if (item.type() & MMType::VIDEO) {
+            auto video_embed = origin_video_embeds[video_index++];
+            auto audio_embed = origin_audio_embeds[audio_index++];
+            torch::Tensor audio_in_video_mask;
+            auto res = item.get<torch::Tensor>("audio_in_video_mask");
+            if (res.has_value()) {
+              audio_in_video_mask = res.value();
+            }
+            torch::Tensor audio_in_video_embedding = torch::ones(
+                {audio_in_video_mask.size(0), origin_video_embeds[0].size(1)},
+                options_);
+            auto video_mask =
+                torch::isin(audio_in_video_mask, model_args_.video_token_id());
+            auto audio_mask =
+                torch::isin(audio_in_video_mask, model_args_.audio_token_id());
+            LOG(INFO) << "audio_in_Video 1";
+            audio_in_video_embedding.index_put_({video_mask}, video_embed);
+            audio_in_video_embedding.index_put_({audio_mask}, audio_embed);
+            LOG(INFO) << "audio_in_Video 2";
+            audio_in_video_embedding.print();
+            audio_in_video_embeds.emplace_back(audio_in_video_embedding);
+          }
+        }
+      }
+      multimodal_embeds["audio|embedding"] = audio_embeds;
+      multimodal_embeds["video|embedding"] = audio_in_video_embeds;
+    }
+    LOG(INFO) << "finish";
     return multimodal_embeds;
   }
 
@@ -1422,7 +1469,8 @@ REGISTER_MODEL_ARGS(qwen3_omni_moe_thinker, [&] {
   LOAD_ARG_OR(
       mm_audio_return_token_timestamps, "return_token_timestamps", false);
   LOAD_ARG_OR(mm_audio_return_attention_mask, "return_attention_mask", true);
-  LOAD_ARG_OR(mm_use_audio_in_video, "use_audio_in_video", true);
+  LOAD_ARG_OR(
+      mm_use_audio_in_video, "use_audio_in_video", FLAGS_use_audio_in_video);
   LOAD_ARG_OR(mm_position_id_per_seconds, "position_id_per_seconds", 13);
 
   // thinker config

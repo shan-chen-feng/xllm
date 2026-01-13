@@ -66,14 +66,13 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
         "audio<|vision_start|><|image_pad|><|vision_end|><|vision_start|><|"
         "video_pad|><|vision_end|><|audio_start|><|audio_pad|><|audio_end|><|"
         "im_end|>\n<|im_start|>assistant\n";
-    */
     prompt =
         "<|im_start|>user\nplease describe the "
         "audio<|vision_start|><|image_pad|><|vision_end|><|vision_start|><|"
         "audio_start|><|"
         "video_pad|><|audio_pad|><|audio_end|><|vision_end|><|"
         "im_end|>\n<|im_start|>assistant\n";
-
+    */
     LOG(INFO) << prompt;
     torch::Tensor image_grid_thw;
     if (auto res = mm_data.get<torch::Tensor>("image_grid_thw"))
@@ -152,7 +151,7 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
       modality_size_ptr = cur_modality.modality_size_ptr;
       modality_token_ptr = cur_modality.modality_token_ptr;
       modality_index_ptr = cur_modality.modality_index_ptr;
-
+      LOG(INFO) << "use_audio " << use_audio_in_video_;
       LOG(INFO) << *modality_token_ptr;
       if (pair.first == TokenType::AUDIO) {
         // for audio
@@ -170,7 +169,6 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
         auto audio_token_indices =
             torch::arange((*audio_size_ptr)[(*audio_index_ptr)].item<int32_t>())
                 .to(torch::kInt32);
-        std::cout << audio_token_indices;
         auto video_grid_thw = (*modality_size_ptr)[(*modality_index_ptr)];
         int32_t T = video_grid_thw[0].item<int32_t>();
         int32_t H = video_grid_thw[1].item<int32_t>();
@@ -187,11 +185,10 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
         video_token_indices = video_token_indices.reshape({-1});
         video_token_indices = video_token_indices * video_second_per_grid_ *
                               position_id_per_seconds_;
-        std::cout << video_token_indices;
         auto video_indices_vec = video_token_indices.accessor<float, 1>();
         auto audio_indices_vec = audio_token_indices.accessor<int32_t, 1>();
 
-        std::string placeholder_string = "";
+        std::string placeholder_string = audio_bos_token_;
 
         size_t video_data_index = 0;
         size_t audio_data_index = 0;
@@ -235,10 +232,6 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
       }
       ++(*modality_index_ptr);
       begin = pair.second + modality_token_ptr->size();
-      if (pair.first == TokenType::VIDEO && use_audio_in_video_) {
-        // need to skip video and audio pad token in use_audio_in_video case
-        begin = begin + audio_token_.size();
-      }
       pair = find_special_token(prompt, begin);
     }
 
@@ -269,13 +262,18 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
       if (vision_start_it == audio_start_it) {
         break;
       }
-      LOG(INFO) << "audio start id is" << audio_start_token_id_;
-      LOG(INFO) << "vision end id is" << *(vision_end_it + 1);
 
-      auto test = std::distance(prompt.begin(), audio_start_it);
-      LOG(INFO) << "audio pos " << test;
+      auto audio_begin = std::distance(prompt.begin(), audio_start_it);
+      auto audio_end = std::distance(prompt.begin(), audio_end_it);
+      auto video_begin = std::distance(prompt.begin(), vision_start_it);
+      auto video_end = std::distance(prompt.begin(), vision_end_it);
+      LOG(INFO) << "audio begin " << audio_begin;
+      LOG(INFO) << "video_begin " << video_begin;
+      LOG(INFO) << "audio end " << audio_end;
+      LOG(INFO) << "video_end " << video_end;
       auto min_start_it = std::min(vision_start_it, audio_start_it);
       auto min_end_it = std::min(vision_end_it, audio_end_it);
+      auto max_end_it = std::max(vision_end_it, audio_end_it);
       offset = std::distance(prompt.begin(), min_start_it);
       length = std::distance(min_start_it + 1, min_end_it);
       LOG(INFO) << "offset " << offset;
@@ -284,8 +282,18 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
       // use_audio_in_video case, offset subtract the audio_start_token,
       // length subtract the audio_start_token and audio_end_token
       if (*min_start_it == vision_start_token_id_ &&
-          (*(min_start_it + 1) == audio_token_id_)) {
-        item.mutable_state().mutable_token_pos() = {offset + 2, length - 2};
+          (*(min_start_it + 1) == audio_start_token_id_)) {
+        item.mutable_state().mutable_token_pos() = {offset + 2, length - 1};
+        std::vector<int> audio_in_video_propmt(
+            prompt.begin() + offset + 2,
+            prompt.begin() + offset + 2 + length - 1);
+        LOG(INFO) << audio_in_video_propmt.size();
+        LOG(INFO) << "begin print";
+        torch::Tensor audio_in_video_mask =
+            torch::tensor(audio_in_video_propmt, torch::kInt32);
+        item.add("audio_in_video_mask", audio_in_video_mask);
+        // audio_in_video case, vision end is always greater than audio_end
+        min_end_it = max_end_it;
       } else {
         item.mutable_state().mutable_token_pos() = {offset + 1, length};
       }
@@ -436,7 +444,8 @@ REGISTER_MODEL_ARGS(qwen3_omni_moe, [&] {
       mm_audio_return_token_timestamps, "return_token_timestamps", false);
   LOAD_ARG_OR(mm_audio_return_attention_mask, "return_attention_mask", true);
   // TODO: use gflag instead
-  LOAD_ARG_OR(mm_use_audio_in_video, "use_audio_in_video", true);
+  LOAD_ARG_OR(
+      mm_use_audio_in_video, "use_audio_in_video", FLAGS_use_audio_in_video);
   LOAD_ARG_OR(mm_position_id_per_seconds, "position_id_per_seconds", 13);
   LOAD_ARG_OR(mm_fps, "fps", 1.0);
   LOAD_ARG_OR(mm_temporal_patch_size, "temporal_patch_size", 2);
