@@ -1144,9 +1144,7 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl
       multimodal_embeds["image|embedding"] =
           image_embeds.split(image_tokens_vec, 0 /*dim*/);
       for (size_t i = 0; i < deep_stacks.size(); ++i) {
-        // multimodal_embeds[std::string("image|deepstack_") +
-        multimodal_embeds[std::string("image|embedding|deepstack_") +
-                          std::to_string(i)] =
+        multimodal_embeds[std::string("image|deepstack_") + std::to_string(i)] =
             deep_stacks[i].split(image_tokens_vec, 0 /*dim*/);
       }
     }
@@ -1155,6 +1153,7 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl
           visual_(video_input->pixel_values_videos.to(options_),
                   video_input->video_grid_thw.to(options_.device()),
                   input_params);
+
       auto video_tokens =
           (video_input->video_grid_thw.prod(-1) / merge_size / merge_size)
               .cpu()
@@ -1166,9 +1165,7 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl
       multimodal_embeds["video|embedding"] =
           video_embeds.split(video_tokens_vec, 0 /*dim*/);
       for (size_t i = 0; i < deep_stacks.size(); ++i) {
-        // multimodal_embeds[std::string("video|deepstack_") +
-        multimodal_embeds[std::string("video|embedding|deepstack_") +
-                          std::to_string(i)] =
+        multimodal_embeds[std::string("video|deepstack_") + std::to_string(i)] =
             deep_stacks[i].split(video_tokens_vec, 0 /*dim*/);
       }
     }
@@ -1260,17 +1257,14 @@ class Qwen3_Omni_Moe_Thinker_ForConditionalGenerationImpl
   std::vector<torch::Tensor> get_deep_stacks(
       const ModelInputParams& input_params) {
     const auto& mm_data = input_params.mm_data;
-    if (!mm_data.has("embedding|deepstack_0")) {
+    if (!mm_data.has("deepstack_0")) {
       return {};
     }
 
     std::vector<torch::Tensor> deepstacks = {
-        mm_data.get<torch::Tensor>("embedding|deepstack_0").value(),
-        mm_data.get<torch::Tensor>("embedding|deepstack_1").value(),
-        mm_data.get<torch::Tensor>("embedding|deepstack_2").value()};
-    // mm_data.get<torch::Tensor>("deepstack_0").value(),
-    // mm_data.get<torch::Tensor>("deepstack_1").value(),
-    // mm_data.get<torch::Tensor>("deepstack_2").value()};
+        mm_data.get<torch::Tensor>("deepstack_0").value(),
+        mm_data.get<torch::Tensor>("deepstack_1").value(),
+        mm_data.get<torch::Tensor>("deepstack_2").value()};
     return deepstacks;
   }
 

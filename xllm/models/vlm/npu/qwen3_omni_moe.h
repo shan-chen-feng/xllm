@@ -68,7 +68,9 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
     if (auto res = mm_data.get<torch::Tensor>("feat_length"))
       feat_length = res.value();
 
-    if (!image_grid_thw.defined() && !video_grid_thw.defined()) return;
+    if (!image_grid_thw.defined() && !video_grid_thw.defined() &&
+        !feat_length.defined())
+      return;
 
     auto merge_length = merge_size_ * merge_size_;
 
@@ -128,6 +130,7 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
       modality_size_ptr = cur_modality.modality_size_ptr;
       modality_token_ptr = cur_modality.modality_token_ptr;
       modality_index_ptr = cur_modality.modality_index_ptr;
+
       if (pair.first == TokenType::AUDIO) {
         // for audio
         auto token_num =
@@ -287,7 +290,6 @@ class Qwen3_Omni_Moe_InputProcessor : public InputProcessor {
                            if (b.pos == std::string::npos) return true;
                            return a.pos < b.pos;
                          });
-
     if (earliest == tokens.end() || earliest->pos == std::string::npos) {
       return {TokenType::INVALID, std::string::npos};
     }
