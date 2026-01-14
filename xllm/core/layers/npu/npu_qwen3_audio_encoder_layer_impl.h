@@ -113,6 +113,6 @@ class NpuQwen3AudioEncoderLayerImpl : public BaseLayer {
   std::vector<torch::Tensor> qkv_bias;
   int device_id_;
 };
-
+TORCH_MODULE(NpuQwen3AudioEncoderLayer);
 }  // namespace layer
 }  // namespace xllm

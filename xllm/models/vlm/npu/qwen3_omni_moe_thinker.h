@@ -32,8 +32,8 @@ limitations under the License.
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
-#include "core/layers/npu/npu_qwen3_vision_encoder_layer_impl.h"
 #include "core/layers/npu/npu_qwen3_audio_encoder_layer_impl.h"
+#include "core/layers/npu/npu_qwen3_vision_encoder_layer_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
 #include "framework/state_dict/state_dict.h"
 #include "models/llm/npu/qwen3_moe.h"
@@ -85,7 +85,7 @@ class Qwen3_Omni_Moe_Thinker_AudioBlockImpl : public torch::nn::Module {
   Qwen3_Omni_Moe_Thinker_AudioBlockImpl(const ModelContext& context) {
     // register submodules
     encoder_layer_ = register_module("encoder_layer",
-                                     layer::Qwen3AudioEncoderLayer(context));
+                                     layer::NpuQwen3AudioEncoderLayer(context));
   }
 
   torch::Tensor forward(torch::Tensor& x,
@@ -110,7 +110,7 @@ class Qwen3_Omni_Moe_Thinker_AudioBlockImpl : public torch::nn::Module {
 #endif
 
  private:
-  layer::Qwen3AudioEncoderLayer encoder_layer_{nullptr};
+  layer::NpuQwen3AudioEncoderLayer encoder_layer_{nullptr};
 };
 TORCH_MODULE(Qwen3_Omni_Moe_Thinker_AudioBlock);
 

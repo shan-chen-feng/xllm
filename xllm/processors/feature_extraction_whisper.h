@@ -7,8 +7,6 @@
 #include <numeric>
 #include <stdexcept>
 
-#include "core/framework/model_context.h"
-#include "core/util/audio_utils.h"
 #include "feature_extractor.h"
 
 namespace xllm {

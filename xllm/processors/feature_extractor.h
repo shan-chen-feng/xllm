@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/mm_data.h"
 #include "core/framework/request/mm_input.h"
+#include "core/util/audio_utils.h"
 
 namespace xllm {
 
