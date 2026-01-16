@@ -64,7 +64,7 @@ void NpuEagle3DecoderLayerImpl::param_from_args(
   param.rmsNormEps = args.rms_norm_eps();
   param.worldSize = parallel_args.world_size();
   param.numAttentionHeadsPerRank = args.n_heads() / param.worldSize;
-  param.hiddenSizePerAttentionHead = args.hidden_size() / args.n_heads();
+  param.hiddenSizePerAttentionHead = args.head_dim();
   param.enableIntraLayerAddNorm = false;
   param.enableInterLayerAddNorm = false;
   // param.numKeyValueHeadsPerRank = args.n_kv_heads();

@@ -161,7 +161,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
 
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
-    std::vector<torch::Tensor> aux_hidden_states_vec;
+    torch::Tensor aux_hidden_states;
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event{nullptr};
       std::atomic<bool>* event_flag{nullptr};
@@ -178,7 +178,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
 
       if (std::find(layers_to_capture_.begin(), layers_to_capture_.end(), i) !=
           layers_to_capture_.end()) {
-        aux_hidden_states_vec.emplace_back(h);
+        aux_hidden_states = torch::cat({aux_hidden_states, h}, /*dim=*/1);
       }
 
       layer(h,
@@ -196,7 +196,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
         }
       }
     }
-    auto aux_hidden_states = torch::cat(aux_hidden_states_vec, /*dim=*/1);
     return ModelOutput(norm_(h, 0), torch::Tensor(), aux_hidden_states);
   }
 
