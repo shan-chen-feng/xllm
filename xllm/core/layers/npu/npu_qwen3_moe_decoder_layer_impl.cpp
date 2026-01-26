@@ -75,6 +75,10 @@ void NpuQwen3MoeDecoderLayerImpl::initialize_tensors(
   one_hot_ = torch::tensor({1}, torch::kInt32).to(device_);
   zero_hot_ = torch::tensor({0}, torch::kInt32).to(device_);
   expert_group_ = torch::tensor({1}, torch::dtype(torch::kInt32)).to(device_);
+  quant_add_norm_scaling_ =
+      torch::tensor({1}, torch::dtype(torch::kInt32)).to(device_);
+  quant_add_norm_offset_ =
+      torch::tensor({1}, torch::dtype(torch::kInt32)).to(device_);
 }
 
 void NpuQwen3MoeDecoderLayerImpl::param_from_args(
@@ -100,6 +104,11 @@ void NpuQwen3MoeDecoderLayerImpl::initialize_basic_parameters(
   param.enableSwiGLU = true;
   param.enableLcoc = is_prefill;  // false;
 
+  param.enableAclnnExternelAddRmsNorm = !is_prefill;
+  param.enableAclnnAddRmsNorm = !is_prefill;
+  param.enableInitV3 = !is_prefill;
+  param.enableSplitRmsNormRope = !is_prefill;
+  param.enableFusedReducesumDiv = !is_prefill;
   param.mlpLinearTransposeType = {-1, -1, -1, -1};
 
   param.enableSplitFuse =
@@ -167,7 +176,7 @@ void NpuQwen3MoeDecoderLayerImpl::initialize_mlp_parameters(
   param.enableFusedRouting = 1;
   param.numOfExperts = args.num_experts();
   param.maskStartIdx = 0;
-  param.routingMethod = "softMaxTopK";
+  param.routingMethod = "integratedSoftmaxTopK";  //"softMaxTopK";
 
   param.quantGroupSize = 0;
 
@@ -260,7 +269,7 @@ int64_t NpuQwen3MoeDecoderLayerImpl::init_node(
   CHECK_NOTNULL(node.operation);
   CHECK_GT(node.operation->GetInputNum(), 0);
   node.inTensors.resize(node.operation->GetInputNum());
-  node.outTensors.resize(1);
+  node.outTensors.resize(node.operation->GetOutputNum());
   size_t inTensorId = 1;
 
   for (size_t weightTensorId = 0; weightTensorId < WEIGHT_COUNT_PER_LAYER;
@@ -270,8 +279,8 @@ int64_t NpuQwen3MoeDecoderLayerImpl::init_node(
 
   node.variantPack.inTensors.reserve(node.inTensors.size());
   node.variantPack.inTensors.resize(node.inTensors.size());
-  node.variantPack.outTensors.reserve(1);
-  node.variantPack.outTensors.resize(1);
+  node.variantPack.outTensors.reserve(node.outTensors.size());
+  node.variantPack.outTensors.resize(node.outTensors.size());
 
   return atb::NO_ERROR;
 }
@@ -285,6 +294,7 @@ torch::Tensor NpuQwen3MoeDecoderLayerImpl::forward(
     const ModelInputParams& input_params,
     aclrtEvent* event,
     std::atomic<bool>* event_flag,
+    torch::Tensor residual_tensor,
     int node_id) {
   atb::Status st;
   if (!input_params.batch_forward_type.is_decode()) {
@@ -295,7 +305,8 @@ torch::Tensor NpuQwen3MoeDecoderLayerImpl::forward(
                             attn_mask,
                             kv_cache,
                             input_params,
-                            true);
+                            true,
+                            residual_tensor);
     st = execute_node(prefill_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
                            << "excute prefill layer fail, error code: " << st;
@@ -307,7 +318,8 @@ torch::Tensor NpuQwen3MoeDecoderLayerImpl::forward(
                             /*attn_mask*/ tensor_placeholder_,
                             kv_cache,
                             input_params,
-                            false);
+                            false,
+                            residual_tensor);
     st = execute_node(decode_node_, node_id + 1000, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
                            << "excute decode layer fail, error code: " << st;
@@ -324,7 +336,8 @@ void NpuQwen3MoeDecoderLayerImpl::build_node_variant_pack(
     torch::Tensor& attn_mask,
     KVCache& kv_cache,
     const ModelInputParams& input_params,
-    bool is_prefill) {
+    bool is_prefill,
+    torch::Tensor residual_tensor) {
   internal_tensor_ = atb_speed::Utils::AtTensor2Tensor(x);
   int32_t input_idx = 0;
   auto& dp_ep_padding = input_params.dp_ep_padding_data;
@@ -401,6 +414,18 @@ void NpuQwen3MoeDecoderLayerImpl::build_node_variant_pack(
     node.variantPack.inTensors.at(input_idx++) =
         atb_speed::Utils::AtTensor2Tensor(
             input_params.graph_buffer.tiling_data);
+  }
+
+  if (true && !is_prefill && residual_tensor.defined()) {
+    node.variantPack.inTensors.at(input_idx++) =
+        atb_speed::Utils::AtTensor2Tensor(residual_tensor);
+    node.variantPack.inTensors.at(input_idx++) =
+        atb_speed::Utils::AtTensor2Tensor(quant_add_norm_scaling_);
+    node.variantPack.inTensors.at(input_idx++) =
+        atb_speed::Utils::AtTensor2Tensor(quant_add_norm_offset_);
+    // residual
+    residual_tensor_ = atb_speed::Utils::AtTensor2Tensor(residual_tensor);
+    node.variantPack.outTensors.at(1) = residual_tensor_;
   }
 
   for (size_t i = 0; i < WEIGHT_COUNT_PER_LAYER; ++i) {

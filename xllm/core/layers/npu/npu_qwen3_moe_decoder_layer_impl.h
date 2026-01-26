@@ -56,6 +56,7 @@ class NpuQwen3MoeDecoderLayerImpl : public BaseLayer {
                         const ModelInputParams& input_params,
                         aclrtEvent* event = nullptr,
                         std::atomic<bool>* event_flag = nullptr,
+                        torch::Tensor residual_tensor = torch::Tensor(),
                         int node_id = 0);
 
  private:
@@ -103,7 +104,8 @@ class NpuQwen3MoeDecoderLayerImpl : public BaseLayer {
                                torch::Tensor& attn_mask,
                                KVCache& kv_cache,
                                const ModelInputParams& input_params,
-                               bool is_prefill);
+                               bool is_prefill,
+                               torch::Tensor residual_tensor = torch::Tensor());
 
   torch::Tensor block_tables_placeholder_;
   std::string model_name_;
@@ -133,12 +135,15 @@ class NpuQwen3MoeDecoderLayerImpl : public BaseLayer {
   atb_speed::Model::Node decode_node_;
 
   atb::Tensor internal_tensor_;
+  atb::Tensor residual_tensor_;
 
   torch::Tensor tensor_placeholder_;
   torch::Tensor slot_tensor_placeholder_;
   torch::Tensor int_tensor_placeholder_;
   torch::Tensor decode_attn_mask_;
   torch::Tensor expert_group_;
+  torch::Tensor quant_add_norm_scaling_;
+  torch::Tensor quant_add_norm_offset_;
   torch::Tensor one_hot_;
   torch::Tensor zero_hot_;
   torch::Tensor final_hidden_states_;

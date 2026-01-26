@@ -45,7 +45,8 @@ class Qwen3MoeDecoderLayerImpl : public torch::nn::Module {
                         KVCache& kv_cache,
                         const ModelInputParams& input_params,
                         aclrtEvent* event = nullptr,
-                        std::atomic<bool>* event_flag = nullptr) {
+                        std::atomic<bool>* event_flag = nullptr,
+                        torch::Tensor residual_tensor = torch::Tensor()) {
     return decoder_layer_(x,
                           cos_pos,
                           sin_pos,
@@ -53,7 +54,8 @@ class Qwen3MoeDecoderLayerImpl : public torch::nn::Module {
                           kv_cache,
                           input_params,
                           event,
-                          event_flag);
+                          event_flag,
+                          residual_tensor);
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -154,6 +156,8 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     for (int i = 0; i < parallel_args.world_size(); i += dp_local_tp_size_) {
       indices.push_back(i);
     }
+    layers_to_capture_ = {
+        2, model_args.n_layers() / 2, model_args.n_layers() - 3};
   }
 
   torch::Tensor deepstack_process(torch::Tensor hidden_states,
@@ -255,8 +259,11 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
         torch::TensorOptions().dtype(torch::kInt32).device(tokens.device()));
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
+    torch::Tensor aux_hidden_states;
+
     input_params_new.expert_array = expert_array;
 
+    torch::Tensor residual_tensor = torch::zeros_like(h);
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event = nullptr;
       std::atomic<bool>* event_flag = nullptr;
@@ -268,6 +275,22 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
         return ModelOutput();
       }
 
+      /* -------------------------
+      TODO: externel add norm is conflit with eagle3,
+      as enable  externel add norm returns mlp_output instead hidden_states
+      use gflag to control whether add the residual_tensor to get the true
+      hidden_states value.
+      --------------------------- */
+      if (std::find(layers_to_capture_.begin(), layers_to_capture_.end(), i) !=
+          layers_to_capture_.end()) {
+        if (input_params.batch_forward_type.is_decode()) {
+          aux_hidden_states =
+              torch::cat({aux_hidden_states, h + residual_tensor}, /*dim=*/1);
+        } else {
+          aux_hidden_states = torch::cat({aux_hidden_states, h}, /*dim=*/1);
+        }
+      }
+
       auto& layer = layers_[i];
       layer(h,
             cos_pos,
@@ -276,12 +299,16 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
             kv_caches[i],
             input_params,
             event,
-            event_flag);
+            event_flag,
+            residual_tensor);
       if (deep_stack_size && i < deep_stack_size) {
         h = deepstack_process(h, input_params.visual_pos_masks, deep_stacks[i]);
       }
     }
-    return ModelOutput(norm_(h, 0));
+    if (residual_tensor.defined()) h = h + residual_tensor;
+
+    // return ModelOutput(norm_(h, 0));
+    return ModelOutput(norm_(h, 0), torch::Tensor(), aux_hidden_states);
   }
 
   // load the weight from the checkpoint
@@ -341,6 +368,7 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
   torch::Tensor cos_sin_;
   layer::NpuPosEmbedding atb_pos_emb_{nullptr};
   std::vector<int64_t> mrope_section_;
+  std::vector<int64_t> layers_to_capture_;
 };
 TORCH_MODULE(Qwen3MoeModel);
 
