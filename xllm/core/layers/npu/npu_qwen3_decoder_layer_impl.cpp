@@ -68,7 +68,8 @@ void NpuQwen3DecoderLayerImpl::param_from_args(
 
   param.numHiddenLayers = args.n_layers();
   param.enableIntraLayerAddNorm = true;
-  param.enableInterLayerAddNorm = false;
+  param.enableInterLayerAddNorm = true;
+  param.enableSplitRmsNormRope = !isPrefill;
   param.enablePreFetchWeight = FLAGS_enable_prefetch_weight;
   param.enableAclGraphPagedAttention = FLAGS_enable_graph && !isPrefill;
   initialize_parallel_parameters(param, parallel_args);
@@ -165,6 +166,7 @@ NpuQwen3DecoderLayerImpl::NpuQwen3DecoderLayerImpl(const ModelContext& context)
       context,
       prefill_param_.enableIntraLayerAddNorm ||
           prefill_param_.enableInterLayerAddNorm);
+  num_hidden_layers_ = model_args.n_layers();
 }
 
 void NpuQwen3DecoderLayerImpl::merge_loaded_weights() {
@@ -207,7 +209,7 @@ int64_t NpuQwen3DecoderLayerImpl::init_node(
   CHECK_NOTNULL(node.operation);
   CHECK_GT(node.operation->GetInputNum(), 0);
   node.inTensors.resize(node.operation->GetInputNum());
-  node.outTensors.resize(1);
+  node.outTensors.resize(node.operation->GetOutputNum());
   size_t inTensorId = 1;
 
   for (size_t weightTensorId = 0; weightTensorId < WEIGHT_COUNT_PER_LAYER;
@@ -217,8 +219,8 @@ int64_t NpuQwen3DecoderLayerImpl::init_node(
 
   node.variantPack.inTensors.reserve(node.inTensors.size());
   node.variantPack.inTensors.resize(node.inTensors.size());
-  node.variantPack.outTensors.reserve(1);
-  node.variantPack.outTensors.resize(1);
+  node.variantPack.outTensors.reserve(node.outTensors.size());
+  node.variantPack.outTensors.resize(node.outTensors.size());
 
   return atb::NO_ERROR;
 }
@@ -243,7 +245,9 @@ torch::Tensor NpuQwen3DecoderLayerImpl::forward(torch::Tensor& x,
                             attn_mask,
                             kv_cache,
                             input_params,
-                            true);
+                            true,
+                            node_id);
+
     // mstxRangeEnd(id);
     st = execute_node(prefill_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
@@ -256,7 +260,9 @@ torch::Tensor NpuQwen3DecoderLayerImpl::forward(torch::Tensor& x,
                             decode_attn_mask_,
                             kv_cache,
                             input_params,
-                            false);
+                            false,
+                            node_id);
+
     st = execute_node(decode_node_, node_id + 1000, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
                            << "excute decode layer fail, error code: " << st;
@@ -273,8 +279,11 @@ void NpuQwen3DecoderLayerImpl::build_node_variant_pack(
     at::Tensor& attn_mask,
     KVCache& kv_cache,
     ModelInputParams& input_params,
-    bool is_prefill) {
+    bool is_prefill,
+    uint32_t node_id) {
   internal_tensors_ = atb_speed::Utils::AtTensor2Tensor(x);
+  if (residual_.has_value() && residual_.value().defined())
+    residual_tensors_ = atb_speed::Utils::AtTensor2Tensor(residual_.value());
   // std::cout<<"node.variantPack.inTensors.size:"<<node.variantPack.inTensors.size()<<std::endl;
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER) = internal_tensors_;
   node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 1) =
@@ -309,6 +318,12 @@ void NpuQwen3DecoderLayerImpl::build_node_variant_pack(
         input_params.q_seq_lens_vec.data();
   }
 
+  if (true && node_id > 0 && residual_.has_value() &&
+      residual_.value().defined()) {
+    node.variantPack.inTensors.at(input_idx++) = residual_tensors_;
+    residual_.value().print();
+  }
+
   if (FLAGS_enable_graph && !is_prefill &&
       input_params.graph_buffer.tiling_data.defined()) {
     node.variantPack.inTensors.at(input_idx++) =
@@ -323,6 +338,10 @@ void NpuQwen3DecoderLayerImpl::build_node_variant_pack(
   }
 
   node.variantPack.outTensors.at(0) = internal_tensors_;
+  if (true && (node_id < num_hidden_layers_ - 1) && residual_.has_value() &&
+      residual_.value().defined()) {
+    node.variantPack.outTensors.at(1) = residual_tensors_;
+  }
 }
 
 }  // namespace layer

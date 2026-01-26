@@ -162,6 +162,7 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
     torch::Tensor aux_hidden_states;
+    torch::Tensor residual = torch::zeros_like(h, h.options());
     for (size_t i = 0; i < layers_.size(); i++) {
       aclrtEvent* event{nullptr};
       std::atomic<bool>* event_flag{nullptr};
@@ -188,7 +189,8 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
             kv_caches[i],
             input_params_new,
             event,
-            event_flag);
+            event_flag,
+            residual);
       if (use_deepstack) {
         if (deep_stacks.size() > 0 && i < deep_stacks.size()) {
           h = deepstack_process(

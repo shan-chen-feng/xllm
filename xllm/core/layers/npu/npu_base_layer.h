@@ -166,6 +166,12 @@ class BaseLayer : public torch::nn::Module {
   void correct_tensor_dtype(torch::Tensor& tensor,
                             const std::string& tensorName);
 
+  virtual void set_layer_id(int32_t layer_id) { layer_id_ = layer_id; }
+
+  void set_residual(std::optional<torch::Tensor> residual) {
+    residual_ = residual;
+  }
+
  protected:
   atb::Tensor XTensor2Tensor(const std::shared_ptr<xllm::XTensor>& xtensor);
 
@@ -185,6 +191,8 @@ class BaseLayer : public torch::nn::Module {
   int32_t dp_local_tp_size_;
   int32_t dp_rank_;
   int32_t dp_local_tp_rank_;
+  int32_t layer_id_;
+  std::optional<torch::Tensor> residual_;
   atb::Context* context_;
   std::shared_ptr<AtbWorkspace> work_space_ = nullptr;
   std::vector<atb::Tensor> atb_weight_tensors_;

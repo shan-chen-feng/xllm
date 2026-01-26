@@ -63,6 +63,11 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
                         std::atomic<bool>* event_flag = nullptr,
                         int node_id = 0);
 
+  void set_layer_id(int32_t layer_id) override {
+    prefill_param_.layerId = layer_id;
+    decode_param_.layerId = layer_id;
+  }
+
  private:
   void param_from_args(atb_speed::qwen::QwenLayerParam& param,
                        const ModelArgs& args,
@@ -76,7 +81,8 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
                                torch::Tensor& attn_mask,
                                KVCache& kv_cache,
                                ModelInputParams& input_params,
-                               bool is_prefill);
+                               bool is_prefill,
+                               uint32_t node_id = 0);
 
   void initialize_parallel_parameters(atb_speed::qwen::QwenLayerParam& param,
                                       const ParallelArgs& parallel_args);
@@ -97,12 +103,14 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
   atb::Tensor internal_tensors_;
   atb::Tensor placeholder_;
 
+  atb::Tensor residual_tensors_;
+
   at::Tensor decode_attn_mask_;
 
   at::Tensor at_placeholder_;
 
   int device_id_;
-  int32_t layer_id_;
+  int64_t num_hidden_layers_;
   int rank_id_;
   std::vector<std::shared_ptr<at::Tensor>> prefill_tensor_storage_;
   std::vector<std::shared_ptr<at::Tensor>> decode_tensor_storage_;

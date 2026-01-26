@@ -50,17 +50,20 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
     CHECK(layer_id_ >= 0) << "layer_id must be >= 0, but got " << layer_id_;
     // register submodules
     decoder_layer_ = register_module("decoder_layer", DecoderType(context));
+    decoder_layer_->set_layer_id(layer_id);
     block_copy_ = register_module("block_copy", layer::NpuBlockCopy(context));
   }
 
-  virtual torch::Tensor forward(torch::Tensor& x,
-                                torch::Tensor& cos_pos,
-                                torch::Tensor& sin_pos,
-                                torch::Tensor& attn_mask,
-                                KVCache& kv_cache,
-                                ModelInputParams& input_params,
-                                aclrtEvent* event,
-                                std::atomic<bool>* event_flag) {
+  virtual torch::Tensor forward(
+      torch::Tensor& x,
+      torch::Tensor& cos_pos,
+      torch::Tensor& sin_pos,
+      torch::Tensor& attn_mask,
+      KVCache& kv_cache,
+      ModelInputParams& input_params,
+      aclrtEvent* event,
+      std::atomic<bool>* event_flag,
+      std::optional<torch::Tensor> residual = std::nullopt) {
     if (input_params.src_block_indices.numel() > 0) {
       block_copy_(kv_cache.get_k_cache(),
                   kv_cache.get_v_cache(),
@@ -69,6 +72,8 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
                   input_params.cum_sum,
                   0);
     }
+
+    decoder_layer_->set_residual(residual);
 
     return decoder_layer_(x,
                           cos_pos,
