@@ -47,13 +47,13 @@ std::pair<torch::Tensor, int64_t> retrieve_timesteps(
   if (sigmas.has_value()) {
     steps = sigmas->size();
     scheduler->set_timesteps(
-        static_cast<int>(steps), device, *sigmas, mu, std::nullopt);
+        static_cast<int64_t>(steps), device, *sigmas, mu, std::nullopt);
 
     scheduler_timesteps = scheduler->timesteps();
   } else {
     steps = num_inference_steps;
     scheduler->set_timesteps(
-        static_cast<int>(steps), device, std::nullopt, mu, std::nullopt);
+        static_cast<int64_t>(steps), device, std::nullopt, mu, std::nullopt);
     scheduler_timesteps = scheduler->timesteps();
   }
   if (scheduler_timesteps.device() != device) {

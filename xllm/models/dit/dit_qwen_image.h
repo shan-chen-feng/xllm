@@ -250,41 +250,42 @@ class TimestepsImpl : public torch::nn::Module {
                 int64_t num_channels,
                 bool flip_sin_to_cos,
                 double downscale_freq_shift,
-                double scale)
-      : embedding_dim(num_channels),
-        flip_sin_to_cos(flip_sin_to_cos),
-        downscale_freq_shift(downscale_freq_shift),
-        scale(scale),
-        max_period(10000) {}
+                double scale,
+                int64_t max_period = 10000)
+      : embedding_dim_(num_channels),
+        flip_sin_to_cos_(flip_sin_to_cos),
+        downscale_freq_shift_(downscale_freq_shift),
+        scale_(scale),
+        max_period_(max_period) {}
 
   torch::Tensor forward(const torch::Tensor& timesteps) {
     CHECK(timesteps.dim() == 1) << "Timesteps should be a 1d-array";
 
-    int64_t half_dim = embedding_dim / 2;
+    int64_t half_dim = embedding_dim_ / 2;
 
     auto exponent =
-        -std::log(max_period) * torch::arange(0,
-                                              half_dim,
-                                              torch::TensorOptions()
-                                                  .dtype(torch::kFloat32)
-                                                  .device(timesteps.device()));
+        -std::log(max_period_) * torch::arange(0,
+                                               half_dim,
+                                               torch::TensorOptions()
+                                                   .dtype(torch::kFloat32)
+                                                   .device(timesteps.device()));
 
-    exponent = exponent / (half_dim - downscale_freq_shift);
+    exponent = exponent / (half_dim - downscale_freq_shift_);
     auto emb = torch::exp(exponent);
     emb = timesteps.unsqueeze(1).to(torch::kFloat) * emb.unsqueeze(0);
 
-    emb = scale * emb;
+    emb = scale_ * emb;
 
     // concat sine and cosine embeddings
     auto sin_emb = torch::sin(emb);
     auto cos_emb = torch::cos(emb);
-    emb = torch::cat({sin_emb, cos_emb}, -1);
+    emb = torch::cat({sin_emb, cos_emb}, /*dim=*/-1);
     // flip sine and cosine embeddings
-    if (flip_sin_to_cos) {
-      emb = torch::cat({cos_emb, sin_emb}, -1);
+    if (flip_sin_to_cos_) {
+      emb = torch::cat({cos_emb, sin_emb}, /*dim=*/-1);
     }
     // zero pad
-    if (embedding_dim % 2 == 1) {
+    if (embedding_dim_ % 2 == 1) {
       emb = torch::nn::functional::pad(
           emb, torch::nn::functional::PadFuncOptions({0, 1}));
     }
@@ -292,11 +293,11 @@ class TimestepsImpl : public torch::nn::Module {
   }
 
  private:
-  int64_t embedding_dim;
-  int64_t max_period;
-  bool flip_sin_to_cos;
-  double scale;
-  double downscale_freq_shift;
+  int64_t embedding_dim_;
+  int64_t max_period_;
+  bool flip_sin_to_cos_;
+  double scale_;
+  double downscale_freq_shift_;
 };
 TORCH_MODULE(Timesteps);
 
@@ -440,14 +441,22 @@ class QwenTimestepProjEmbeddingsImpl : public torch::nn::Module {
                                  int64_t embedding_dim,
                                  bool use_additional_t_cond = false)
       : use_additional_t_cond_(use_additional_t_cond) {
-    time_proj_ =
-        register_module("time_proj", Timesteps(context, 256, true, 0.0, 1000));
-    timestep_embedder_ = register_module(
-        "timestep_embedder", TimestepEmbedding(context, 256, embedding_dim));
+    time_proj_ = register_module("time_proj",
+                                 Timesteps(context,
+                                           /*num_channels=*/256,
+                                           /*flip_sin_to_cos=*/true,
+                                           /*downscale_freq_shift=*/0.0,
+                                           /*scale=*/1000));
+    timestep_embedder_ =
+        register_module("timestep_embedder",
+                        TimestepEmbedding(context,
+                                          /*in_channels=*/256,
+                                          /*time_embed_dim*/ embedding_dim));
     if (use_additional_t_cond) {
-      addition_t_embedding_ = register_module(
-          "addition_t_embedding",
-          torch::nn::Embedding(torch::nn::EmbeddingOptions(2, embedding_dim)));
+      addition_t_embedding_ =
+          register_module("addition_t_embedding",
+                          torch::nn::Embedding(torch::nn::EmbeddingOptions(
+                              /*num=*/2, embedding_dim)));
     }
   }
 
@@ -1279,14 +1288,14 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
         joint_key,
         joint_value,
         heads,
-        "BSND",
-        torch::nullopt,
-        torch::nullopt,
-        torch::nullopt,
-        pow(joint_query.size(3), -0.5),
-        1.0,
-        65535,
-        65535);
+        /*input_layout=*/"BSND",
+        /*pse=*/torch::nullopt,
+        /*padding_mask=*/torch::nullopt,
+        /*atten_mask*/ torch::nullopt,
+        /*scale=*/pow(joint_query.size(3), -0.5),
+        /*keep_prob=*/1.0,
+        /*pre_tockens=*/65535,
+        /*next_tockens=*/65535);
 
     auto joint_hidden_states = std::get<0>(results);
     // Reshape back
@@ -1391,26 +1400,26 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     img_norm1_ = register_module("img_norm1", AdaLayerNorm(context, dim, eps));
     // Attention module
     auto attn_ = Attention(context,
-                           dim,
-                           -1,
-                           num_attention_heads,
-                           -1,
-                           attention_head_dim,
-                           0.0,
-                           true,
-                           qk_norm,
-                           "",
-                           dim,
-                           true,
-                           true,
-                           true,
-                           false,
+                           /*query_dim=*/dim,
+                           /*cross_attention_dim=*/-1,
+                           /*heads=*/num_attention_heads,
+                           /*kv_heads=*/-1,
+                           /*dim_head=*/attention_head_dim,
+                           /*drop_out=*/0.0,
+                           /*bias=*/true,
+                           /*qk_norm=*/qk_norm,
+                           /*cross_attention_norm=*/"",
+                           /*added_kv_proj_dim=*/dim,
+                           /*added_proj_bias*/ true,
+                           /*out_bias*/ true,
+                           /*scale_qk*/ true,
+                           /*only_cross_attention=*/false,
                            eps,
-                           1.0,
-                           false,
-                           dim,
-                           -1,
-                           1);
+                           /*rescale_output_factor=*/1.0,
+                           /*residual_connection=*/false,
+                           /*out_dim=*/dim,
+                           /*out_context_dim=*/-1,
+                           /*context_pre_only=*/1);
     attn_processor_ = register_module(
         "attn_processor_", QwenDoubleStreamAttnProcessor2_0(std::move(attn_)));
     // Image normalization 2
