@@ -395,7 +395,7 @@ struct ModelArgs {
   PROPERTY(int64_t, max_image_seq_len) = 0;
   PROPERTY(float, shift_terminal) = 0;
 
-  // qwen image VAE args
+  // qwen_image_edit_2509 vae related args
   PROPERTY(int64_t, base_dim) = 0;
   PROPERTY(int64_t, z_dim) = 0;
   PROPERTY(std::vector<int64_t>, dim_mult) = {};
@@ -405,6 +405,11 @@ struct ModelArgs {
   PROPERTY(double, dropout) = 0;
   PROPERTY(std::vector<double>, latents_mean) = {};
   PROPERTY(std::vector<double>, latents_std) = {};
+
+  // qwen_image_edit_2511 dit related args
+  PROPERTY(bool, zero_cond_t) = false;
+  PROPERTY(bool, use_additional_t_cond) = false;
+  PROPERTY(bool, use_layer3d_rope) = false;
 };
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {

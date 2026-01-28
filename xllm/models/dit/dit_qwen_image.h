@@ -81,9 +81,9 @@ class RMSNormImpl : public torch::nn::Module {
   bool elementwise_affine_;  // Whether to apply learnable affine parameters
   torch::Tensor weight_;     // Learnable scale parameter
   torch::Tensor bias_;       // Learnable bias parameter (optional)
+  bool is_bias_;
   bool weight_is_loaded_{false};
   bool bias_is_loaded_{false};
-  bool is_bias_;
 };
 TORCH_MODULE(RMSNorm);
 
@@ -135,11 +135,11 @@ class AdaLayerNormContinuousImpl : public torch::nn::Module {
   }
 
  private:
-  torch::nn::SiLU silu_{nullptr};
   DiTLinear linear_{nullptr};
+  torch::nn::SiLU silu_{nullptr};
   torch::nn::LayerNorm norm_{nullptr};
-  std::string norm_type_;
   double eps_;
+  std::string norm_type_;
   bool elementwise_affine_;
   torch::Tensor rms_scale_{nullptr};
   torch::TensorOptions options_;
@@ -157,24 +157,65 @@ class AdaLayerNormImpl : public torch::nn::Module {
 
   std::tuple<torch::Tensor, torch::Tensor> forward(
       const torch::Tensor& x,
-      const torch::Tensor& mod_params) {
+      const torch::Tensor& mod_params,
+      const torch::Tensor& index = torch::Tensor()) {
     auto chunks = mod_params.chunk(3, -1);
     auto shift = chunks[0];
     auto scale = chunks[1];
     auto gate = chunks[2];
 
-    scale = (1 + scale.unsqueeze(1));
-    shift = shift.unsqueeze(1);
+    torch::Tensor shift_result, scale_result, gate_result;
+
+    if (index.defined()) {
+      // Assuming mod_params batch dim is 2*actual_batch (chunked into 2 parts)
+      // So shift, scale, gate have shape [2*actual_batch, d]
+      int64_t actual_batch = shift.size(0) / 2;
+
+      // Split into two parts
+      auto shift_0 = shift.slice(0, 0, actual_batch);
+      auto shift_1 = shift.slice(0, actual_batch, shift.size(0));
+
+      auto scale_0 = scale.slice(0, 0, actual_batch);
+      auto scale_1 = scale.slice(0, actual_batch, scale.size(0));
+
+      auto gate_0 = gate.slice(0, 0, actual_batch);
+      auto gate_1 = gate.slice(0, actual_batch, gate.size(0));
+
+      // index: [b, l] where b is actual batch size
+      // Expand to [b, l, 1] to match feature dimension
+      auto index_expanded = index.unsqueeze(-1);  // [b, l, 1]
+
+      // Expand chunks to [b, 1, d] then broadcast to [b, l, d]
+      auto shift_0_exp = shift_0.unsqueeze(1);  // [b, 1, d]
+      auto shift_1_exp = shift_1.unsqueeze(1);  // [b, 1, d]
+      auto scale_0_exp = scale_0.unsqueeze(1);
+      auto scale_1_exp = scale_1.unsqueeze(1);
+      auto gate_0_exp = gate_0.unsqueeze(1);
+      auto gate_1_exp = gate_1.unsqueeze(1);
+
+      // Use torch::where to select based on index
+      shift_result =
+          torch::where(index_expanded == 0, shift_0_exp, shift_1_exp);
+      scale_result =
+          torch::where(index_expanded == 0, scale_0_exp, scale_1_exp);
+      gate_result = torch::where(index_expanded == 0, gate_0_exp, gate_1_exp);
+    } else {
+      shift_result = shift.unsqueeze(1);
+      scale_result = scale.unsqueeze(1);
+      gate_result = gate.unsqueeze(1);
+    }
+
+    scale_result = 1 + scale_result;
 
     auto result = at_npu::native::custom_ops::npu_layer_norm_eval(
-        x, {hidden_size_}, scale, shift, eps_);
+        x, {hidden_size_}, scale_result, shift_result, eps_);
 
-    return std::make_tuple(result, gate.unsqueeze(1));
+    return std::make_tuple(result, gate_result);
   }
 
  private:
-  int64_t hidden_size_;
   double eps_;
+  int64_t hidden_size_;
 };
 TORCH_MODULE(AdaLayerNorm);
 
@@ -252,10 +293,10 @@ class TimestepsImpl : public torch::nn::Module {
 
  private:
   int64_t embedding_dim;
-  bool flip_sin_to_cos;
-  double downscale_freq_shift;
-  double scale;
   int64_t max_period;
+  bool flip_sin_to_cos;
+  double scale;
+  double downscale_freq_shift;
 };
 TORCH_MODULE(Timesteps);
 
@@ -317,11 +358,8 @@ class TimestepEmbeddingImpl : public torch::nn::Module {
     if (cond_proj_) {
       x = x + cond_proj_->forward(condition);
     }
-
     x = linear_1_->forward(x);
-
     x = act_fn_(x);
-
     x = linear_2_->forward(x);
 
     return x;
@@ -348,37 +386,116 @@ class TimestepEmbeddingImpl : public torch::nn::Module {
 };
 TORCH_MODULE(TimestepEmbedding);
 
+std::tuple<int64_t, std::optional<torch::Tensor>, std::optional<torch::Tensor>>
+compute_text_seq_len_from_mask(
+    const torch::Tensor& encoder_hidden_states,
+    const std::optional<torch::Tensor>& encoder_hidden_states_mask) {
+  auto batch_size = encoder_hidden_states.size(0);
+  auto text_seq_len = encoder_hidden_states.size(1);
+
+  if (!encoder_hidden_states_mask.has_value()) {
+    return std::make_tuple(text_seq_len, std::nullopt, std::nullopt);
+  }
+
+  auto mask =
+      encoder_hidden_states_mask.value().to(encoder_hidden_states.device());
+
+  if (mask.size(0) != batch_size || mask.size(1) != text_seq_len) {
+    LOG(ERROR) << "`encoder_hidden_states_mask` shape " << mask.sizes()
+               << " must match (batch_size, text_seq_len)=(" << batch_size
+               << ", " << text_seq_len << ").";
+  }
+
+  if (mask.dtype() != torch::kBool) {
+    mask = mask.to(torch::kBool);
+  }
+
+  auto device = encoder_hidden_states.device();
+  auto position_ids = torch::arange(
+      text_seq_len, torch::TensorOptions().device(device).dtype(torch::kLong));
+
+  // Compute active positions (use position ID where mask is True, else 0)
+  auto zero_tensor = torch::zeros(
+      {}, torch::TensorOptions().device(device).dtype(torch::kLong));
+
+  auto active_positions = torch::where(mask, position_ids, zero_tensor);
+
+  // Check which samples have active positions
+  auto has_active = mask.any(/*dim=*/1);
+
+  // Compute per-sample length: max position + 1 if active, else use full length
+  auto max_positions = std::get<0>(active_positions.max(/*dim=*/1));
+  auto per_sample_len = torch::where(
+      has_active,
+      max_positions + 1,
+      torch::tensor(text_seq_len,
+                    torch::TensorOptions().device(device).dtype(torch::kLong)));
+
+  return std::make_tuple(text_seq_len, per_sample_len, mask);
+}
+
 class QwenTimestepProjEmbeddingsImpl : public torch::nn::Module {
  public:
   QwenTimestepProjEmbeddingsImpl(const ModelContext& context,
-                                 int64_t embedding_dim) {
+                                 int64_t embedding_dim,
+                                 bool use_additional_t_cond = false)
+      : use_additional_t_cond_(use_additional_t_cond) {
     time_proj_ =
         register_module("time_proj", Timesteps(context, 256, true, 0.0, 1000));
     timestep_embedder_ = register_module(
         "timestep_embedder", TimestepEmbedding(context, 256, embedding_dim));
+    if (use_additional_t_cond) {
+      addition_t_embedding_ = register_module(
+          "addition_t_embedding",
+          torch::nn::Embedding(torch::nn::EmbeddingOptions(2, embedding_dim)));
+    }
   }
 
-  torch::Tensor forward(const torch::Tensor& timestep,
-                        const torch::Tensor& hidden_states) {
+  torch::Tensor forward(
+      const torch::Tensor& timestep,
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& addition_t_cond = torch::Tensor()) {
     auto timesteps_proj = time_proj_->forward(timestep);
     auto timesteps_emb =
         timestep_embedder_->forward(timesteps_proj.to(hidden_states.dtype()));
 
-    auto conditioning = timesteps_emb;
+    torch::Tensor conditioning = timesteps_emb;
+    if (use_additional_t_cond_) {
+      CHECK(addition_t_cond.defined())
+          << "expected to pass addition_t_cond when"
+          << " use_additional_t_cond_ is setup to true";
+      auto addition_t_emb = addition_t_embedding_->forward(addition_t_cond);
+      addition_t_emb = addition_t_emb.to(hidden_states.dtype());
+      conditioning = conditioning + addition_t_emb;
+    }
+
     return conditioning;
   }
   void load_state_dict(const StateDict& state_dict) {
     timestep_embedder_->load_state_dict(
         state_dict.get_dict_with_prefix("timestep_embedder."));
+    if (use_additional_t_cond_) {
+      weight::load_weight(state_dict,
+                          "addition_t_embedding.weight",
+                          addition_t_embedding_->weight,
+                          weight_is_loaded_);
+    }
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
     timestep_embedder_->verify_loaded_weights(prefix + "timestep_embedder.");
+    if (use_additional_t_cond_) {
+      CHECK(weight_is_loaded_)
+          << "weight is not loaded for " << prefix + "weight";
+    }
   }
 
  private:
   Timesteps time_proj_{nullptr};
   TimestepEmbedding timestep_embedder_{nullptr};
+  torch::nn::Embedding addition_t_embedding_{nullptr};
+  bool use_additional_t_cond_;
+  bool weight_is_loaded_{false};
 };
 TORCH_MODULE(QwenTimestepProjEmbeddings);
 
@@ -403,6 +520,55 @@ class QwenEmbedRopeImpl : public torch::nn::Module {
                             1);
   }
 
+  std::tuple<torch::Tensor, torch::Tensor> forward(
+      const std::vector<std::vector<int64_t>>& video_fhw,
+      const std::optional<int64_t>& txt_seq_lens,
+      torch::Device device,
+      const std::optional<int64_t>& max_txt_seq_len) {
+    if (pos_freqs_.device() != device) {
+      pos_freqs_ = pos_freqs_.to(device);
+      neg_freqs_ = neg_freqs_.to(device);
+    }
+
+    std::vector<torch::Tensor> vid_freqs;
+    int64_t max_vid_index = 0;
+
+    for (size_t idx = 0; idx < video_fhw.size(); idx++) {
+      const auto& fhw = video_fhw[idx];
+      int64_t frame = fhw[0], height = fhw[1], width = fhw[2];
+
+      std::string rope_key = std::to_string(idx) + "_" +
+                             std::to_string(height) + "_" +
+                             std::to_string(width);
+
+      auto video_freq = _compute_video_freqs(frame, height, width, idx, device);
+      vid_freqs.push_back(video_freq);
+
+      if (scale_rope_) {
+        max_vid_index = std::max({height / 2, width / 2, max_vid_index});
+      } else {
+        max_vid_index = std::max({height, width, max_vid_index});
+      }
+    }
+
+    int64_t max_len;
+    if (txt_seq_lens.has_value() && !max_txt_seq_len.has_value()) {
+      max_len = txt_seq_lens.value();
+    } else if (max_txt_seq_len.has_value()) {
+      max_len = max_txt_seq_len.value();
+    } else {
+      LOG(ERROR) << "need to pass txt_seq_lens or max_txt_seq_len "
+                 << "to calculate the mrope";
+    }
+
+    auto txt_freqs =
+        pos_freqs_.slice(0, max_vid_index, max_vid_index + max_len);
+
+    auto vid_freqs_cat = torch::cat(vid_freqs, 0);
+    return std::make_tuple(vid_freqs_cat, txt_freqs);
+  }
+
+ protected:
   torch::Tensor rope_params(const torch::Tensor& index,
                             int64_t dim,
                             int64_t theta) {
@@ -425,8 +591,12 @@ class QwenEmbedRopeImpl : public torch::nn::Module {
   torch::Tensor _compute_video_freqs(int64_t frame,
                                      int64_t height,
                                      int64_t width,
-                                     int64_t idx = 0) {
+                                     int64_t idx,
+                                     torch::Device device) {
     int64_t seq_lens = frame * height * width;
+
+    auto pos_freqs = pos_freqs_.to(device);
+    auto neg_freqs = neg_freqs_.to(device);
 
     std::vector<int64_t> split_sizes;
     for (auto dim : axes_dim_) {
@@ -475,46 +645,6 @@ class QwenEmbedRopeImpl : public torch::nn::Module {
     return freqs.contiguous();
   }
 
-  std::tuple<torch::Tensor, torch::Tensor> forward(
-      const std::vector<std::vector<int64_t>>& video_fhw,
-      const torch::Tensor& txt_seq_lens,
-      torch::Device device) {
-    if (pos_freqs_.device() != device) {
-      pos_freqs_ = pos_freqs_.to(device);
-      neg_freqs_ = neg_freqs_.to(device);
-    }
-
-    std::vector<torch::Tensor> vid_freqs;
-    int64_t max_vid_index = 0;
-
-    for (size_t idx = 0; idx < video_fhw.size(); idx++) {
-      const auto& fhw = video_fhw[idx];
-      int64_t frame = fhw[0], height = fhw[1], width = fhw[2];
-
-      std::string rope_key = std::to_string(idx) + "_" +
-                             std::to_string(height) + "_" +
-                             std::to_string(width);
-
-      auto video_freq = _compute_video_freqs(frame, height, width, idx);
-      video_freq = video_freq.to(device);
-      vid_freqs.push_back(video_freq);
-
-      if (scale_rope_) {
-        max_vid_index = std::max({height / 2, width / 2, max_vid_index});
-      } else {
-        max_vid_index = std::max({height, width, max_vid_index});
-      }
-    }
-
-    int64_t max_len = torch::max(txt_seq_lens).item<int64_t>();
-    auto txt_freqs =
-        pos_freqs_.slice(0, max_vid_index, max_vid_index + max_len);
-
-    auto vid_freqs_cat = torch::cat(vid_freqs, 0);
-    return std::make_tuple(vid_freqs_cat, txt_freqs);
-  }
-
- private:
   int64_t theta_;
   std::vector<int64_t> axes_dim_;
   bool scale_rope_;
@@ -533,10 +663,12 @@ class QwenEmbedRopeWithCacheImpl : public QwenEmbedRopeImpl {
                              bool scale_rope = false)
       : QwenEmbedRopeImpl(context, theta, axes_dim, scale_rope) {}
 
+ private:
   torch::Tensor _compute_video_freqs_cached(int64_t frame,
                                             int64_t height,
                                             int64_t width,
-                                            int64_t idx = 0) {
+                                            int64_t idx,
+                                            torch::Device device) {
     std::string key = std::to_string(idx) + "_" + std::to_string(height) + "_" +
                       std::to_string(width);
 
@@ -544,16 +676,322 @@ class QwenEmbedRopeWithCacheImpl : public QwenEmbedRopeImpl {
     if (it != rope_cache_.end()) {
       return it->second;
     } else {
-      auto result = _compute_video_freqs(frame, height, width, idx);
+      auto result = _compute_video_freqs(frame, height, width, idx, device);
       rope_cache_[key] = result;
       return result;
     }
   }
 
- private:
   std::unordered_map<std::string, torch::Tensor> rope_cache_;
 };
 TORCH_MODULE(QwenEmbedRopeWithCache);
+
+class QwenEmbedLayer3DRopeImpl : public torch::nn::Module {
+ public:
+  QwenEmbedLayer3DRopeImpl(const ModelContext& context,
+                           int64_t theta,
+                           std::vector<int64_t>& axes_dim,
+                           bool scale_rope = false)
+      : theta_(theta), axes_dim_(axes_dim), scale_rope_(scale_rope) {
+    auto pos_index = torch::arange(4096);
+    auto neg_index = torch::arange(4096).flip(0) * -1 - 1;
+
+    std::vector<torch::Tensor> pos_freqs_parts;
+    pos_freqs_ = torch::cat({rope_params(pos_index, axes_dim[0], theta),
+                             rope_params(pos_index, axes_dim[1], theta),
+                             rope_params(pos_index, axes_dim[2], theta)},
+                            1);
+
+    neg_freqs_ = torch::cat({rope_params(neg_index, axes_dim[0], theta),
+                             rope_params(neg_index, axes_dim[1], theta),
+                             rope_params(neg_index, axes_dim[2], theta)},
+                            1);
+  }
+
+  virtual std::pair<torch::Tensor, torch::Tensor> forward(
+      const std::vector<std::vector<int64_t>>& video_fhw,
+      int64_t max_txt_seq_len,
+      torch::Device device = torch::Device(torch::kCPU)) {
+    std::vector<torch::Tensor> vid_freqs_list;
+    int64_t max_vid_index = 0;
+    int64_t layer_num = video_fhw.size() - 1;
+
+    for (size_t idx = 0; idx < video_fhw.size(); idx++) {
+      const std::vector<int64_t>& fhw = video_fhw[idx];
+
+      int64_t frame = fhw[0];
+      int64_t height = fhw[1];
+      int64_t width = fhw[2];
+
+      torch::Tensor video_freq;
+
+      if (idx != layer_num) {
+        video_freq = _compute_video_freqs(frame, height, width, idx, device);
+      } else {
+        video_freq = _compute_condition_freqs(frame, height, width, device);
+      }
+      vid_freqs_list.push_back(video_freq);
+
+      if (scale_rope_) {
+        max_vid_index = std::max({height / 2, width / 2, max_vid_index});
+      } else {
+        max_vid_index = std::max({height, width, max_vid_index});
+      }
+    }
+
+    int64_t max_txt_seq_len_int = std::max(max_vid_index, layer_num);
+
+    torch::Tensor txt_freqs = pos_freqs_.to(device).slice(
+        0, max_vid_index, max_vid_index + max_txt_seq_len_int);
+
+    torch::Tensor vid_freqs = torch::cat(vid_freqs_list, 0);
+
+    return {vid_freqs, txt_freqs};
+  }
+
+ protected:
+  torch::Tensor rope_params(torch::Tensor index, int64_t dim, int64_t theta) {
+    CHECK(dim % 2 == 0) << "dim must be even";
+
+    auto exponents =
+        torch::arange(
+            0, dim, 2, torch::TensorOptions().dtype(torch::kFloat32)) /
+        static_cast<float>(dim);
+    auto freqs = 1.0 / torch::pow(theta, exponents);
+
+    auto outer_result = torch::outer(index.to(torch::kFloat32), freqs);
+
+    auto complex_freqs =
+        torch::polar(torch::ones_like(outer_result), outer_result);
+
+    return complex_freqs;
+  }
+
+  torch::Tensor _compute_video_freqs(int64_t frame,
+                                     int64_t height,
+                                     int64_t width,
+                                     int64_t idx,
+                                     torch::Device device) {
+    int64_t seq_lens = frame * height * width;
+
+    torch::Tensor pos_freqs = pos_freqs_.to(device);
+    torch::Tensor neg_freqs = neg_freqs_.to(device);
+
+    std::vector<int64_t> split_sizes;
+    for (int dim : axes_dim_) {
+      split_sizes.push_back(dim / 2);
+    }
+
+    auto freqs_pos = pos_freqs.split_with_sizes(split_sizes, 1);
+    auto freqs_neg = neg_freqs.split_with_sizes(split_sizes, 1);
+
+    auto freqs_frame = freqs_pos[0]
+                           .slice(0, idx, idx + frame)
+                           .view({frame, 1, 1, -1})
+                           .expand({frame, height, width, -1});
+
+    torch::Tensor freqs_height;
+    if (scale_rope_) {
+      auto height_neg_part =
+          freqs_neg[1].slice(0, -(height / 2), freqs_neg[1].size(0));
+      auto height_pos_part = freqs_pos[1].slice(0, 0, height / 2);
+      freqs_height = torch::cat({height_neg_part, height_pos_part}, 0)
+                         .view({1, height, 1, -1})
+                         .expand({frame, height, width, -1});
+    } else {
+      freqs_height = freqs_pos[1]
+                         .slice(0, 0, height)
+                         .view({1, height, 1, -1})
+                         .expand({frame, height, width, -1});
+    }
+
+    torch::Tensor freqs_width;
+    if (scale_rope_) {
+      auto neg_part = freqs_neg[2].slice(0, -(width / 2), freqs_neg[2].size(0));
+      auto pos_part = freqs_pos[2].slice(0, 0, width / 2);
+      freqs_width = torch::cat({neg_part, pos_part}, 0)
+                        .view({1, 1, width, -1})
+                        .expand({frame, height, width, -1});
+    } else {
+      freqs_width = freqs_pos[2]
+                        .slice(0, 0, width)
+                        .view({1, 1, width, -1})
+                        .expand({frame, height, width, -1});
+    }
+
+    auto freqs =
+        torch::cat({freqs_frame, freqs_height, freqs_width}, /*dim=*/-1)
+            .reshape({seq_lens, -1})
+            .clone()
+            .contiguous();
+
+    return freqs;
+  }
+
+  torch::Tensor _compute_condition_freqs(int64_t frame,
+                                         int64_t height,
+                                         int64_t width,
+                                         torch::Device device) {
+    int seq_lens = frame * height * width;
+
+    torch::Tensor pos_freqs = pos_freqs_.to(device);
+    torch::Tensor neg_freqs = neg_freqs_.to(device);
+
+    std::vector<int64_t> split_sizes;
+    for (int dim : axes_dim_) {
+      split_sizes.push_back(dim / 2);
+    }
+
+    auto freqs_pos = pos_freqs.split_with_sizes(split_sizes, 1);
+    auto freqs_neg = neg_freqs.split_with_sizes(split_sizes, 1);
+
+    auto freqs_frame = freqs_neg[0]
+                           .slice(0, -1, freqs_neg[0].size(0))
+                           .view({frame, 1, 1, -1})
+                           .expand({frame, height, width, -1});
+
+    torch::Tensor freqs_height;
+    if (scale_rope_) {
+      auto neg_part =
+          freqs_neg[1].slice(0, -(height / 2), freqs_neg[1].size(0));
+      auto pos_part = freqs_pos[1].slice(0, 0, height / 2);
+      freqs_height = torch::cat({neg_part, pos_part}, 0)
+                         .view({1, height, 1, -1})
+                         .expand({frame, height, width, -1});
+    } else {
+      freqs_height = freqs_pos[1]
+                         .slice(0, 0, height)
+                         .view({1, height, 1, -1})
+                         .expand({frame, height, width, -1});
+    }
+
+    torch::Tensor freqs_width;
+    if (scale_rope_) {
+      auto neg_part = freqs_neg[2].slice(0, -(width / 2), freqs_neg[2].size(0));
+      auto pos_part = freqs_pos[2].slice(0, 0, width / 2);
+      freqs_width = torch::cat({neg_part, pos_part}, 0)
+                        .view({1, 1, width, -1})
+                        .expand({frame, height, width, -1});
+    } else {
+      freqs_width = freqs_pos[2]
+                        .slice(0, 0, width)
+                        .view({1, 1, width, -1})
+                        .expand({frame, height, width, -1});
+    }
+
+    auto freqs = torch::cat({freqs_frame, freqs_height, freqs_width}, -1)
+                     .reshape({seq_lens, -1})
+                     .clone()
+                     .contiguous();
+
+    return freqs;
+  }
+
+  int64_t theta_;
+  std::vector<int64_t>& axes_dim_;
+  bool scale_rope_;
+  torch::Tensor pos_freqs_;
+  torch::Tensor neg_freqs_;
+};
+
+TORCH_MODULE(QwenEmbedLayer3DRope);
+
+class QwenEmbedLayer3DRopeWithCacheImpl : public QwenEmbedLayer3DRopeImpl {
+ public:
+  QwenEmbedLayer3DRopeWithCacheImpl(const ModelContext& context,
+                                    int64_t theta,
+                                    std::vector<int64_t>& axes_dim,
+                                    bool scale_rope = false)
+      : QwenEmbedLayer3DRopeImpl(context, theta, axes_dim, scale_rope) {}
+
+  std::pair<torch::Tensor, torch::Tensor> forward(
+      const std::vector<std::vector<int64_t>>& video_fhw,
+      int64_t max_txt_seq_len,
+      torch::Device device = torch::Device(torch::kCPU)) override {
+    std::vector<torch::Tensor> vid_freqs_list;
+    int64_t max_vid_index = 0;
+    int64_t layer_num = video_fhw.size() - 1;
+
+    for (size_t idx = 0; idx < video_fhw.size(); idx++) {
+      const std::vector<int64_t>& fhw = video_fhw[idx];
+
+      int64_t frame = fhw[0];
+      int64_t height = fhw[1];
+      int64_t width = fhw[2];
+
+      torch::Tensor video_freq;
+
+      if (idx != layer_num) {
+        video_freq =
+            _compute_video_freqs_with_cache(frame, height, width, idx, device);
+      } else {
+        video_freq =
+            _compute_condition_freqs_with_cache(frame, height, width, device);
+      }
+      vid_freqs_list.push_back(video_freq);
+
+      if (scale_rope_) {
+        max_vid_index = std::max({height / 2, width / 2, max_vid_index});
+      } else {
+        max_vid_index = std::max({height, width, max_vid_index});
+      }
+    }
+
+    int64_t max_txt_seq_len_int = std::max(max_vid_index, layer_num);
+
+    torch::Tensor txt_freqs = pos_freqs_.to(device).slice(
+        0, max_vid_index, max_vid_index + max_txt_seq_len_int);
+
+    torch::Tensor vid_freqs = torch::cat(vid_freqs_list, 0);
+
+    return {vid_freqs, txt_freqs};
+  }
+
+ private:
+  torch::Tensor _compute_video_freqs_with_cache(int64_t frame,
+                                                int64_t height,
+                                                int64_t width,
+                                                int64_t idx,
+                                                torch::Device device) {
+    std::string key = std::to_string(frame) + "_" + std::to_string(idx) + "_" +
+                      std::to_string(height) + "_" + std::to_string(width);
+
+    // TODO: currently the freqs tensors are cached on device
+    // need to check whether to swap them to cpu to save device memory
+    auto it = video_freqs_cache_.find(key);
+    if (it != video_freqs_cache_.end()) {
+      return it->second.clone().contiguous();
+    } else {
+      auto result = _compute_video_freqs(frame, height, width, idx, device);
+      video_freqs_cache_[key] = result.clone();
+      return result;
+    }
+  }
+
+  torch::Tensor _compute_condition_freqs_with_cache(int64_t frame,
+                                                    int64_t height,
+                                                    int64_t width,
+                                                    torch::Device device) {
+    std::string key = std::to_string(frame) + "_" + std::to_string(height) +
+                      "_" + std::to_string(width);
+
+    // TODO: currently the freqs tensors are cached on device
+    // need to check whether to swap them to cpu to save device memory
+    auto it = condition_cache_.find(key);
+    if (it != condition_cache_.end()) {
+      return it->second.clone().contiguous();
+    } else {
+      auto result = _compute_condition_freqs(frame, height, width, device);
+      condition_cache_[key] = result.clone();
+      return result;
+    }
+  }
+
+  std::unordered_map<std::string, torch::Tensor> video_freqs_cache_;
+  std::unordered_map<std::string, torch::Tensor> condition_cache_;
+};
+
+TORCH_MODULE(QwenEmbedLayer3DRopeWithCache);
 
 // A internel class that only register necessary modules for attention
 // implementation The attention forward shouldn't be implemented here, but in
@@ -754,10 +1192,12 @@ class AttentionImpl : public torch::nn::Module {
     add_v_proj_->verify_loaded_weights(prefix + "add_v_proj.");
   }
 
+ public:
   int64_t heads_;
   bool bias_;
   bool out_bias_;
   bool added_proj_bias_;
+
   torch::nn::LayerNorm layer_norm_q_{nullptr}, layer_norm_k_{nullptr},
       norm_cross_{nullptr};
   DiTLinear to_q_{nullptr}, to_k_{nullptr}, to_v_{nullptr};
@@ -900,9 +1340,6 @@ class FeedForwardImpl : public torch::nn::Module {
 
     // linear2
     linear2_ = register_module("linear2", DiTLinear(inner_dim, dim_out, true));
-
-    // linear1_->to(options_);
-    // linear2_->to(options_);
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states) {
@@ -926,8 +1363,8 @@ class FeedForwardImpl : public torch::nn::Module {
 
  private:
   DiTLinear linear1_{nullptr};
-  torch::nn::Functional activation_{nullptr};
   DiTLinear linear2_{nullptr};
+  torch::nn::Functional activation_{nullptr};
   torch::TensorOptions options_;
 };
 TORCH_MODULE(FeedForward);
@@ -940,8 +1377,10 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
                                 int64_t dim,
                                 int64_t num_attention_heads,
                                 int64_t attention_head_dim,
+                                bool zero_cond_t = false,
                                 const std::string& qk_norm = "rms_norm",
-                                double eps = 1e-6) {
+                                double eps = 1e-6)
+      : zero_cond_t_(zero_cond_t) {
     // Image processing modules
     img_mod_ =
         register_module("img_mod",
@@ -996,16 +1435,61 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     txt_mlp_ = register_module("txt_mlp", FeedForward(context, dim, dim));
   }
 
-  std::tuple<torch::Tensor, torch::Tensor> _modulate(
+  std::pair<torch::Tensor, torch::Tensor> _modulate(
       const torch::Tensor& x,
-      const torch::Tensor& mod_params) {
+      const torch::Tensor& mod_params,
+      const torch::Tensor& index = torch::Tensor()) {
+    // x: b l d, shift: b d, scale: b d, gate: b d
     auto chunks = mod_params.chunk(3, -1);
     auto shift = chunks[0];
     auto scale = chunks[1];
     auto gate = chunks[2];
 
-    auto modulated_x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1);
-    return std::make_tuple(modulated_x, gate.unsqueeze(1));
+    torch::Tensor shift_result, scale_result, gate_result;
+
+    if (index.defined()) {
+      // Assuming mod_params batch dim is 2*actual_batch (chunked into 2 parts)
+      // So shift, scale, gate have shape [2*actual_batch, d]
+      int64_t actual_batch = shift.size(0) / 2;
+
+      // Split into two parts
+      auto shift_0 = shift.slice(0, 0, actual_batch);
+      auto shift_1 = shift.slice(0, actual_batch, shift.size(0));
+
+      auto scale_0 = scale.slice(0, 0, actual_batch);
+      auto scale_1 = scale.slice(0, actual_batch, scale.size(0));
+
+      auto gate_0 = gate.slice(0, 0, actual_batch);
+      auto gate_1 = gate.slice(0, actual_batch, gate.size(0));
+
+      // index: [b, l] where b is actual batch size
+      // Expand to [b, l, 1] to match feature dimension
+      auto index_expanded = index.unsqueeze(-1);  // [b, l, 1]
+
+      // Expand chunks to [b, 1, d] then broadcast to [b, l, d]
+      auto shift_0_exp = shift_0.unsqueeze(1);  // [b, 1, d]
+      auto shift_1_exp = shift_1.unsqueeze(1);  // [b, 1, d]
+      auto scale_0_exp = scale_0.unsqueeze(1);
+      auto scale_1_exp = scale_1.unsqueeze(1);
+      auto gate_0_exp = gate_0.unsqueeze(1);
+      auto gate_1_exp = gate_1.unsqueeze(1);
+
+      // Use torch::where to select based on index
+      shift_result =
+          torch::where(index_expanded == 0, shift_0_exp, shift_1_exp);
+      scale_result =
+          torch::where(index_expanded == 0, scale_0_exp, scale_1_exp);
+      gate_result = torch::where(index_expanded == 0, gate_0_exp, gate_1_exp);
+    } else {
+      shift_result = shift.unsqueeze(1);
+      scale_result = scale.unsqueeze(1);
+      gate_result = gate.unsqueeze(1);
+    }
+
+    // Apply modulation: x * (1 + scale_result) + shift_result
+    auto modulated_x = x * (1 + scale_result) + shift_result;
+
+    return {modulated_x, gate_result};
   }
 
   std::tuple<torch::Tensor, torch::Tensor> forward(
@@ -1015,10 +1499,17 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
       const torch::Tensor& temb,
       const std::tuple<torch::Tensor, torch::Tensor>& image_rotary_emb = {},
       const std::unordered_map<std::string, torch::Tensor>&
-          joint_attention_kwargs = {}) {
+          joint_attention_kwargs = {},
+      const torch::Tensor& modulate_index = torch::Tensor()) {
     // Get modulation parameters for both streams
     auto img_mod_params = img_mod_->forward(temb);  // [B, 6*dim]
-    auto txt_mod_params = txt_mod_->forward(temb);  // [B, 6*dim]
+    torch::Tensor new_temb;
+    if (zero_cond_t_) {
+      new_temb = temb.chunk(2, 0)[0];
+    } else {
+      new_temb = temb;
+    }
+    auto txt_mod_params = txt_mod_->forward(new_temb);  // [B, 6*dim]
     //  Split modulation parameters for norm1 and norm2
     auto img_mod_chunks = img_mod_params.chunk(2, -1);
     auto img_mod1 = img_mod_chunks[0];  // [B, 3*dim]
@@ -1031,7 +1522,7 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     // Process image stream - norm1 + modulation
     torch::Tensor img_modulated, img_gate1;
     std::tie(img_modulated, img_gate1) =
-        img_norm1_->forward(hidden_states, img_mod1);
+        img_norm1_->forward(hidden_states, img_mod1, modulate_index);
 
     //  Process text stream - norm1 + modulation
     torch::Tensor txt_modulated, txt_gate1;
@@ -1057,7 +1548,7 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     // Process image stream - norm2 + MLP
     torch::Tensor img_modulated2, img_gate2;
     std::tie(img_modulated2, img_gate2) =
-        img_norm2_->forward(new_hidden_states, img_mod2);
+        img_norm2_->forward(new_hidden_states, img_mod2, modulate_index);
 
     auto img_mlp_output = img_mlp_->forward(img_modulated2);
     new_hidden_states = new_hidden_states + img_gate2 * img_mlp_output;
@@ -1113,6 +1604,7 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
   AdaLayerNorm txt_norm1_{nullptr};
   AdaLayerNorm txt_norm2_{nullptr};
   FeedForward txt_mlp_{nullptr};
+  bool zero_cond_t_;
 };
 
 TORCH_MODULE(QwenImageTransformerBlock);
@@ -1121,25 +1613,36 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
  public:
   QwenImageTransformer2DModelImpl(const ModelContext& context) {
     auto model_args = context.get_model_args();
-    auto num_attention_heads = model_args.n_heads();
-    auto attention_head_dim = model_args.head_dim();
-    auto joint_attention_dim = model_args.joint_attention_dim();
-    auto axes_dims_rope = model_args.axes_dims_rope();
-    auto num_layers = model_args.num_layers();
-    auto patch_size = model_args.mm_patch_size();
-    auto in_channels = model_args.in_channels();
-    auto out_channels = model_args.out_channels();
+    int64_t num_attention_heads = model_args.n_heads();
+    int64_t attention_head_dim = model_args.head_dim();
+    int64_t joint_attention_dim = model_args.joint_attention_dim();
+    std::vector<int64_t> axes_dims_rope = model_args.axes_dims_rope();
+    int64_t num_layers = model_args.num_layers();
+    int64_t patch_size = model_args.mm_patch_size();
+    int64_t in_channels = model_args.in_channels();
+    int64_t out_channels = model_args.out_channels();
+    bool zero_cond_t = model_args.zero_cond_t();
+    bool use_additional_t_cond = model_args.use_additional_t_cond();
+    use_layer3d_rope_ = model_args.use_layer3d_rope();
 
     out_channels = (out_channels > 0) ? out_channels : in_channels;
     auto inner_dim = num_attention_heads * attention_head_dim;
 
     // Positional embedding
-    pos_embed_ = register_module(
-        "pos_embed", QwenEmbedRope(context, 10000, axes_dims_rope, true));
+    if (use_layer3d_rope_) {
+      pos_embed_3d_rope_ = register_module(
+          "pos_embed",
+          QwenEmbedLayer3DRope(context, /*theta=*/10000, axes_dims_rope, true));
+    } else {
+      pos_embed_ = register_module(
+          "pos_embed",
+          QwenEmbedRope(context, /*theta=*/10000, axes_dims_rope, true));
+    }
 
     // Time-text embedding
     time_text_embed_ = register_module(
-        "time_text_embed", QwenTimestepProjEmbeddings(context, inner_dim));
+        "time_text_embed",
+        QwenTimestepProjEmbeddings(context, inner_dim, use_additional_t_cond));
 
     // Text normalization
     txt_norm_ = register_module(
@@ -1154,8 +1657,12 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     transformer_blocks_ =
         register_module("transformer_blocks", torch::nn::ModuleList());
     for (int64_t i = 0; i < num_layers; ++i) {
-      transformer_blocks_->push_back(QwenImageTransformerBlock(
-          context, inner_dim, num_attention_heads, attention_head_dim));
+      transformer_blocks_->push_back(
+          QwenImageTransformerBlock(context,
+                                    inner_dim,
+                                    num_attention_heads,
+                                    attention_head_dim,
+                                    zero_cond_t));
     }
 
     // Output layers
@@ -1169,28 +1676,95 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     // Cache for conditional and unconditional
     cache_cond_ = false;
     cache_uncond_ = false;
+
+    zero_cond_t_ = zero_cond_t;
   }
   torch::Tensor forward(
       const torch::Tensor& hidden_states,
       const torch::Tensor& encoder_hidden_states = torch::Tensor(),
       const torch::Tensor& encoder_hidden_states_mask = torch::Tensor(),
-      const torch::Tensor& timestep = torch::Tensor(),
-      const std::vector<std::vector<int64_t>>& img_shapes = {},
-      const torch::Tensor& txt_seq_lens = torch::Tensor(),
-      const torch::Tensor& guidance = torch::Tensor(),
+      torch::Tensor timestep = torch::Tensor(),
+      std::vector<std::vector<int64_t>> img_shapes = {},
+      torch::Tensor txt_seq_lens = torch::Tensor(),
+      torch::Tensor addition_t_cond = torch::Tensor(),
+      torch::Tensor guidance = torch::Tensor(),
       const std::unordered_map<std::string, torch::Tensor>& attention_kwargs =
           {},
-      const std::vector<torch::Tensor>& controlnet_block_samples = {},
-      bool return_dict = true,
-      bool use_cache = false,
-      bool if_cond = true) {
+      const std::vector<torch::Tensor>& controlnet_block_samples = {}) {
     auto new_hidden_states = img_in_->forward(hidden_states);
     auto new_timestep = timestep.to(new_hidden_states.dtype());
+
+    torch::Tensor modulate_index;
+    if (zero_cond_t_) {
+      timestep = torch::cat({new_timestep, new_timestep * 0}, /*dim=*/0);
+      auto image_shape_tensor =
+          torch::from_blob(img_shapes.data(),
+                           {static_cast<long>(img_shapes.size()),
+                            static_cast<long>(img_shapes[0].size())},
+                           torch::kLong)
+              .clone()
+              .unsqueeze(0);
+      std::vector<torch::Tensor> modulate_index_list;
+      for (size_t sample_index = 0; sample_index < image_shape_tensor.size(0);
+           sample_index++) {
+        auto sample_tensor = image_shape_tensor[sample_index];
+        auto zero_prods =
+            torch::zeros({sample_tensor[0].prod().item<int64_t>()},
+                         torch::TensorOptions()
+                             .device(new_timestep.device())
+                             .dtype(torch::kInt64));
+        int64_t one_prods_size = 0;
+        for (size_t index = 1; index < sample_tensor.size(0); index++) {
+          one_prods_size += sample_tensor[index].prod().item<int64_t>();
+        }
+        auto ones_prods = torch::ones({one_prods_size},
+                                      torch::TensorOptions()
+                                          .device(new_timestep.device())
+                                          .dtype(torch::kInt64));
+        modulate_index_list.emplace_back(
+            torch::cat({zero_prods, ones_prods}, /*dim=*/0));
+      }
+      modulate_index = torch::stack(modulate_index_list, /*dim=*/0);
+    } else {
+      modulate_index = torch::Tensor();
+    }
+
     auto new_encoder_hidden_states = txt_norm_->forward(encoder_hidden_states);
     new_encoder_hidden_states = txt_in_->forward(new_encoder_hidden_states);
-    auto temb = time_text_embed_->forward(new_timestep, new_hidden_states);
-    auto image_rotary_emb = pos_embed_->forward(
-        img_shapes, txt_seq_lens, new_hidden_states.device());
+
+    // Use the encoder_hidden_states sequence length for RoPE computation and
+    // normalize mask
+    auto [text_seq_len, per_sample_len, new_encoder_hidden_states_mask] =
+        compute_text_seq_len_from_mask(new_encoder_hidden_states,
+                                       encoder_hidden_states_mask);
+
+    auto temb = time_text_embed_->forward(
+        new_timestep, new_hidden_states, addition_t_cond);
+
+    std::tuple<torch::Tensor, torch::Tensor> image_rotary_emb;
+    if (use_layer3d_rope_) {
+      image_rotary_emb = pos_embed_3d_rope_->forward(
+          img_shapes, text_seq_len, new_hidden_states.device());
+    } else {
+      image_rotary_emb = pos_embed_->forward(img_shapes,
+                                             text_seq_len,
+                                             new_hidden_states.device(),
+                                             /*max_txt_seq_len=*/std::nullopt);
+    }
+
+    std::unordered_map<std::string, torch::Tensor> block_attention_kwargs;
+    if (new_encoder_hidden_states_mask.has_value() &&
+        new_encoder_hidden_states_mask.value().defined()) {
+      int64_t batch_size = new_hidden_states.size(0);
+      int64_t image_seq_len = new_hidden_states.size(1);
+      auto image_mask = torch::ones({batch_size, image_seq_len},
+                                    torch::TensorOptions()
+                                        .device(new_hidden_states.device())
+                                        .dtype(torch::kBool));
+      auto joint_attention_mask = torch::cat(
+          {new_encoder_hidden_states_mask.value(), image_mask}, /*dim=*/1);
+      block_attention_kwargs["attention_mask"] = joint_attention_mask;
+    }
     auto image_rot = std::get<0>(image_rotary_emb);
     auto txt_rot = std::get<1>(image_rotary_emb);
 
@@ -1201,10 +1775,15 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
               ->as<QwenImageTransformerBlock>()
               ->forward(new_hidden_states,
                         new_encoder_hidden_states,
-                        encoder_hidden_states_mask,
+                        /*encoder_hidden_states_mask=*/torch::Tensor(),
                         temb,
                         image_rotary_emb,
-                        attention_kwargs);
+                        block_attention_kwargs,
+                        modulate_index);
+    }
+
+    if (zero_cond_t_) {
+      temb = temb.chunk(2, 0)[0];
     }
 
     new_hidden_states = norm_out_->forward(new_hidden_states, temb);
@@ -1253,6 +1832,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
 
  private:
   QwenEmbedRope pos_embed_{nullptr};
+  QwenEmbedLayer3DRope pos_embed_3d_rope_{nullptr};
   QwenTimestepProjEmbeddings time_text_embed_{nullptr};
   RMSNorm txt_norm_{nullptr};
   DiTLinear img_in_{nullptr};
@@ -1264,11 +1844,15 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
   // Cache objects
   bool cache_cond_;
   bool cache_uncond_;
+
+  bool zero_cond_t_;
+  bool use_layer3d_rope_;
 };
 
 TORCH_MODULE(QwenImageTransformer2DModel);
 
 REGISTER_MODEL_ARGS(QwenImageTransformer2DModel, [&] {
+  // qwen-image 2509 params
   LOAD_ARG_OR(dtype, "dtype", "bfloat16");
   LOAD_ARG_OR(in_channels, "in_channels", 64);
   LOAD_ARG_OR(out_channels, "out_channels", 16);
@@ -1281,6 +1865,11 @@ REGISTER_MODEL_ARGS(QwenImageTransformer2DModel, [&] {
   LOAD_ARG_OR(guidance_embeds, "guidance_embeds", false);
   LOAD_ARG_OR(
       axes_dims_rope, "axes_dims_rope", (std::vector<int64_t>{16, 56, 56}));
+
+  // qwen-image 2511 params
+  LOAD_ARG_OR(zero_cond_t, "zero_cond_t", false);
+  LOAD_ARG_OR(use_additional_t_cond, "use_additional_t_cond", false);
+  LOAD_ARG_OR(use_layer3d_rope, "use_layer3d_rope", false);
 });
 
 }  // namespace qwenimage

@@ -382,9 +382,9 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
   QwenImageResampleImpl(const ModelContext& context,
                         int64_t dim,
                         const std::string& mode)
-      : dim(dim), mode(mode) {
-    if (mode == "upsample2d") {
-      resample = register_module(
+      : dim_(dim), mode_(mode) {
+    if (mode_ == "upsample2d") {
+      resample_ = register_module(
           "resample",
           torch::nn::Sequential(
               QwenImageUpsample(context,
@@ -392,9 +392,12 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
                                     .scale_factor(std::vector<double>{2.0, 2.0})
                                     .mode(torch::kNearestExact)),
               torch::nn::Conv2d(
-                  torch::nn::Conv2dOptions(dim, dim / 2, 3).padding(1))));
-    } else if (mode == "upsample3d") {
-      resample = register_module(
+                  torch::nn::Conv2dOptions(/*in_channels=*/dim,
+                                           /*out_channels=*/dim / 2,
+                                           /*kernel_size=*/3)
+                      .padding(1))));
+    } else if (mode_ == "upsample3d") {
+      resample_ = register_module(
           "resample",
           torch::nn::Sequential(
               QwenImageUpsample(context,
@@ -402,45 +405,58 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
                                     .scale_factor(std::vector<double>{2.0, 2.0})
                                     .mode(torch::kNearestExact)),
               torch::nn::Conv2d(
-                  torch::nn::Conv2dOptions(dim, dim / 2, 3).padding(1))));
+                  torch::nn::Conv2dOptions(/*in_channels=*/dim,
+                                           /*out_channels=*/dim / 2,
+                                           /*kernel_size=*/3)
+                      .padding(1))));
 
-      time_conv =
-          register_module("time_conv",
-                          QwenImageCausalConv3d(context,
-                                                dim,
-                                                dim * 2,
-                                                torch::IntArrayRef{3, 1, 1},
-                                                torch::IntArrayRef{1, 1, 1},
-                                                torch::IntArrayRef{1, 0, 0}));
+      time_conv_ = register_module(
+          "time_conv",
+          QwenImageCausalConv3d(context,
+                                /*in_channels=*/dim,
+                                /*out_channels=*/dim * 2,
+                                /*kernel_size=*/torch::IntArrayRef{3, 1, 1},
+                                /*stride=*/torch::IntArrayRef{1, 1, 1},
+                                /*padding=*/torch::IntArrayRef{1, 0, 0}));
 
-    } else if (mode == "downsample2d") {
-      resample = register_module(
+    } else if (mode_ == "downsample2d") {
+      resample_ = register_module(
           "resample",
           torch::nn::Sequential(
-              torch::nn::ZeroPad2d(torch::nn::ZeroPad2dOptions({0, 1, 0, 1})),
-              torch::nn::Conv2d(
-                  torch::nn::Conv2dOptions(dim, dim, 3).stride(2))));
-    } else if (mode == "downsample3d") {
-      resample = register_module(
+              torch::nn::ZeroPad2d(torch::nn::ZeroPad2dOptions({/*left=*/0,
+                                                                /*right=*/1,
+                                                                /*top=*/0,
+                                                                /*bottom=*/1})),
+              torch::nn::Conv2d(torch::nn::Conv2dOptions(/*in_channels=*/dim,
+                                                         /*out_channels=*/dim,
+                                                         /*kernel_size=*/3)
+                                    .stride(2))));
+    } else if (mode_ == "downsample3d") {
+      resample_ = register_module(
           "resample",
           torch::nn::Sequential(
-              torch::nn::ZeroPad2d(torch::nn::ZeroPad2dOptions({0, 1, 0, 1})),
-              torch::nn::Conv2d(
-                  torch::nn::Conv2dOptions(dim, dim, 3).stride(2))));
-      time_conv =
-          register_module("time_conv",
-                          QwenImageCausalConv3d(context,
-                                                dim,
-                                                dim,
-                                                torch::IntArrayRef{3, 1, 1},
-                                                torch::IntArrayRef{2, 1, 1},
-                                                torch::IntArrayRef{0, 0, 0}));
+              torch::nn::ZeroPad2d(torch::nn::ZeroPad2dOptions({/*left=*/0,
+                                                                /*right=*/1,
+                                                                /*top=*/0,
+                                                                /*bottom=*/1})),
+              torch::nn::Conv2d(torch::nn::Conv2dOptions(/*in_channels=*/dim,
+                                                         /*out_channels=*/dim,
+                                                         /*kernel_size=*/3)
+                                    .stride(2))));
+      time_conv_ = register_module(
+          "time_conv",
+          QwenImageCausalConv3d(context,
+                                /*in_channels=*/dim,
+                                /*out_channels=*/dim,
+                                /*kernel_size=*/torch::IntArrayRef{3, 1, 1},
+                                /*stride=*/torch::IntArrayRef{2, 1, 1},
+                                /*padding=*/torch::IntArrayRef{0, 0, 0}));
     } else {
-      resample = register_module("resample",
-                                 torch::nn::Sequential(torch::nn::Identity()));
+      resample_ = register_module("resample",
+                                  torch::nn::Sequential(torch::nn::Identity()));
     }
 
-    rep_tensor = register_parameter("rep_tensor", torch::tensor({-999.0}));
+    rep_tensor_ = register_parameter("rep_tensor", torch::tensor({-999.0}));
   }
 
   torch::Tensor forward(const torch::Tensor& x,
@@ -450,7 +466,7 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
     auto b = sizes[0], c = sizes[1], t = sizes[2], h = sizes[3], w = sizes[4];
     auto result_x = x;
 
-    if (mode == "upsample3d" && feat_cache && feat_idx) {
+    if (mode_ == "upsample3d" && feat_cache && feat_idx) {
       auto idx = (*feat_idx)[0];
 
       if (idx < feat_cache->size() && feat_cache->at(idx).defined()) {
@@ -462,7 +478,7 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
                            .clone();
 
         if (cache_x.size(2) < 2 && feat_cache->at(idx).defined() &&
-            !torch::equal(rep_tensor, feat_cache->at(idx))) {
+            !torch::equal(rep_tensor_, feat_cache->at(idx))) {
           auto last_frame =
               feat_cache->at(idx)
                   .index({torch::indexing::Slice(),
@@ -473,14 +489,14 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
           cache_x = torch::cat({last_frame, cache_x}, 2);
         }
         if (cache_x.size(2) < 2 && feat_cache->at(idx).defined() &&
-            torch::equal(rep_tensor, feat_cache->at(idx))) {
+            torch::equal(rep_tensor_, feat_cache->at(idx))) {
           cache_x = torch::cat(
               {torch::zeros_like(cache_x).to(cache_x.device()), cache_x}, 2);
         }
-        if (torch::equal(rep_tensor, feat_cache->at(idx))) {
-          result_x = time_conv->forward(result_x);
+        if (torch::equal(rep_tensor_, feat_cache->at(idx))) {
+          result_x = time_conv_->forward(result_x);
         } else {
-          result_x = time_conv->forward(result_x, feat_cache->at(idx));
+          result_x = time_conv_->forward(result_x, feat_cache->at(idx));
         }
         feat_cache->at(idx) = cache_x;
         (*feat_idx)[0]++;
@@ -491,20 +507,20 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
                                 3);
         result_x = result_x.reshape({b, c, t * 2, h, w});
       } else {
-        feat_cache->at(idx) = rep_tensor;
+        feat_cache->at(idx) = rep_tensor_;
         (*feat_idx)[0]++;
       }
     }
 
     t = result_x.size(2);
     result_x = result_x.permute({0, 2, 1, 3, 4}).reshape({b * t, c, h, w});
-    result_x = resample->forward(result_x);
+    result_x = resample_->forward(result_x);
     result_x =
         result_x
             .view({b, t, result_x.size(1), result_x.size(2), result_x.size(3)})
             .permute({0, 2, 1, 3, 4});
 
-    if (mode == "downsample3d" && feat_cache && feat_idx) {
+    if (mode_ == "downsample3d" && feat_cache && feat_idx) {
       auto idx = (*feat_idx)[0];
 
       if (idx < feat_cache->size() && feat_cache->at(idx).defined()) {
@@ -523,7 +539,7 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
              result_x},
             2);
 
-        result_x = time_conv->forward(concat_x);
+        result_x = time_conv_->forward(concat_x);
         feat_cache->at(idx) = cache_x;
         (*feat_idx)[0]++;
       } else {
@@ -536,7 +552,7 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    auto params = resample->named_parameters();
+    auto params = resample_->named_parameters();
     for (auto& param : params) {
       std::string name = param.key();
       if (name == "1.weight") {
@@ -547,8 +563,9 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
             state_dict, "resample.1.bias", param.value(), is_bias_loaded_);
       }
     }
-    if (time_conv) {
-      time_conv->load_state_dict(state_dict.get_dict_with_prefix("time_conv."));
+    if (time_conv_) {
+      time_conv_->load_state_dict(
+          state_dict.get_dict_with_prefix("time_conv."));
     }
   }
 
@@ -556,19 +573,19 @@ class QwenImageResampleImpl : public QwenImageBaseModule {
     CHECK(is_weight_loaded_)
         << "weight is not loaded for " << prefix + "weight";
     CHECK(is_bias_loaded_) << "bias is not loaded for " << prefix + "bias";
-    if (time_conv) {
-      time_conv->verify_loaded_weights("time_conv.");
+    if (time_conv_) {
+      time_conv_->verify_loaded_weights("time_conv.");
     }
   }
 
  private:
-  int64_t dim;
-  std::string mode;
+  int64_t dim_;
+  std::string mode_;
   bool is_weight_loaded_{false};
   bool is_bias_loaded_{false};
-  torch::Tensor rep_tensor;
-  torch::nn::Sequential resample{nullptr};
-  QwenImageCausalConv3d time_conv{nullptr};
+  torch::Tensor rep_tensor_;
+  torch::nn::Sequential resample_{nullptr};
+  QwenImageCausalConv3d time_conv_{nullptr};
 };
 
 TORCH_MODULE(QwenImageResample);
@@ -580,41 +597,52 @@ class QwenImageResidualBlockImpl : public QwenImageBaseModule {
                              int64_t out_dim,
                              double dropout = 0.0,
                              const std::string& non_linearity = "silu")
-      : in_dim(in_dim), out_dim(out_dim) {
-    activation = register_module("silu", torch::nn::SiLU());
+      : in_dim_(in_dim), out_dim_(out_dim) {
+    activation_ = register_module("silu", torch::nn::SiLU());
 
-    norm1 = register_module(
-        "norm1", QwenImageRMS_norm(context, in_dim, true, false, false, false));
-    conv1 = register_module("conv1",
-                            QwenImageCausalConv3d(context,
-                                                  in_dim,
-                                                  out_dim,
-                                                  torch::IntArrayRef{3, 3, 3},
-                                                  torch::IntArrayRef{1, 1, 1},
-                                                  torch::IntArrayRef{1, 1, 1}));
-    norm2 = register_module(
-        "norm2",
-        QwenImageRMS_norm(context, out_dim, true, false, false, false));
-    dropout_layer = register_module("dropout", torch::nn::Dropout(dropout));
-    conv2 = register_module("conv2",
-                            QwenImageCausalConv3d(context,
-                                                  out_dim,
-                                                  out_dim,
-                                                  torch::IntArrayRef{3, 3, 3},
-                                                  torch::IntArrayRef{1, 1, 1},
-                                                  torch::IntArrayRef{1, 1, 1}));
+    norm1_ = register_module("norm1",
+                             QwenImageRMS_norm(context,
+                                               in_dim,
+                                               /*channel_first=*/true,
+                                               /*images=*/false,
+                                               /*is_bias=*/false,
+                                               /*fused=*/false));
+    conv1_ = register_module(
+        "conv1",
+        QwenImageCausalConv3d(context,
+                              in_dim,
+                              out_dim,
+                              /*kernel_size=*/torch::IntArrayRef{3, 3, 3},
+                              /*stride=*/torch::IntArrayRef{1, 1, 1},
+                              /*padding=*/torch::IntArrayRef{1, 1, 1}));
+    norm2_ = register_module("norm2",
+                             QwenImageRMS_norm(context,
+                                               out_dim,
+                                               /*channel_first=*/true,
+                                               /*images=*/false,
+                                               /*is_bias=*/false,
+                                               /*fused=*/false));
+    dropout_layer_ = register_module("dropout", torch::nn::Dropout(dropout));
+    conv2_ = register_module(
+        "conv2",
+        QwenImageCausalConv3d(context,
+                              out_dim,
+                              out_dim,
+                              /*kernel_size=*/torch::IntArrayRef{3, 3, 3},
+                              /*stride=*/torch::IntArrayRef{1, 1, 1},
+                              /*padding=*/torch::IntArrayRef{1, 1, 1}));
 
     if (in_dim != out_dim) {
-      conv_shortcut =
-          register_module("conv_shortcut",
-                          QwenImageCausalConv3d(context,
-                                                in_dim,
-                                                out_dim,
-                                                torch::IntArrayRef{1, 1, 1},
-                                                torch::IntArrayRef{1, 1, 1},
-                                                torch::IntArrayRef{0, 0, 0}));
+      conv_shortcut_ = register_module(
+          "conv_shortcut",
+          QwenImageCausalConv3d(context,
+                                in_dim,
+                                out_dim,
+                                /*kernel_size=*/torch::IntArrayRef{1, 1, 1},
+                                /*stride=*/torch::IntArrayRef{1, 1, 1},
+                                /*padding=*/torch::IntArrayRef{0, 0, 0}));
     } else {
-      identity = register_module("conv_shortcut", torch::nn::Identity());
+      identity_ = register_module("conv_shortcut", torch::nn::Identity());
     }
   }
 
@@ -622,15 +650,15 @@ class QwenImageResidualBlockImpl : public QwenImageBaseModule {
                         std::vector<torch::Tensor>* feat_cache = nullptr,
                         std::vector<int64_t>* feat_idx = {0}) override {
     torch::Tensor h = torch::empty({0});
-    if (conv_shortcut) {
-      h = conv_shortcut->forward(x);
+    if (conv_shortcut_) {
+      h = conv_shortcut_->forward(x);
     } else {
-      h = identity->forward(x);
+      h = identity_->forward(x);
     }
     auto result_x = x;
 
-    result_x = norm1->forward(result_x);
-    result_x = activation->forward(result_x);
+    result_x = norm1_->forward(result_x);
+    result_x = activation_->forward(result_x);
 
     if (feat_cache && feat_idx) {
       auto idx = (*feat_idx)[0];
@@ -651,15 +679,15 @@ class QwenImageResidualBlockImpl : public QwenImageBaseModule {
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
 
-      result_x = conv1->forward(result_x, feat_cache->at(idx));
+      result_x = conv1_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv1->forward(result_x);
+      result_x = conv1_->forward(result_x);
     }
-    result_x = norm2->forward(result_x);
-    result_x = activation->forward(result_x);
-    result_x = dropout_layer->forward(result_x);
+    result_x = norm2_->forward(result_x);
+    result_x = activation_->forward(result_x);
+    result_x = dropout_layer_->forward(result_x);
 
     if (feat_cache && feat_idx) {
       auto idx = (*feat_idx)[0];
@@ -680,48 +708,48 @@ class QwenImageResidualBlockImpl : public QwenImageBaseModule {
                 .to(cache_x.device());
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
-      result_x = conv2->forward(result_x, feat_cache->at(idx));
+      result_x = conv2_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv2->forward(result_x);
+      result_x = conv2_->forward(result_x);
     }
 
     return result_x + h;
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    norm1->load_state_dict(state_dict.get_dict_with_prefix("norm1."));
-    norm2->load_state_dict(state_dict.get_dict_with_prefix("norm2."));
+    norm1_->load_state_dict(state_dict.get_dict_with_prefix("norm1."));
+    norm2_->load_state_dict(state_dict.get_dict_with_prefix("norm2."));
 
-    conv1->load_state_dict(state_dict.get_dict_with_prefix("conv1."));
+    conv1_->load_state_dict(state_dict.get_dict_with_prefix("conv1."));
 
-    conv2->load_state_dict(state_dict.get_dict_with_prefix("conv2."));
+    conv2_->load_state_dict(state_dict.get_dict_with_prefix("conv2."));
 
-    if (conv_shortcut) {
-      conv_shortcut->load_state_dict(
+    if (conv_shortcut_) {
+      conv_shortcut_->load_state_dict(
           state_dict.get_dict_with_prefix("conv_shortcut."));
     }
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    norm1->verify_loaded_weights("norm1.");
-    norm2->verify_loaded_weights("norm2.");
-    conv1->verify_loaded_weights("conv1.");
-    conv2->verify_loaded_weights("conv2.");
-    if (conv_shortcut) {
-      conv_shortcut->verify_loaded_weights("conv_shortcut.");
+    norm1_->verify_loaded_weights("norm1.");
+    norm2_->verify_loaded_weights("norm2.");
+    conv1_->verify_loaded_weights("conv1.");
+    conv2_->verify_loaded_weights("conv2.");
+    if (conv_shortcut_) {
+      conv_shortcut_->verify_loaded_weights("conv_shortcut.");
     }
   }
 
  private:
-  int64_t in_dim, out_dim;
-  QwenImageRMS_norm norm1{nullptr}, norm2{nullptr};
-  QwenImageCausalConv3d conv1{nullptr}, conv2{nullptr};
-  QwenImageCausalConv3d conv_shortcut{nullptr};
-  torch::nn::Dropout dropout_layer{nullptr};
-  torch::nn::SiLU activation{nullptr};
-  torch::nn::Identity identity{nullptr};
+  int64_t in_dim_, out_dim_;
+  QwenImageRMS_norm norm1_{nullptr}, norm2_{nullptr};
+  QwenImageCausalConv3d conv1_{nullptr}, conv2_{nullptr};
+  QwenImageCausalConv3d conv_shortcut_{nullptr};
+  torch::nn::Dropout dropout_layer_{nullptr};
+  torch::nn::SiLU activation_{nullptr};
+  torch::nn::Identity identity_{nullptr};
 };
 
 TORCH_MODULE(QwenImageResidualBlock);
@@ -729,13 +757,24 @@ TORCH_MODULE(QwenImageResidualBlock);
 class QwenImageAttentionBlockImpl : public QwenImageBaseModule {
  public:
   QwenImageAttentionBlockImpl(const ModelContext& context, int64_t dim)
-      : dim(dim) {
-    norm = register_module(
-        "norm", QwenImageRMS_norm(context, dim, true, true, false, false));
-    to_qkv = register_module(
-        "to_qkv", torch::nn::Conv2d(torch::nn::Conv2dOptions(dim, dim * 3, 1)));
-    proj = register_module(
-        "proj", torch::nn::Conv2d(torch::nn::Conv2dOptions(dim, dim, 1)));
+      : dim_(dim) {
+    norm_ = register_module("norm",
+                            QwenImageRMS_norm(context,
+                                              dim,
+                                              /*channel_first=*/true,
+                                              /*images=*/true,
+                                              /*is_bias=*/false,
+                                              /*fused=*/false));
+    to_qkv_ = register_module(
+        "to_qkv",
+        torch::nn::Conv2d(torch::nn::Conv2dOptions(/*in_channels=*/dim,
+                                                   /*out_channels=*/dim * 3,
+                                                   /*kernel_size=*/1)));
+    proj_ = register_module(
+        "proj",
+        torch::nn::Conv2d(torch::nn::Conv2dOptions(/*in_channels=*/dim,
+                                                   /*out_channels=*/dim,
+                                                   /*kernel_size=*/1)));
   }
 
   torch::Tensor forward(const torch::Tensor& x,
@@ -746,33 +785,33 @@ class QwenImageAttentionBlockImpl : public QwenImageBaseModule {
     auto b = sizes[0], c = sizes[1], t = sizes[2], h = sizes[3], w = sizes[4];
 
     auto reshaped_x = x.permute({0, 2, 1, 3, 4}).reshape({b * t, c, h, w});
-    reshaped_x = norm->forward(reshaped_x);
+    reshaped_x = norm_->forward(reshaped_x);
 
-    auto qkv = to_qkv->forward(reshaped_x);
+    auto qkv = to_qkv_->forward(reshaped_x);
     qkv = qkv.reshape({b * t, 1, c * 3, h * w});
     qkv = qkv.permute({0, 1, 3, 2}).contiguous();
 
     auto chunks = qkv.chunk(3, -1);
     auto q = chunks[0], k = chunks[1], v = chunks[2];
 
-    auto results =
-        at_npu::native::custom_ops::npu_fusion_attention(q,
-                                                         k,
-                                                         v,
-                                                         1,
-                                                         "BNSD",
-                                                         torch::nullopt,
-                                                         torch::nullopt,
-                                                         torch::nullopt,
-                                                         pow(c, -0.5),
-                                                         1.0,
-                                                         65535,
-                                                         65535);
+    auto results = at_npu::native::custom_ops::npu_fusion_attention(
+        q,
+        k,
+        v,
+        /*head_num=*/1,
+        /*input_layout=*/"BNSD",
+        /*pse*/ torch::nullopt,
+        /*padding_mask=*/torch::nullopt,
+        /*atten_mask=*/torch::nullopt,
+        /*scale=*/pow(c, -0.5),
+        /*keep_prob=*/1.0,
+        /*pre_tockens=*/65535,
+        /*next_tockens=*/65535);
     auto attn_output = std::get<0>(results);
     attn_output =
         attn_output.squeeze(1).permute({0, 2, 1}).reshape({b * t, c, h, w});
 
-    auto output = proj->forward(attn_output);
+    auto output = proj_->forward(attn_output);
 
     output = output.view({b, t, c, h, w}).permute({0, 2, 1, 3, 4});
 
@@ -780,20 +819,20 @@ class QwenImageAttentionBlockImpl : public QwenImageBaseModule {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    norm->load_state_dict(state_dict.get_dict_with_prefix("norm."));
+    norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
 
     weight::load_weight(
-        state_dict, "to_qkv.weight", to_qkv->weight, is_qkv_weight_loaded_);
+        state_dict, "to_qkv.weight", to_qkv_->weight, is_qkv_weight_loaded_);
     weight::load_weight(
-        state_dict, "to_qkv.bias", to_qkv->bias, is_qkv_bias_loaded_);
+        state_dict, "to_qkv.bias", to_qkv_->bias, is_qkv_bias_loaded_);
     weight::load_weight(
-        state_dict, "proj.weight", proj->weight, is_proj_weight_loaded_);
+        state_dict, "proj.weight", proj_->weight, is_proj_weight_loaded_);
     weight::load_weight(
-        state_dict, "proj.bias", proj->bias, is_proj_bias_loaded_);
+        state_dict, "proj.bias", proj_->bias, is_proj_bias_loaded_);
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    norm->verify_loaded_weights("norm.");
+    norm_->verify_loaded_weights("norm.");
 
     CHECK(is_qkv_weight_loaded_)
         << "weight is not loaded for " << prefix + "weight";
@@ -806,10 +845,10 @@ class QwenImageAttentionBlockImpl : public QwenImageBaseModule {
   }
 
  private:
-  int64_t dim;
-  QwenImageRMS_norm norm{nullptr};
-  torch::nn::Conv2d to_qkv{nullptr};
-  torch::nn::Conv2d proj{nullptr};
+  int64_t dim_;
+  QwenImageRMS_norm norm_{nullptr};
+  torch::nn::Conv2d to_qkv_{nullptr};
+  torch::nn::Conv2d proj_{nullptr};
   bool is_qkv_weight_loaded_{false};
   bool is_qkv_bias_loaded_{false};
   bool is_proj_weight_loaded_{false};
@@ -825,21 +864,21 @@ class QwenImageMidBlockImpl : public torch::nn::Module {
                         double dropout = 0.0,
                         const std::string& non_linearity = "silu",
                         int64_t num_layers = 1)
-      : dim(dim) {
-    resnets = register_module("resnets", torch::nn::ModuleList());
-    attentions = register_module("attentions", torch::nn::ModuleList());
+      : dim_(dim) {
+    resnets_ = register_module("resnets", torch::nn::ModuleList());
+    attentions_ = register_module("attentions", torch::nn::ModuleList());
 
     auto resnet_0 =
         QwenImageResidualBlock(context, dim, dim, dropout, non_linearity);
-    resnets->push_back(resnet_0);
+    resnets_->push_back(resnet_0);
 
     for (int64_t i = 0; i < num_layers; i++) {
       auto attention = QwenImageAttentionBlock(context, dim);
-      attentions->push_back(attention);
+      attentions_->push_back(attention);
 
       auto resnet =
           QwenImageResidualBlock(context, dim, dim, dropout, non_linearity);
-      resnets->push_back(resnet);
+      resnets_->push_back(resnet);
     }
   }
 
@@ -848,13 +887,13 @@ class QwenImageMidBlockImpl : public torch::nn::Module {
                         std::vector<int64_t>* feat_idx = {0}) {
     auto result_x = x;
 
-    result_x = resnets[0]->as<QwenImageResidualBlock>()->forward(
+    result_x = resnets_[0]->as<QwenImageResidualBlock>()->forward(
         result_x, feat_cache, feat_idx);
 
-    for (size_t i = 0; i < attentions->size(); i++) {
+    for (size_t i = 0; i < attentions_->size(); i++) {
       result_x =
-          attentions[i]->as<QwenImageAttentionBlock>()->forward(result_x);
-      result_x = resnets[i + 1]->as<QwenImageResidualBlock>()->forward(
+          attentions_[i]->as<QwenImageAttentionBlock>()->forward(result_x);
+      result_x = resnets_[i + 1]->as<QwenImageResidualBlock>()->forward(
           result_x, feat_cache, feat_idx);
     }
 
@@ -862,36 +901,36 @@ class QwenImageMidBlockImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    for (size_t i = 0; i < resnets->size(); i++) {
+    for (size_t i = 0; i < resnets_->size(); i++) {
       auto prefix = "resnets." + std::to_string(i) + ".";
-      resnets[i]->as<QwenImageResidualBlock>()->load_state_dict(
+      resnets_[i]->as<QwenImageResidualBlock>()->load_state_dict(
           state_dict.get_dict_with_prefix(prefix));
     }
 
-    for (size_t i = 0; i < attentions->size(); i++) {
+    for (size_t i = 0; i < attentions_->size(); i++) {
       auto prefix = "attentions." + std::to_string(i) + ".";
-      attentions[i]->as<QwenImageAttentionBlock>()->load_state_dict(
+      attentions_[i]->as<QwenImageAttentionBlock>()->load_state_dict(
           state_dict.get_dict_with_prefix(prefix));
     }
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    for (size_t i = 0; i < resnets->size(); i++) {
+    for (size_t i = 0; i < resnets_->size(); i++) {
       auto prefix = "resnets." + std::to_string(i) + ".";
-      resnets[i]->as<QwenImageResidualBlock>()->verify_loaded_weights(prefix);
+      resnets_[i]->as<QwenImageResidualBlock>()->verify_loaded_weights(prefix);
     }
 
-    for (size_t i = 0; i < attentions->size(); i++) {
+    for (size_t i = 0; i < attentions_->size(); i++) {
       auto prefix = "attentions." + std::to_string(i) + ".";
-      attentions[i]->as<QwenImageAttentionBlock>()->verify_loaded_weights(
+      attentions_[i]->as<QwenImageAttentionBlock>()->verify_loaded_weights(
           prefix);
     }
   }
 
  private:
-  int64_t dim;
-  torch::nn::ModuleList resnets;
-  torch::nn::ModuleList attentions;
+  int64_t dim_;
+  torch::nn::ModuleList resnets_;
+  torch::nn::ModuleList attentions_;
 };
 
 TORCH_MODULE(QwenImageMidBlock);
@@ -908,81 +947,87 @@ class QwenImageEncoder3dImpl : public torch::nn::Module {
                                                                   true,
                                                                   false},
                          double dropout = 0.0,
+                         int64_t input_channels = 3,
                          const std::string& non_linearity = "silu")
-      : dim(dim),
-        z_dim(z_dim),
-        dim_mult(dim_mult),
-        num_res_blocks(num_res_blocks),
-        attn_scales(attn_scales),
-        temperal_downsample(temperal_downsample) {
-    nonlinearity = register_module("silu", torch::nn::SiLU());
+      : dim_(dim),
+        z_dim_(z_dim),
+        dim_mult_(dim_mult),
+        num_res_blocks_(num_res_blocks),
+        attn_scales_(attn_scales),
+        temperal_downsample_(temperal_downsample) {
+    nonlinearity_ = register_module("silu", torch::nn::SiLU());
 
     std::vector<int64_t> dims = {dim * 1};
-    for (auto u : dim_mult) {
+    for (auto u : dim_mult_) {
       dims.push_back(dim * u);
     }
 
     double scale = 1.0;
 
-    conv_in =
-        register_module("conv_in",
-                        QwenImageCausalConv3d(context,
-                                              3,
-                                              dims[0],
-                                              torch::IntArrayRef{3, 3, 3},
-                                              torch::IntArrayRef{1, 1, 1},
-                                              torch::IntArrayRef{1, 1, 1}));
+    conv_in_ = register_module(
+        "conv_in",
+        QwenImageCausalConv3d(context,
+                              input_channels,
+                              /*out_channels=*/dims[0],
+                              /*kernel_size=*/torch::IntArrayRef{3, 3, 3},
+                              /*stride=*/torch::IntArrayRef{1, 1, 1},
+                              /*padding=*/torch::IntArrayRef{1, 1, 1}));
 
-    down_blocks = register_module("down_blocks", torch::nn::ModuleList());
+    down_blocks_ = register_module("down_blocks", torch::nn::ModuleList());
 
     size_t counter = 0;
     for (size_t i = 0; i < dims.size() - 1; i++) {
       int64_t in_dim = dims[i];
       int64_t out_dim = dims[i + 1];
 
-      for (int64_t j = 0; j < num_res_blocks; j++) {
+      for (int64_t j = 0; j < num_res_blocks_; j++) {
         auto res_block = QwenImageResidualBlock(
             context, in_dim, out_dim, dropout, non_linearity);
-        down_blocks->push_back(res_block);
-        resnet_blocks_idx.push_back(counter);
+        down_blocks_->push_back(res_block);
+        resnet_blocks_idx_.push_back(counter);
         counter += 1;
 
-        if (std::find(attn_scales.begin(), attn_scales.end(), scale) !=
-            attn_scales.end()) {
+        if (std::find(attn_scales_.begin(), attn_scales_.end(), scale) !=
+            attn_scales_.end()) {
           auto attn_block = QwenImageAttentionBlock(context, out_dim);
-          down_blocks->push_back(attn_block);
-          attention_blocks_idx.push_back(counter);
+          down_blocks_->push_back(attn_block);
+          attention_blocks_idx_.push_back(counter);
           counter += 1;
         }
         in_dim = out_dim;
       }
 
-      if (i != dim_mult.size() - 1) {
+      if (i != dim_mult_.size() - 1) {
         std::string mode =
-            temperal_downsample[i] ? "downsample3d" : "downsample2d";
+            temperal_downsample_[i] ? "downsample3d" : "downsample2d";
         auto downsample = QwenImageResample(context, out_dim, mode);
-        down_blocks->push_back(downsample);
-        resample_blocks_idx.push_back(counter);
+        down_blocks_->push_back(downsample);
+        resample_blocks_idx_.push_back(counter);
         counter += 1;
         scale /= 2.0;
       }
     }
 
-    mid_block = register_module(
+    mid_block_ = register_module(
         "mid_block",
-        QwenImageMidBlock(context, dims.back(), dropout, non_linearity, 1));
+        QwenImageMidBlock(
+            context, dims.back(), dropout, non_linearity, /*num_layers=*/1));
 
-    norm_out = register_module(
-        "norm_out",
-        QwenImageRMS_norm(context, dims.back(), true, false, false, false));
-    conv_out =
-        register_module("conv_out",
-                        QwenImageCausalConv3d(context,
-                                              dims.back(),
-                                              z_dim,
-                                              torch::IntArrayRef{3, 3, 3},
-                                              torch::IntArrayRef{1, 1, 1},
-                                              torch::IntArrayRef{1, 1, 1}));
+    norm_out_ = register_module("norm_out",
+                                QwenImageRMS_norm(context,
+                                                  dims.back(),
+                                                  /*channel_first=*/true,
+                                                  /*images=*/false,
+                                                  /*is_bias=*/false,
+                                                  /*fused=*/false));
+    conv_out_ = register_module(
+        "conv_out",
+        QwenImageCausalConv3d(context,
+                              /*in_channels=*/dims.back(),
+                              /*out_channels=*/z_dim,
+                              /*kernel_size=*/torch::IntArrayRef{3, 3, 3},
+                              /*stride=*/torch::IntArrayRef{1, 1, 1},
+                              /*padding=*/torch::IntArrayRef{1, 1, 1}));
   }
 
   torch::Tensor forward(const torch::Tensor& x,
@@ -1008,15 +1053,15 @@ class QwenImageEncoder3dImpl : public torch::nn::Module {
                 .to(cache_x.device());
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
-      result_x = conv_in->forward(x, feat_cache->at(idx));
+      result_x = conv_in_->forward(x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv_in->forward(x);
+      result_x = conv_in_->forward(x);
     }
 
     int64_t counter = 0;
-    for (auto& layer : *down_blocks) {
+    for (auto& layer : *down_blocks_) {
       if (feat_cache) {
         counter = counter + 1;
         result_x =
@@ -1032,10 +1077,10 @@ class QwenImageEncoder3dImpl : public torch::nn::Module {
       }
     }
 
-    result_x = mid_block->forward(result_x, feat_cache, feat_idx);
+    result_x = mid_block_->forward(result_x, feat_cache, feat_idx);
 
-    result_x = norm_out->forward(result_x);
-    result_x = nonlinearity->forward(result_x);
+    result_x = norm_out_->forward(result_x);
+    result_x = nonlinearity_->forward(result_x);
 
     if (feat_cache && feat_idx) {
       auto idx = (*feat_idx)[0];
@@ -1058,82 +1103,83 @@ class QwenImageEncoder3dImpl : public torch::nn::Module {
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
 
-      result_x = conv_out->forward(result_x, feat_cache->at(idx));
+      result_x = conv_out_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv_out->forward(result_x);
+      result_x = conv_out_->forward(result_x);
     }
 
     return result_x;
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    conv_in->load_state_dict(state_dict.get_dict_with_prefix("conv_in."));
+    conv_in_->load_state_dict(state_dict.get_dict_with_prefix("conv_in."));
 
-    for (size_t resnet_idx : resnet_blocks_idx) {
-      down_blocks[resnet_idx]->as<QwenImageResidualBlock>()->load_state_dict(
+    for (size_t resnet_idx : resnet_blocks_idx_) {
+      down_blocks_[resnet_idx]->as<QwenImageResidualBlock>()->load_state_dict(
           state_dict.get_dict_with_prefix("down_blocks." +
                                           std::to_string(resnet_idx) + "."));
     }
 
-    for (size_t attention_idx : attention_blocks_idx) {
-      down_blocks[attention_idx]
+    for (size_t attention_idx : attention_blocks_idx_) {
+      down_blocks_[attention_idx]
           ->as<QwenImageAttentionBlock>()
           ->load_state_dict(state_dict.get_dict_with_prefix(
               "down_blocks." + std::to_string(attention_idx) + "."));
     }
 
-    for (size_t resample_idx : resample_blocks_idx) {
-      down_blocks[resample_idx]->as<QwenImageResample>()->load_state_dict(
+    for (size_t resample_idx : resample_blocks_idx_) {
+      down_blocks_[resample_idx]->as<QwenImageResample>()->load_state_dict(
           state_dict.get_dict_with_prefix("down_blocks." +
                                           std::to_string(resample_idx) + "."));
     }
 
-    mid_block->load_state_dict(state_dict.get_dict_with_prefix("mid_block."));
-    norm_out->load_state_dict(state_dict.get_dict_with_prefix("norm_out."));
-    conv_out->load_state_dict(state_dict.get_dict_with_prefix("conv_out."));
+    mid_block_->load_state_dict(state_dict.get_dict_with_prefix("mid_block."));
+    norm_out_->load_state_dict(state_dict.get_dict_with_prefix("norm_out."));
+    conv_out_->load_state_dict(state_dict.get_dict_with_prefix("conv_out."));
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    conv_in->verify_loaded_weights("conv_in.");
-    for (size_t resnet_idx : resnet_blocks_idx) {
-      down_blocks[resnet_idx]
+    conv_in_->verify_loaded_weights("conv_in.");
+    for (size_t resnet_idx : resnet_blocks_idx_) {
+      down_blocks_[resnet_idx]
           ->as<QwenImageResidualBlock>()
           ->verify_loaded_weights(std::to_string(resnet_idx) + ".");
     }
 
-    for (size_t attention_idx : attention_blocks_idx) {
-      down_blocks[attention_idx]
+    for (size_t attention_idx : attention_blocks_idx_) {
+      down_blocks_[attention_idx]
           ->as<QwenImageAttentionBlock>()
           ->verify_loaded_weights(std::to_string(attention_idx) + ".");
     }
 
-    for (size_t resample_idx : resample_blocks_idx) {
-      down_blocks[resample_idx]->as<QwenImageResample>()->verify_loaded_weights(
-          std::to_string(resample_idx) + ".");
+    for (size_t resample_idx : resample_blocks_idx_) {
+      down_blocks_[resample_idx]
+          ->as<QwenImageResample>()
+          ->verify_loaded_weights(std::to_string(resample_idx) + ".");
     }
-    mid_block->verify_loaded_weights("mid_block.");
-    norm_out->verify_loaded_weights("norm_out.");
-    conv_out->verify_loaded_weights("conv_out.");
+    mid_block_->verify_loaded_weights("mid_block.");
+    norm_out_->verify_loaded_weights("norm_out.");
+    conv_out_->verify_loaded_weights("conv_out.");
   }
 
  private:
-  int64_t dim, z_dim;
-  std::vector<int64_t> dim_mult;
-  std::vector<size_t> resnet_blocks_idx;
-  std::vector<size_t> attention_blocks_idx;
-  std::vector<size_t> resample_blocks_idx;
-  int64_t num_res_blocks;
-  std::vector<double> attn_scales;
-  std::vector<bool> temperal_downsample;
+  int64_t dim_, z_dim_;
+  std::vector<int64_t> dim_mult_;
+  std::vector<size_t> resnet_blocks_idx_;
+  std::vector<size_t> attention_blocks_idx_;
+  std::vector<size_t> resample_blocks_idx_;
+  int64_t num_res_blocks_;
+  std::vector<double> attn_scales_;
+  std::vector<bool> temperal_downsample_;
 
-  torch::nn::SiLU nonlinearity{nullptr};
-  QwenImageCausalConv3d conv_in{nullptr};
-  torch::nn::ModuleList down_blocks{nullptr};
-  QwenImageMidBlock mid_block{nullptr};
-  QwenImageRMS_norm norm_out{nullptr};
-  QwenImageCausalConv3d conv_out{nullptr};
+  torch::nn::SiLU nonlinearity_{nullptr};
+  QwenImageCausalConv3d conv_in_{nullptr};
+  torch::nn::ModuleList down_blocks_{nullptr};
+  QwenImageMidBlock mid_block_{nullptr};
+  QwenImageRMS_norm norm_out_{nullptr};
+  QwenImageCausalConv3d conv_out_{nullptr};
 };
 
 TORCH_MODULE(QwenImageEncoder3d);
@@ -1147,21 +1193,21 @@ class QwenImageUpBlockImpl : public torch::nn::Module {
                        double dropout = 0.0,
                        const std::string& upsample_mode = "",
                        const std::string& non_linearity = "silu")
-      : in_dim(in_dim), out_dim(out_dim) {
-    resnets = register_module("resnets", torch::nn::ModuleList());
+      : in_dim_(in_dim), out_dim_(out_dim) {
+    resnets_ = register_module("resnets", torch::nn::ModuleList());
     int64_t current_dim = in_dim;
 
     for (int64_t i = 0; i < num_res_blocks + 1; i++) {
       auto resnet = QwenImageResidualBlock(
           context, current_dim, out_dim, dropout, non_linearity);
-      resnets->push_back(resnet);
+      resnets_->push_back(resnet);
       current_dim = out_dim;
     }
 
     if (!upsample_mode.empty()) {
-      upsamplers = register_module("upsamplers", torch::nn::ModuleList());
+      upsamplers_ = register_module("upsamplers", torch::nn::ModuleList());
       auto upsample = QwenImageResample(context, out_dim, upsample_mode);
-      upsamplers->push_back(upsample);
+      upsamplers_->push_back(upsample);
     }
   }
 
@@ -1170,7 +1216,7 @@ class QwenImageUpBlockImpl : public torch::nn::Module {
                         std::vector<int64_t>* feat_idx = {0}) {
     auto result_x = x;
 
-    for (auto& resnet : *resnets) {
+    for (auto& resnet : *resnets_) {
       if (feat_cache && feat_idx) {
         result_x =
             std::dynamic_pointer_cast<QwenImageBaseModule>(resnet)->forward(
@@ -1185,17 +1231,19 @@ class QwenImageUpBlockImpl : public torch::nn::Module {
       }
     }
 
-    if (upsamplers) {
+    if (upsamplers_) {
       if (feat_cache && feat_idx) {
-        result_x = std::dynamic_pointer_cast<QwenImageBaseModule>(upsamplers[0])
-                       ->forward(result_x, feat_cache, feat_idx);
+        result_x =
+            std::dynamic_pointer_cast<QwenImageBaseModule>(upsamplers_[0])
+                ->forward(result_x, feat_cache, feat_idx);
       } else {
-        result_x = std::dynamic_pointer_cast<QwenImageBaseModule>(upsamplers[0])
-                       ->forward(result_x,
-                                 nullptr,
-                                 std::make_unique<std::vector<int64_t>>(
-                                     std::vector<int64_t>{0})
-                                     .get());
+        result_x =
+            std::dynamic_pointer_cast<QwenImageBaseModule>(upsamplers_[0])
+                ->forward(result_x,
+                          nullptr,
+                          std::make_unique<std::vector<int64_t>>(
+                              std::vector<int64_t>{0})
+                              .get());
       }
     }
 
@@ -1203,34 +1251,34 @@ class QwenImageUpBlockImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    for (size_t i = 0; i < resnets->size(); i++) {
+    for (size_t i = 0; i < resnets_->size(); i++) {
       auto prefix = "resnets." + std::to_string(i) + ".";
-      resnets[i]->as<QwenImageResidualBlock>()->load_state_dict(
+      resnets_[i]->as<QwenImageResidualBlock>()->load_state_dict(
           state_dict.get_dict_with_prefix(prefix));
     }
 
-    if (upsamplers) {
-      upsamplers[0]->as<QwenImageResample>()->load_state_dict(
+    if (upsamplers_) {
+      upsamplers_[0]->as<QwenImageResample>()->load_state_dict(
           state_dict.get_dict_with_prefix("upsamplers.0."));
     }
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    for (size_t i = 0; i < resnets->size(); i++) {
+    for (size_t i = 0; i < resnets_->size(); i++) {
       auto prefix = "resnets." + std::to_string(i) + ".";
-      resnets[i]->as<QwenImageResidualBlock>()->verify_loaded_weights(prefix);
+      resnets_[i]->as<QwenImageResidualBlock>()->verify_loaded_weights(prefix);
     }
 
-    if (upsamplers) {
-      upsamplers[0]->as<QwenImageResample>()->verify_loaded_weights(
+    if (upsamplers_) {
+      upsamplers_[0]->as<QwenImageResample>()->verify_loaded_weights(
           "upsamplers.0.");
     }
   }
 
  private:
-  int64_t in_dim, out_dim;
-  torch::nn::ModuleList resnets{nullptr};
-  torch::nn::ModuleList upsamplers{nullptr};
+  int64_t in_dim_, out_dim_;
+  torch::nn::ModuleList resnets_{nullptr};
+  torch::nn::ModuleList upsamplers_{nullptr};
 };
 
 TORCH_MODULE(QwenImageUpBlock);
@@ -1247,14 +1295,15 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
                                                                 true,
                                                                 true},
                          double dropout = 0.0,
+                         int64_t input_channels = 3,
                          const std::string& non_linearity = "silu")
-      : dim(dim),
-        z_dim(z_dim),
-        dim_mult(dim_mult),
-        num_res_blocks(num_res_blocks),
-        attn_scales(attn_scales),
-        temperal_upsample(temperal_upsample) {
-    nonlinearity = register_module("silu", torch::nn::SiLU());
+      : dim_(dim),
+        z_dim_(z_dim),
+        dim_mult_(dim_mult),
+        num_res_blocks_(num_res_blocks),
+        attn_scales_(attn_scales),
+        temperal_upsample_(temperal_upsample) {
+    nonlinearity_ = register_module("silu", torch::nn::SiLU());
 
     std::vector<int64_t> dims = {dim * dim_mult.back()};
     for (int64_t i = dim_mult.size() - 1; i >= 0; i--) {
@@ -1263,7 +1312,7 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
 
     double scale = 1.0 / std::pow(2, dim_mult.size() - 2);
 
-    conv_in =
+    conv_in_ =
         register_module("conv_in",
                         QwenImageCausalConv3d(context,
                                               z_dim,
@@ -1272,11 +1321,12 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
                                               torch::IntArrayRef{1, 1, 1},
                                               torch::IntArrayRef{1, 1, 1}));
 
-    mid_block = register_module(
+    mid_block_ = register_module(
         "mid_block",
-        QwenImageMidBlock(context, dims[0], dropout, non_linearity, 1));
+        QwenImageMidBlock(
+            context, dims[0], dropout, non_linearity, /*num_layers=*/1));
 
-    up_blocks = register_module("up_blocks", torch::nn::ModuleList());
+    up_blocks_ = register_module("up_blocks", torch::nn::ModuleList());
     for (size_t i = 0; i < dims.size() - 1; i++) {
       int64_t in_dim = dims[i];
       int64_t out_dim = dims[i + 1];
@@ -1297,24 +1347,24 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
                                        dropout,
                                        upsample_mode,
                                        non_linearity);
-      up_blocks->push_back(up_block);
+      up_blocks_->push_back(up_block);
 
       if (!upsample_mode.empty()) {
         scale *= 2.0;
       }
     }
 
-    norm_out = register_module(
+    norm_out_ = register_module(
         "norm_out",
         QwenImageRMS_norm(context, dims.back(), true, false, false, false));
-    conv_out =
-        register_module("conv_out",
-                        QwenImageCausalConv3d(context,
-                                              dims.back(),
-                                              3,
-                                              torch::IntArrayRef{3, 3, 3},
-                                              torch::IntArrayRef{1, 1, 1},
-                                              torch::IntArrayRef{1, 1, 1}));
+    conv_out_ = register_module(
+        "conv_out",
+        QwenImageCausalConv3d(context,
+                              /*in_channels=*/dims.back(),
+                              /*out_channels=*/input_channels,
+                              /*kernel_size=*/torch::IntArrayRef{3, 3, 3},
+                              /*stride=*/torch::IntArrayRef{1, 1, 1},
+                              /*padding=*/torch::IntArrayRef{1, 1, 1}));
   }
 
   torch::Tensor forward(const torch::Tensor& x,
@@ -1342,22 +1392,22 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
 
-      result_x = conv_in->forward(result_x, feat_cache->at(idx));
+      result_x = conv_in_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv_in->forward(result_x);
+      result_x = conv_in_->forward(result_x);
     }
 
-    result_x = mid_block->forward(result_x, feat_cache, feat_idx);
+    result_x = mid_block_->forward(result_x, feat_cache, feat_idx);
 
-    for (auto& up_block : *up_blocks) {
+    for (auto& up_block : *up_blocks_) {
       result_x = up_block->as<QwenImageUpBlock>()->forward(
           result_x, feat_cache, feat_idx);
     }
 
-    result_x = norm_out->forward(result_x);
-    result_x = nonlinearity->forward(result_x);
+    result_x = norm_out_->forward(result_x);
+    result_x = nonlinearity_->forward(result_x);
 
     if (feat_cache) {
       auto idx = (*feat_idx)[0];
@@ -1380,40 +1430,40 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
         cache_x = torch::cat({last_frame, cache_x}, 2);
       }
 
-      result_x = conv_out->forward(result_x, feat_cache->at(idx));
+      result_x = conv_out_->forward(result_x, feat_cache->at(idx));
       feat_cache->at(idx) = cache_x;
       (*feat_idx)[0]++;
     } else {
-      result_x = conv_out->forward(result_x);
+      result_x = conv_out_->forward(result_x);
     }
     return result_x;
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    conv_in->load_state_dict(state_dict.get_dict_with_prefix("conv_in."));
-    mid_block->load_state_dict(state_dict.get_dict_with_prefix("mid_block."));
+    conv_in_->load_state_dict(state_dict.get_dict_with_prefix("conv_in."));
+    mid_block_->load_state_dict(state_dict.get_dict_with_prefix("mid_block."));
 
-    for (size_t i = 0; i < up_blocks->size(); i++) {
+    for (size_t i = 0; i < up_blocks_->size(); i++) {
       auto prefix = "up_blocks." + std::to_string(i) + ".";
-      up_blocks[i]->as<QwenImageUpBlock>()->load_state_dict(
+      up_blocks_[i]->as<QwenImageUpBlock>()->load_state_dict(
           state_dict.get_dict_with_prefix(prefix));
     }
 
-    norm_out->load_state_dict(state_dict.get_dict_with_prefix("norm_out."));
-    conv_out->load_state_dict(state_dict.get_dict_with_prefix("conv_out."));
+    norm_out_->load_state_dict(state_dict.get_dict_with_prefix("norm_out."));
+    conv_out_->load_state_dict(state_dict.get_dict_with_prefix("conv_out."));
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    conv_in->verify_loaded_weights("conv_in.");
+    conv_in_->verify_loaded_weights("conv_in.");
 
-    mid_block->verify_loaded_weights("mid_block.");
-    for (size_t i = 0; i < up_blocks->size(); i++) {
+    mid_block_->verify_loaded_weights("mid_block.");
+    for (size_t i = 0; i < up_blocks_->size(); i++) {
       auto prefix = "up_blocks." + std::to_string(i) + ".";
-      up_blocks[i]->as<QwenImageUpBlock>()->verify_loaded_weights(prefix);
+      up_blocks_[i]->as<QwenImageUpBlock>()->verify_loaded_weights(prefix);
     }
 
-    norm_out->verify_loaded_weights("norm_out.");
-    conv_out->verify_loaded_weights("conv_out.");
+    norm_out_->verify_loaded_weights("norm_out.");
+    conv_out_->verify_loaded_weights("conv_out.");
   }
 
   std::vector<std::shared_ptr<Module>> get_modules() const {
@@ -1422,18 +1472,18 @@ class QwenImageDecoder3dImpl : public torch::nn::Module {
   }
 
  private:
-  int64_t dim, z_dim;
-  std::vector<int64_t> dim_mult;
-  int64_t num_res_blocks;
-  std::vector<double> attn_scales;
-  std::vector<bool> temperal_upsample;
+  int64_t dim_, z_dim_;
+  std::vector<int64_t> dim_mult_;
+  int64_t num_res_blocks_;
+  std::vector<double> attn_scales_;
+  std::vector<bool> temperal_upsample_;
 
-  torch::nn::SiLU nonlinearity{nullptr};
-  QwenImageCausalConv3d conv_in{nullptr};
-  QwenImageMidBlock mid_block{nullptr};
-  torch::nn::ModuleList up_blocks{nullptr};
-  QwenImageRMS_norm norm_out{nullptr};
-  QwenImageCausalConv3d conv_out{nullptr};
+  torch::nn::SiLU nonlinearity_{nullptr};
+  QwenImageCausalConv3d conv_in_{nullptr};
+  QwenImageMidBlock mid_block_{nullptr};
+  torch::nn::ModuleList up_blocks_{nullptr};
+  QwenImageRMS_norm norm_out_{nullptr};
+  QwenImageCausalConv3d conv_out_{nullptr};
 };
 
 TORCH_MODULE(QwenImageDecoder3d);
@@ -1525,92 +1575,95 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
  public:
   AutoencoderKLQwenImageImpl(const ModelContext& context)
       : args_(context.get_model_args()),
-        z_dim(context.get_model_args().z_dim()),
-        temperal_downsample(context.get_model_args().temperal_downsample()),
-        base_dim(context.get_model_args().base_dim()),
-        dim_mult(context.get_model_args().dim_mult()),
-        num_res_blocks(context.get_model_args().num_res_blocks()),
-        attn_scales(context.get_model_args().attn_scales()),
-        dropout(context.get_model_args().dropout()) {
-    temperal_upsample = std::vector<bool>(temperal_downsample.rbegin(),
-                                          temperal_downsample.rend());
+        z_dim_(context.get_model_args().z_dim()),
+        temperal_downsample_(context.get_model_args().temperal_downsample()),
+        base_dim_(context.get_model_args().base_dim()),
+        dim_mult_(context.get_model_args().dim_mult()),
+        num_res_blocks_(context.get_model_args().num_res_blocks()),
+        attn_scales_(context.get_model_args().attn_scales()),
+        dropout_(context.get_model_args().dropout()) {
+    temperal_upsample_ = std::vector<bool>(temperal_downsample_.rbegin(),
+                                           temperal_downsample_.rend());
 
-    encoder = register_module("encoder",
-                              QwenImageEncoder3d(context,
-                                                 base_dim,
-                                                 z_dim * 2,
-                                                 dim_mult,
-                                                 num_res_blocks,
-                                                 attn_scales,
-                                                 temperal_downsample,
-                                                 dropout));
+    int64_t input_channels = context.get_model_args().in_channels();
+    encoder_ = register_module("encoder",
+                               QwenImageEncoder3d(context,
+                                                  base_dim_,
+                                                  z_dim_ * 2,
+                                                  dim_mult_,
+                                                  num_res_blocks_,
+                                                  attn_scales_,
+                                                  temperal_downsample_,
+                                                  dropout_,
+                                                  input_channels));
 
-    quant_conv =
+    quant_conv_ =
         register_module("quant_conv",
                         QwenImageCausalConv3d(context,
-                                              z_dim * 2,
-                                              z_dim * 2,
+                                              z_dim_ * 2,
+                                              z_dim_ * 2,
                                               torch::IntArrayRef{1, 1, 1},
                                               torch::IntArrayRef{1, 1, 1},
                                               torch::IntArrayRef{0, 0, 0}));
 
-    post_quant_conv =
+    post_quant_conv_ =
         register_module("post_quant_conv",
                         QwenImageCausalConv3d(context,
-                                              z_dim,
-                                              z_dim,
+                                              z_dim_,
+                                              z_dim_,
                                               torch::IntArrayRef{1, 1, 1},
                                               torch::IntArrayRef{1, 1, 1},
                                               torch::IntArrayRef{0, 0, 0}));
 
-    decoder = register_module("decoder",
-                              QwenImageDecoder3d(context,
-                                                 base_dim,
-                                                 z_dim,
-                                                 dim_mult,
-                                                 num_res_blocks,
-                                                 attn_scales,
-                                                 temperal_upsample,
-                                                 dropout));
+    decoder_ = register_module("decoder",
+                               QwenImageDecoder3d(context,
+                                                  base_dim_,
+                                                  z_dim_,
+                                                  dim_mult_,
+                                                  num_res_blocks_,
+                                                  attn_scales_,
+                                                  temperal_upsample_,
+                                                  dropout_,
+                                                  input_channels));
 
-    spatial_compression_ratio =
-        static_cast<int64_t>(std::pow(2, temperal_downsample.size()));
+    spatial_compression_ratio_ =
+        static_cast<int64_t>(std::pow(2, temperal_downsample_.size()));
 
-    use_slicing = false;
-    use_tiling = false;
-    tile_sample_min_height = 256;
-    tile_sample_min_width = 256;
-    tile_sample_stride_height = 192;
-    tile_sample_stride_width = 192;
+    use_slicing_ = false;
+    use_tiling_ = false;
+    tile_sample_min_height_ = 256;
+    tile_sample_min_width_ = 256;
+    tile_sample_stride_height_ = 192;
+    tile_sample_stride_width_ = 192;
 
-    cached_conv_counts = {{"decoder", count_conv3d_modules(*decoder)},
-                          {"encoder", count_conv3d_modules(*encoder)}};
+    cached_conv_counts_ = {{"decoder", count_conv3d_modules(*decoder_)},
+                           {"encoder", count_conv3d_modules(*encoder_)}};
   }
 
   void enable_tiling(int64_t tile_sample_min_height = -1,
                      int64_t tile_sample_min_width = -1,
                      int64_t tile_sample_stride_height = -1,
                      int64_t tile_sample_stride_width = -1) {
-    use_tiling = true;
+    use_tiling_ = true;
     if (tile_sample_min_height > 0)
-      this->tile_sample_min_height = tile_sample_min_height;
+      tile_sample_min_height_ = tile_sample_min_height;
     if (tile_sample_min_width > 0)
-      this->tile_sample_min_width = tile_sample_min_width;
+      tile_sample_min_width_ = tile_sample_min_width;
     if (tile_sample_stride_height > 0)
-      this->tile_sample_stride_height = tile_sample_stride_height;
+      tile_sample_stride_height_ = tile_sample_stride_height;
     if (tile_sample_stride_width > 0)
-      this->tile_sample_stride_width = tile_sample_stride_width;
+      tile_sample_stride_width_ = tile_sample_stride_width;
   }
 
   void clear_cache() {
-    conv_num = count_conv3d_modules(*decoder);
-    conv_idx = {0};
+    conv_num_ = count_conv3d_modules(*decoder_);
+    conv_idx_ = {0};
 
-    feat_map = std::vector<torch::Tensor>(conv_num);
+    feat_map_ = std::vector<torch::Tensor>(conv_num_);
 
-    enc_conv_num = count_conv3d_modules(*encoder);
-    enc_conv_idx = {0};
-    enc_feat_map = std::vector<torch::Tensor>(enc_conv_num);
+    enc_conv_num_ = count_conv3d_modules(*encoder_);
+    enc_conv_idx_ = {0};
+    enc_feat_map_ = std::vector<torch::Tensor>(enc_conv_num_);
   }
 
   torch::Tensor _encode(const torch::Tensor& x) {
@@ -1618,8 +1671,8 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
     auto b = sizes[0], c = sizes[1], num_frame = sizes[2], height = sizes[3],
          width = sizes[4];
 
-    if (use_tiling &&
-        (width > tile_sample_min_width || height > tile_sample_min_height)) {
+    if (use_tiling_ &&
+        (width > tile_sample_min_width_ || height > tile_sample_min_height_)) {
       return tiled_encode(x);
     }
 
@@ -1628,7 +1681,7 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
     torch::Tensor out;
 
     for (int64_t i = 0; i < iter; i++) {
-      enc_conv_idx[0] = 0;
+      enc_conv_idx_[0] = 0;
       torch::Tensor tile;
 
       if (i == 0) {
@@ -1645,7 +1698,8 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
                         torch::indexing::Slice()});
       }
 
-      auto encoded_tile = encoder->forward(tile, &enc_feat_map, &enc_conv_idx);
+      auto encoded_tile =
+          encoder_->forward(tile, &enc_feat_map_, &enc_conv_idx_);
 
       if (i == 0) {
         out = encoded_tile;
@@ -1654,7 +1708,7 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
       }
     }
 
-    auto enc = quant_conv->forward(out);
+    auto enc = quant_conv_->forward(out);
     clear_cache();
     return enc;
   }
@@ -1662,7 +1716,7 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
   AutoencoderKLOutput encode(const torch::Tensor& x, bool return_dict = true) {
     torch::Tensor h;
 
-    if (use_slicing && x.size(0) > 1) {
+    if (use_slicing_ && x.size(0) > 1) {
       std::vector<torch::Tensor> encoded_slices;
       auto slices = x.split(1);
       for (auto& slice : slices) {
@@ -1689,28 +1743,28 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
          width = sizes[4];
 
     auto tile_latent_min_height =
-        tile_sample_min_height / spatial_compression_ratio;
+        tile_sample_min_height_ / spatial_compression_ratio_;
     auto tile_latent_min_width =
-        tile_sample_min_width / spatial_compression_ratio;
+        tile_sample_min_width_ / spatial_compression_ratio_;
 
-    if (use_tiling &&
+    if (use_tiling_ &&
         (width > tile_latent_min_width || height > tile_latent_min_height)) {
       return tiled_decode(z, return_dict);
     }
 
     clear_cache();
-    auto x = post_quant_conv->forward(z);
+    auto x = post_quant_conv_->forward(z);
     torch::Tensor out;
 
     for (int64_t i = 0; i < num_frame; i++) {
-      conv_idx[0] = 0;
+      conv_idx_[0] = 0;
       auto frame = x.index({torch::indexing::Slice(),
                             torch::indexing::Slice(),
                             torch::indexing::Slice(i, i + 1),
                             torch::indexing::Slice(),
                             torch::indexing::Slice()});
 
-      auto decoded_frame = decoder->forward(frame, &feat_map, &conv_idx);
+      auto decoded_frame = decoder_->forward(frame, &feat_map_, &conv_idx_);
 
       if (i == 0) {
         out = decoded_frame;
@@ -1733,7 +1787,7 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
   DecoderOutput decode(const torch::Tensor& z, bool return_dict = true) {
     torch::Tensor decoded;
 
-    if (use_slicing && z.size(0) > 1) {
+    if (use_slicing_ && z.size(0) > 1) {
       std::vector<torch::Tensor> decoded_slices;
       auto slices = z.split(1);
       for (auto& slice : slices) {
@@ -1829,54 +1883,54 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
     auto b = sizes[0], c = sizes[1], num_frames = sizes[2], height = sizes[3],
          width = sizes[4];
 
-    auto latent_height = height / spatial_compression_ratio;
-    auto latent_width = width / spatial_compression_ratio;
+    auto latent_height = height / spatial_compression_ratio_;
+    auto latent_width = width / spatial_compression_ratio_;
 
     auto tile_latent_min_height =
-        tile_sample_min_height / spatial_compression_ratio;
+        tile_sample_min_height_ / spatial_compression_ratio_;
     auto tile_latent_min_width =
-        tile_sample_min_width / spatial_compression_ratio;
+        tile_sample_min_width_ / spatial_compression_ratio_;
     auto tile_latent_stride_height =
-        tile_sample_stride_height / spatial_compression_ratio;
+        tile_sample_stride_height_ / spatial_compression_ratio_;
     auto tile_latent_stride_width =
-        tile_sample_stride_width / spatial_compression_ratio;
+        tile_sample_stride_width_ / spatial_compression_ratio_;
 
     auto blend_height = tile_latent_min_height - tile_latent_stride_height;
     auto blend_width = tile_latent_min_width - tile_latent_stride_width;
 
     std::vector<std::vector<torch::Tensor>> rows;
 
-    for (int64_t i = 0; i < height; i += tile_sample_stride_height) {
+    for (int64_t i = 0; i < height; i += tile_sample_stride_height_) {
       std::vector<torch::Tensor> row;
 
-      for (int64_t j = 0; j < width; j += tile_sample_stride_width) {
+      for (int64_t j = 0; j < width; j += tile_sample_stride_width_) {
         clear_cache();
         std::vector<torch::Tensor> time_frames;
         auto frame_range = 1 + (num_frames - 1) / 4;
 
         for (int64_t k = 0; k < frame_range; k++) {
-          enc_conv_idx[0] = 0;
+          enc_conv_idx_[0] = 0;
           torch::Tensor tile;
 
           if (k == 0) {
-            tile =
-                x.index({torch::indexing::Slice(),
-                         torch::indexing::Slice(),
-                         torch::indexing::Slice(0, 1),
-                         torch::indexing::Slice(i, i + tile_sample_min_height),
-                         torch::indexing::Slice(j, j + tile_sample_min_width)});
+            tile = x.index(
+                {torch::indexing::Slice(),
+                 torch::indexing::Slice(),
+                 torch::indexing::Slice(0, 1),
+                 torch::indexing::Slice(i, i + tile_sample_min_height_),
+                 torch::indexing::Slice(j, j + tile_sample_min_width_)});
           } else {
-            tile =
-                x.index({torch::indexing::Slice(),
-                         torch::indexing::Slice(),
-                         torch::indexing::Slice(1 + 4 * (k - 1), 1 + 4 * k),
-                         torch::indexing::Slice(i, i + tile_sample_min_height),
-                         torch::indexing::Slice(j, j + tile_sample_min_width)});
+            tile = x.index(
+                {torch::indexing::Slice(),
+                 torch::indexing::Slice(),
+                 torch::indexing::Slice(1 + 4 * (k - 1), 1 + 4 * k),
+                 torch::indexing::Slice(i, i + tile_sample_min_height_),
+                 torch::indexing::Slice(j, j + tile_sample_min_width_)});
           }
 
           auto encoded_tile =
-              encoder->forward(tile, &enc_feat_map, &enc_conv_idx);
-          auto quantized_tile = quant_conv->forward(encoded_tile);
+              encoder_->forward(tile, &enc_feat_map_, &enc_conv_idx_);
+          auto quantized_tile = quant_conv_->forward(encoded_tile);
           time_frames.push_back(quantized_tile);
         }
 
@@ -1927,20 +1981,20 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
     auto b = sizes[0], c = sizes[1], num_frames = sizes[2], height = sizes[3],
          width = sizes[4];
 
-    auto sample_height = height * spatial_compression_ratio;
-    auto sample_width = width * spatial_compression_ratio;
+    auto sample_height = height * spatial_compression_ratio_;
+    auto sample_width = width * spatial_compression_ratio_;
 
     auto tile_latent_min_height =
-        tile_sample_min_height / spatial_compression_ratio;
+        tile_sample_min_height_ / spatial_compression_ratio_;
     auto tile_latent_min_width =
-        tile_sample_min_width / spatial_compression_ratio;
+        tile_sample_min_width_ / spatial_compression_ratio_;
     auto tile_latent_stride_height =
-        tile_sample_stride_height / spatial_compression_ratio;
+        tile_sample_stride_height_ / spatial_compression_ratio_;
     auto tile_latent_stride_width =
-        tile_sample_stride_width / spatial_compression_ratio;
+        tile_sample_stride_width_ / spatial_compression_ratio_;
 
-    auto blend_height = tile_sample_min_height - tile_sample_stride_height;
-    auto blend_width = tile_sample_min_width - tile_sample_stride_width;
+    auto blend_height = tile_sample_min_height_ - tile_sample_stride_height_;
+    auto blend_width = tile_sample_min_width_ - tile_sample_stride_width_;
 
     std::vector<std::vector<torch::Tensor>> rows;
 
@@ -1952,7 +2006,7 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
         std::vector<torch::Tensor> time_frames;
 
         for (int64_t k = 0; k < num_frames; k++) {
-          conv_idx[0] = 0;
+          conv_idx_[0] = 0;
           auto tile =
               z.index({torch::indexing::Slice(),
                        torch::indexing::Slice(),
@@ -1960,9 +2014,9 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
                        torch::indexing::Slice(i, i + tile_latent_min_height),
                        torch::indexing::Slice(j, j + tile_latent_min_width)});
 
-          auto post_quant_tile = post_quant_conv->forward(tile);
+          auto post_quant_tile = post_quant_conv_->forward(tile);
           auto decoded_tile =
-              decoder->forward(post_quant_tile, &feat_map, &conv_idx);
+              decoder_->forward(post_quant_tile, &feat_map_, &conv_idx_);
           time_frames.push_back(decoded_tile);
         }
 
@@ -1991,8 +2045,8 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
             tile.index({torch::indexing::Slice(),
                         torch::indexing::Slice(),
                         torch::indexing::Slice(),
-                        torch::indexing::Slice(0, tile_sample_stride_height),
-                        torch::indexing::Slice(0, tile_sample_stride_width)}));
+                        torch::indexing::Slice(0, tile_sample_stride_height_),
+                        torch::indexing::Slice(0, tile_sample_stride_width_)}));
       }
 
       result_rows.push_back(torch::cat(result_row, -1));
@@ -2032,31 +2086,23 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
     return dec;
   }
 
-  void load_state_dict(const StateDict& state_dict) {
-    encoder->load_state_dict(state_dict.get_dict_with_prefix("encoder."));
-    decoder->load_state_dict(state_dict.get_dict_with_prefix("decoder."));
-    quant_conv->load_state_dict(state_dict.get_dict_with_prefix("quant_conv."));
-    post_quant_conv->load_state_dict(
-        state_dict.get_dict_with_prefix("post_quant_conv."));
-  }
-
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
     for (const auto& state_dict : loader->get_state_dicts()) {
-      encoder->load_state_dict(state_dict->get_dict_with_prefix("encoder."));
-      decoder->load_state_dict(state_dict->get_dict_with_prefix("decoder."));
-      quant_conv->load_state_dict(
+      encoder_->load_state_dict(state_dict->get_dict_with_prefix("encoder."));
+      decoder_->load_state_dict(state_dict->get_dict_with_prefix("decoder."));
+      quant_conv_->load_state_dict(
           state_dict->get_dict_with_prefix("quant_conv."));
-      post_quant_conv->load_state_dict(
+      post_quant_conv_->load_state_dict(
           state_dict->get_dict_with_prefix("post_quant_conv."));
     }
     verify_loaded_weights("");
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    encoder->verify_loaded_weights("encoder.");
-    decoder->verify_loaded_weights("decoder.");
-    quant_conv->verify_loaded_weights("quant_conv.");
-    post_quant_conv->verify_loaded_weights("post_quant_conv.");
+    encoder_->verify_loaded_weights("encoder.");
+    decoder_->verify_loaded_weights("decoder.");
+    quant_conv_->verify_loaded_weights("quant_conv.");
+    post_quant_conv_->verify_loaded_weights("post_quant_conv.");
   }
 
  private:
@@ -2072,28 +2118,35 @@ class AutoencoderKLQwenImageImpl : public torch::nn::Module {
     return count;
   }
 
-  int64_t base_dim, z_dim;
-  std::vector<int64_t> dim_mult;
-  int64_t num_res_blocks;
-  std::vector<double> attn_scales;
-  std::vector<bool> temperal_downsample, temperal_upsample;
-  double dropout;
+  int64_t base_dim_;
+  int64_t z_dim_;
+  std::vector<int64_t> dim_mult_;
+  int64_t num_res_blocks_;
+  std::vector<double> attn_scales_;
+  std::vector<bool> temperal_downsample_;
+  std::vector<bool> temperal_upsample_;
+  double dropout_;
 
-  int64_t spatial_compression_ratio;
-  bool use_slicing, use_tiling;
-  int64_t tile_sample_min_height, tile_sample_min_width;
-  int64_t tile_sample_stride_height, tile_sample_stride_width;
+  int64_t spatial_compression_ratio_;
+  bool use_slicing_, use_tiling_;
+  int64_t tile_sample_min_height_;
+  int64_t tile_sample_min_width_;
+  int64_t tile_sample_stride_height_;
+  int64_t tile_sample_stride_width_;
 
-  std::unordered_map<std::string, int64_t> cached_conv_counts;
+  std::unordered_map<std::string, int64_t> cached_conv_counts_;
 
-  int64_t conv_num, enc_conv_num;
-  std::vector<int64_t> conv_idx, enc_conv_idx;
-  std::vector<torch::Tensor> feat_map, enc_feat_map;
+  int64_t conv_num_;
+  int64_t enc_conv_num_;
+  std::vector<int64_t> conv_idx_;
+  std::vector<int64_t> enc_conv_idx_;
+  std::vector<torch::Tensor> feat_map_;
+  std::vector<torch::Tensor> enc_feat_map_;
 
-  QwenImageEncoder3d encoder{nullptr};
-  QwenImageCausalConv3d quant_conv{nullptr};
-  QwenImageCausalConv3d post_quant_conv{nullptr};
-  QwenImageDecoder3d decoder{nullptr};
+  QwenImageEncoder3d encoder_{nullptr};
+  QwenImageCausalConv3d quant_conv_{nullptr};
+  QwenImageCausalConv3d post_quant_conv_{nullptr};
+  QwenImageDecoder3d decoder_{nullptr};
 
   ModelArgs args_;
 };
@@ -2103,6 +2156,7 @@ TORCH_MODULE(AutoencoderKLQwenImage);
 REGISTER_MODEL_ARGS(AutoencoderKLQwenImage, [&] {
   LOAD_ARG_OR(base_dim, "base_dim", 96);
   LOAD_ARG_OR(z_dim, "z_dim", 16);
+  LOAD_ARG_OR(in_channels, "in_channels", 3);
   LOAD_ARG_OR(dim_mult, "dim_mult", (std::vector<int64_t>{1, 2, 4, 4}));
   LOAD_ARG_OR(attn_scales, "attn_scales", (std::vector<double>{}));
   LOAD_ARG_OR(temperal_downsample,
