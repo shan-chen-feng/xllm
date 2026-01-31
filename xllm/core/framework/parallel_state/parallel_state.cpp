@@ -330,5 +330,141 @@ std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
   return process_groups;
 }
 
+/**
+ * Supports two modes:
+ * 1. scatter_idx=2, gather_idx=1: Ulysses parallel "split heads" scenario
+ *    - Splits tensor along head dimension (dim2)
+ *    - Reconstructs sequence dimension (dim1) to full length
+ *    - Input: (bs, seqlen/P, hc, hs) -> Output: (bs, seqlen, hc/P, hs)
+ *
+ * 2. scatter_idx=1, gather_idx=2: Ulysses parallel "merge heads" scenario
+ *    - Splits tensor along sequence dimension (dim1)
+ *    - Reconstructs head dimension (dim2) to full head count
+ *    - Input: (bs, seqlen, hc/P, hs) -> Output: (bs, seqlen/P, hc, hs)
+ */
+torch::Tensor all_to_all_4D(const torch::Tensor& input,
+                            int32_t scatter_idx,
+                            int32_t gather_idx,
+                            ProcessGroup* process_group,
+                            bool use_sync) {
+  // Check input dimensions
+  CHECK_EQ(input.dim(), 4) << "input must be 4D tensor, got " << input.dim()
+                           << " and shape " << input.sizes();
+
+  if (!process_group) {
+    return input;
+  }
+
+  const int32_t world_size = process_group->world_size();
+  if (world_size == 1) {
+    return input;
+  }
+
+  // Branch 1: scatter_idx=2 and gather_idx=1
+  // (Ulysses parallel "split heads" scenario)
+  if (scatter_idx == 2 && gather_idx == 1) {
+    // input: tensor sharded along dim 1 (bs, seqlen/P, hc, hs)
+    // output: (bs, seqlen, hc/P, hs)
+    auto sizes = input.sizes().vec();
+    const int64_t bs = sizes[0];
+    const int64_t shard_seqlen = sizes[1];
+    const int64_t hc = sizes[2];
+    const int64_t hs = sizes[3];
+    const int64_t seqlen = shard_seqlen * world_size;
+    CHECK(hc % world_size == 0)
+        << "hc " << hc << " not divisible by world_size " << world_size;
+
+    // Transpose groups of heads with the seq-len parallel dimension
+    // (bs, seqlen/P, hc, hs) -> reshape -> (bs, seq_len/P, P, hc/P, hs)
+    // -> transpose(0,2) -> (P, seq_len/P, bs, hc/P, hs)
+    torch::Tensor input_t =
+        input.reshape({bs, shard_seqlen, world_size, shard_hc, hs})
+            .transpose(0, 2)
+            .contiguous();
+
+    torch::Tensor output = torch::empty_like(input_t);
+
+    // Perform all-to-all communication
+    // (P, seq_len/P, bs, hc/P, hs) scatter seqlen -> all2all ->
+    // (P, seq_len/P, bs, hc/P, hs) scatter head
+    process_group->alltoall(input_t, output);
+
+    // Synchronize to ensure data consistency
+    // This is critical for all-to-all operations to prevent race conditions
+    if (use_sync) {
+#if defined(USE_NPU)
+      torch::npu::synchronize();
+#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_ILU)
+      torch::cuda::synchronize();
+#endif
+    }
+
+    // If scattering the seq-dim, transpose the heads back to original dimension
+    output = output.reshape({seqlen, bs, shard_hc, hs});
+
+    // (seq_len, bs, hc/P, hs) -> transpose(0,1) -> (bs, seq_len, hc/P, hs)
+    output =
+        output.transpose(0, 1).contiguous().reshape({bs, seqlen, shard_hc, hs});
+
+    return output;
+  }
+
+  // Branch 2: scatter_idx=1 and gather_idx=2
+  // (Ulysses parallel "merge heads" scenario)
+  if (scatter_idx == 1 && gather_idx == 2) {
+    // input: tensor sharded along dim 1 (bs, seqlen, hc/P, hs)
+    // output: (bs, seqlen/P, hc, hs)
+    auto sizes = input.sizes().vec();
+    const int64_t bs = sizes[0];
+    const int64_t seqlen = sizes[1];
+    const int64_t shard_hc = sizes[2];
+    const int64_t hs = sizes[3];
+    const int64_t hc = shard_hc * world_size;
+    const int64_t shard_seqlen = seqlen / world_size;
+    CHECK(seqlen % world_size == 0)
+        << "seqlen " << seqlen << " not divisible by world_size " << world_size;
+
+    // Transpose groups of heads with the seq-len parallel dimension
+    // (bs, seqlen, hc/P, hs) -> reshape -> (bs, P, seq_len/P, hc/P, hs)
+    // -> transpose(0,3) -> (hc/P, P, seqlen/P, bs, hs)
+    // -> transpose(0,1) -> (P, hc/P, seqlen/P, bs, hs)
+    torch::Tensor input_t =
+        input.reshape({bs, world_size, shard_seqlen, shard_hc, hs})
+            .transpose(0, 3)
+            .transpose(0, 1)
+            .contiguous()
+            .reshape({world_size, shard_hc, shard_seqlen, bs, hs});
+
+    torch::Tensor output = torch::empty_like(input_t);
+
+    // Perform all-to-all communication
+    // (P, bs x hc/P, seqlen/P, hs) scatter seqlen -> all2all ->
+    // (P, bs x seq_len/P, hc/P, hs) scatter head
+    process_group->alltoall(input_t, output);
+
+    // Synchronize to ensure data consistency
+    // This is critical for all-to-all operations to prevent race conditions
+    if (use_sync) {
+#if defined(USE_NPU)
+      torch::npu::synchronize();
+#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_ILU)
+      torch::cuda::synchronize();
+#endif
+    }
+
+    // If scattering the seq-dim, transpose the heads back to original dimension
+    output = output.reshape({hc, shard_seqlen, bs, hs});
+
+    // (hc, seqlen/N, bs, hs) -> transpose(0,2) -> (bs, seqlen/N, hc, hs)
+    output =
+        output.transpose(0, 2).contiguous().reshape({bs, shard_seqlen, hc, hs});
+
+    return output;
+  }
+
+  CHECK(false) << "scatter_idx must be 1 or 2 and gather_idx must be 1 or 2";
+  return input;
+}
+
 }  // namespace parallel_state
 }  // namespace xllm

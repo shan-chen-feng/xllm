@@ -50,6 +50,20 @@ torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim = -1);
 
+/**
+ * Performs distributed all-to-all communication for 4D tensors in Ulysses parallel scenarios.
+ * Supports two modes:
+ * 1. scatter_idx=2, gather_idx=1: Split heads scenario
+ *    - Input: (bs, seqlen/P, hc, hs) -> Output: (bs, seqlen, hc/P, hs)
+ * 2. scatter_idx=1, gather_idx=2: Merge heads scenario
+ *    - Input: (bs, seqlen, hc/P, hs) -> Output: (bs, seqlen/P, hc, hs)
+ */
+torch::Tensor all_to_all_4D(const torch::Tensor& input,
+                            int32_t scatter_idx = 2,
+                            int32_t gather_idx = 1,
+                            ProcessGroup* process_group = nullptr,
+                            bool use_sync = false);
+
 // Create a process group where each process has a single device
 // devices: list of devices to create process groups on.
 std::vector<std::unique_ptr<ProcessGroup>> create_npu_process_groups(
