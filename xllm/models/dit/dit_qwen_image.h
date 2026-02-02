@@ -47,6 +47,88 @@ limitations under the License.
 #include <torch_npu/torch_npu.h>
 
 namespace xllm {
+
+inline torch::Tensor gather_sequence(const torch::Tensor& input_,
+                                     int world_size,
+                                     int64_t dim,
+                                     int64_t pad,
+                                     ParallelArgs pg) {
+  auto input = input_.contiguous();
+  if (world_size == 1) {
+    return input;
+  }
+
+  // all gather
+  auto tensor_list = parallel_state::all_gather(input, pg);
+
+  // concat
+  auto output = torch::cat(tensor_list, dim);
+
+  if (pad > 0) {
+    output = output.narrow(dim, 0, output.size(dim) - pad);
+  }
+
+  return output;
+}
+
+inline torch::Tensor split_sequence(const torch::Tensor& input_,
+                                    int64_t world_size,
+                                    int64_t rank,
+                                    int64_t dim,
+                                    int64_t pad) {
+  if (world_size == 1) {
+    return input_;
+  }
+
+  torch::Tensor input = input_;
+  if (pad > 0) {
+    std::vector<int64_t> pad_size(input.sizes().begin(), input.sizes().end());
+    pad_size[dim] = pad;
+    input = torch::cat(
+        {input,
+         torch::zeros(pad_size,
+                      torch::dtype(input.dtype()).device(input.device()))},
+        dim);
+  }
+
+  int64_t dim_size = input.size(dim);
+
+  auto tensor_list = torch::split(input, dim_size / world_size, dim);
+  auto output = tensor_list[rank].contiguous();
+  return output;
+}
+
+inline torch::Tensor pad_sequence(const torch::Tensor& input_,
+                                  int64_t dim,
+                                  int64_t pad) {
+  torch::Tensor input = input_;
+  if (pad > 0) {
+    std::vector<int64_t> pad_size(input.sizes().begin(), input.sizes().end());
+    pad_size[dim] = pad;
+    input = torch::cat(
+        {input,
+         torch::zeros(pad_size,
+                      torch::dtype(input.dtype()).device(input.device()))},
+        dim);
+  }
+
+  auto output = input.contiguous();
+  return output;
+}
+
+inline torch::Tensor unpad_sequence(const torch::Tensor& input_,
+                                    int64_t dim,
+                                    int64_t pad) {
+  auto input = input_;
+  if (world_size == 1) {
+    return input;
+  }
+
+  if (pad > 0) {
+    auto output = input.narrow(dim, 0, input.size(dim) - pad);
+  }
+  return output;
+}
 namespace qwenimage {
 
 // TODO: This class should be extracted from dit class and integrated into a
@@ -1037,13 +1119,21 @@ class AttentionImpl : public torch::nn::Module {
                 std::optional<int64_t> out_dim = std::nullopt,
                 std::optional<int64_t> out_context_dim = std::nullopt,
                 std::optional<bool> context_pre_only = std::nullopt,
+                int img_pad = 0,
+                int text_pad = 0,
                 bool pre_only = false,
                 bool elementwise_affine = true,
                 bool is_causal = false)
       : heads_(heads),
         bias_(bias),
         out_bias_(out_bias),
-        added_proj_bias_(added_proj_bias) {
+        added_proj_bias_(added_proj_bias),
+        pg_(context.get_parallel_args(),
+            img_pad_(img_pad),
+            text_pad_(text_pad)) {
+    world_size_ = pg_.world_size();
+    rank_ = pg_.rank();
+    use_sp_ = world_size_ > 1;
     if (qk_norm == "layer_norm") {
       layer_norm_q_ = register_module(
           "norm_q",
@@ -1229,6 +1319,14 @@ class AttentionImpl : public torch::nn::Module {
   // Assuming you have RMSNorm implemented
   RMSNorm norm_q_{nullptr}, norm_k_{nullptr}, norm_added_q_{nullptr},
       norm_added_k_{nullptr};
+
+  // For sequence parallel
+  int world_size_{1};
+  int rank_{0};
+  bool use_sp_{false};
+  int text_pad_;
+  int img_pad_;
+  ParallelArgs pg_;
 };
 TORCH_MODULE(Attention);
 
@@ -1249,24 +1347,51 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     int64_t seq_img = hidden_states.size(1);
     // Compute QKV for image stream (sample projections)
     auto img_query = attn_->to_q_->forward(hidden_states);
-    auto img_key = attn_->to_k_->forward(hidden_states);
-    auto img_value = attn_->to_v_->forward(hidden_states);
-
-    // Compute QKV for text stream (context projections)
-    auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
-    auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
-    auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
-
     // Reshape for multi-head attention
     int64_t heads = attn_->heads_;
     auto reshape_dims = std::vector<int64_t>{heads, -1};
-
     img_query = img_query.unflatten(-1, reshape_dims);
+    if (use_sp_) {
+      img_query = all_to_all_4D(img_query, 2, 1, attn->pg_->process_group_);
+    }
+    auto img_key = attn_->to_k_->forward(hidden_states);
     img_key = img_key.unflatten(-1, reshape_dims);
+    if (use_sp_) {
+      img_key = all_to_all_4D(img_key, 2, 1, attn->pg_->process_group_);
+    }
+    auto img_value = attn_->to_v_->forward(hidden_states);
     img_value = img_value.unflatten(-1, reshape_dims);
+    if (use_sp_) {
+      img_value = all_to_all_4D(img_value, 2, 1, attn->pg_->process_group_);
+    }
+
+    // Compute QKV for text stream (context projections)
+    auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
     txt_query = txt_query.unflatten(-1, reshape_dims);
+    if (use_sp_) {
+      txt_query = all_to_all_4D(txt_query, 2, 1, attn->pg_->process_group_);
+    }
+    auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
     txt_key = txt_key.unflatten(-1, reshape_dims);
+    if (use_sp_) {
+      txt_key = all_to_all_4D(txt_key, 2, 1, attn->pg_->process_group_);
+    }
+    auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
     txt_value = txt_value.unflatten(-1, reshape_dims);
+    if (use_sp_) {
+      txt_value = all_to_all_4D(txt_value, 2, 1, attn->pg_->process_group_);
+    }
+
+    // sp unpad
+    if (use_sp_) {
+      img_query = unpad_sequence(img_query, 1, attn->img_pad_);
+      img_key = unpad_sequence(img_key, 1, attn->img_pad_);
+      img_value = unpad_sequence(img_value, 1, attn->img_pad_);
+      txt_query = unpad_sequence(txt_query, 1, attn->text_pad_);
+      txt_key = unpad_sequence(txt_key, 1, attn->text_pad_);
+      txt_value = unpad_sequence(txt_value, 1, attn->text_pad_);
+    }
+
     // Apply QK normalization
     if (attn_->norm_q_) {
       img_query = attn_->norm_q_->forward(img_query);
@@ -1318,10 +1443,20 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto chunks = torch::split(joint_hidden_states, {seq_txt, seq_img}, 1);
     auto txt_attn_output = chunks[0];
     auto img_attn_output = chunks[1];
-
+    // all tp all 前需要sp pad
+    if (use_sp_) {
+      img_attn_output = pad_sequence(
+          img_attn_output, 1, attn->img_pad_) img_attn_output =
+          all_to_all_4D(img_attn_output, 1, 2, attn->pg_->process_group_, true);
+    }
     // Apply output projections
     img_attn_output = attn_->to_out_->forward(img_attn_output);
 
+    if (use_sp_) {
+      txt_attn_output = pad_sequence(
+          txt_attn_output, 1, text_pad) txt_attn_output =
+          all_to_all_4D(txt_attn_output, 1, 2, attn->pg_->process_group_, true);
+    }
     txt_attn_output = attn_->to_add_out_->forward(txt_attn_output);
     return std::make_tuple(img_attn_output, txt_attn_output);
   }
@@ -1398,10 +1533,17 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
                                 int64_t dim,
                                 int64_t num_attention_heads,
                                 int64_t attention_head_dim,
+                                int64_t layer_id,
                                 bool zero_cond_t = false,
                                 const std::string& qk_norm = "rms_norm",
                                 double eps = 1e-6)
-      : zero_cond_t_(zero_cond_t) {
+      : layer_id_(layer_id),
+        num_layers_(context.get_model_args().dit_num_single_layers()),
+        pg_(context.get_parallel_args()),
+        zero_cond_t_(zero_cond_t) {
+    world_size_ = pg_.world_size();
+    use_sp_ = world_size_ > 1;
+    rank_ = pg_.rank();
     // Image processing modules
     img_mod_ =
         register_module("img_mod",
@@ -1522,6 +1664,34 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
       const std::unordered_map<std::string, torch::Tensor>&
           joint_attention_kwargs = {},
       const torch::Tensor& modulate_index = torch::Tensor()) {
+    torch::Tensor hidden_states_ = hidden_states;
+    torch::Tensor encoder_hidden_states_ = encoder_hidden_states;
+    int32_t seq_len, encoder_seq_len, pad, encoder_pad;
+    // split the sequence for hidden_states and the encoder_hidden_states
+    if (use_sp_) {
+      seq_len = hidden_states_.size(1);
+      encoder_seq_len = encoder_hidden_states_.size(1);
+      pad = (world_size_ - (seq_len % world_size_)) % world_size_;
+      encoder_pad =
+          (world_size_ - (encoder_seq_len % world_size_)) % world_size_;
+      LOG(INFO) << "!!! pad: " << pad << ", encoder_pad: " << encoder_pad;
+      LOG(INFO) << "111 attn_processor_->attn.img_pad_: "
+                << attn_processor_->attn.img_pad_
+                << ", attn_processor_->attn.text_pad_ : "
+                << attn_processor_->attn.text_pad_;
+      attn_processor_->attn.img_pad_ = encoder_pad;
+      attn_processor_->attn.text_pad_ = pad;
+      LOG(INFO) << "=== attn_processor_->attn.img_pad_: "
+                << attn_processor_->attn.img_pad_
+                << ", attn_processor_->attn.text_pad_ : "
+                << attn_processor_->attn.text_pad_;
+      if (layer_id_ == 0) {
+        hidden_states_ =
+            split_sequence(hidden_states_, world_size_, rank_, 1, pad);
+        encoder_hidden_states_ = split_sequence(
+            encoder_hidden_states_, world_size_, rank_, 1, encoder_pad);
+      }
+    }
     // Get modulation parameters for both streams
     auto img_mod_params = img_mod_->forward(temb);  // [B, 6*dim]
     torch::Tensor new_temb;
@@ -1543,12 +1713,12 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     // Process image stream - norm1 + modulation
     torch::Tensor img_modulated, img_gate1;
     std::tie(img_modulated, img_gate1) =
-        img_norm1_->forward(hidden_states, img_mod1, modulate_index);
+        img_norm1_->forward(hidden_states_, img_mod1, modulate_index);
 
     //  Process text stream - norm1 + modulation
     torch::Tensor txt_modulated, txt_gate1;
     std::tie(txt_modulated, txt_gate1) =
-        txt_norm1_->forward(encoder_hidden_states, txt_mod1);
+        txt_norm1_->forward(encoder_hidden_states_, txt_mod1);
 
     // Use QwenAttnProcessor2_0 for joint attention computation
     auto attn_output = attn_processor_->forward(img_modulated,  // Image stream
@@ -1562,9 +1732,9 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     auto txt_attn_output = std::get<1>(attn_output);
 
     //  Apply attention gates and add residual
-    auto new_hidden_states = hidden_states + img_gate1 * img_attn_output;
+    auto new_hidden_states = hidden_states_ + img_gate1 * img_attn_output;
     auto new_encoder_hidden_states =
-        encoder_hidden_states + txt_gate1 * txt_attn_output;
+        encoder_hidden_states_ + txt_gate1 * txt_attn_output;
 
     // Process image stream - norm2 + MLP
     torch::Tensor img_modulated2, img_gate2;
@@ -1591,7 +1761,18 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     if (new_hidden_states.dtype() == torch::kFloat16) {
       new_hidden_states = new_hidden_states.clamp(-65504, 65504);
     }
-
+    // gather the full sequence for hidden_states and the
+    // encoder_hidden_states
+    if (use_sp_ && (layer_id_ == num_layers_ - 1)) {
+      pad = (world_size_ - (seq_len % world_size_)) % world_size_;
+      encoder_pad =
+          (world_size_ - (encoder_seq_len % world_size_)) % world_size_;
+      LOG(INFO) << "pad: " << pad << ", encoder_pad: " << encoder_pad;
+      new_hidden_states =
+          gather_sequence(new_hidden_states, world_size_, 1, pad, pg_);
+      new_encoder_hidden_states = gather_sequence(
+          new_encoder_hidden_states, world_size_, 1, encoder_pad, pg_);
+    }
     return std::make_tuple(new_hidden_states, new_encoder_hidden_states);
   }
 
@@ -1626,6 +1807,14 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
   AdaLayerNorm txt_norm2_{nullptr};
   FeedForward txt_mlp_{nullptr};
   bool zero_cond_t_;
+
+  // For sequence parallel
+  int layer_id_;
+  int num_layers_;
+  int world_size_{1};
+  int rank_{0};
+  bool use_sp_{false};
+  ParallelArgs pg_;
 };
 
 TORCH_MODULE(QwenImageTransformerBlock);
@@ -1683,6 +1872,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
                                     inner_dim,
                                     num_attention_heads,
                                     attention_head_dim,
+                                    i,
                                     zero_cond_t));
     }
 
@@ -1857,6 +2047,9 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
 
   bool zero_cond_t_;
   bool use_layer3d_rope_;
+  // sp
+  bool use_sp_{false};
+  ParallelArgs pg_;
 };
 
 TORCH_MODULE(QwenImageTransformer2DModel);
