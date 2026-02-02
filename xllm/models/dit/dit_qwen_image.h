@@ -1352,44 +1352,44 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     img_query = img_query.unflatten(-1, reshape_dims);
     if (use_sp_) {
-      img_query = all_to_all_4D(img_query, 2, 1, attn->pg_->process_group_);
+      img_query = all_to_all_4D(img_query, 2, 1, attn_->pg_->process_group_);
     }
     auto img_key = attn_->to_k_->forward(hidden_states);
     img_key = img_key.unflatten(-1, reshape_dims);
     if (use_sp_) {
-      img_key = all_to_all_4D(img_key, 2, 1, attn->pg_->process_group_);
+      img_key = all_to_all_4D(img_key, 2, 1, attn_->pg_->process_group_);
     }
     auto img_value = attn_->to_v_->forward(hidden_states);
     img_value = img_value.unflatten(-1, reshape_dims);
     if (use_sp_) {
-      img_value = all_to_all_4D(img_value, 2, 1, attn->pg_->process_group_);
+      img_value = all_to_all_4D(img_value, 2, 1, attn_->pg_->process_group_);
     }
 
     // Compute QKV for text stream (context projections)
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
     txt_query = txt_query.unflatten(-1, reshape_dims);
     if (use_sp_) {
-      txt_query = all_to_all_4D(txt_query, 2, 1, attn->pg_->process_group_);
+      txt_query = all_to_all_4D(txt_query, 2, 1, attn_->pg_->process_group_);
     }
     auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
     txt_key = txt_key.unflatten(-1, reshape_dims);
     if (use_sp_) {
-      txt_key = all_to_all_4D(txt_key, 2, 1, attn->pg_->process_group_);
+      txt_key = all_to_all_4D(txt_key, 2, 1, attn_->pg_->process_group_);
     }
     auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
     txt_value = txt_value.unflatten(-1, reshape_dims);
     if (use_sp_) {
-      txt_value = all_to_all_4D(txt_value, 2, 1, attn->pg_->process_group_);
+      txt_value = all_to_all_4D(txt_value, 2, 1, attn_->pg_->process_group_);
     }
 
     // sp unpad
     if (use_sp_) {
-      img_query = unpad_sequence(img_query, 1, attn->img_pad_);
-      img_key = unpad_sequence(img_key, 1, attn->img_pad_);
-      img_value = unpad_sequence(img_value, 1, attn->img_pad_);
-      txt_query = unpad_sequence(txt_query, 1, attn->text_pad_);
-      txt_key = unpad_sequence(txt_key, 1, attn->text_pad_);
-      txt_value = unpad_sequence(txt_value, 1, attn->text_pad_);
+      img_query = unpad_sequence(img_query, 1, attn_->img_pad_);
+      img_key = unpad_sequence(img_key, 1, attn_->img_pad_);
+      img_value = unpad_sequence(img_value, 1, attn_->img_pad_);
+      txt_query = unpad_sequence(txt_query, 1, attn_->text_pad_);
+      txt_key = unpad_sequence(txt_key, 1, attn_->text_pad_);
+      txt_value = unpad_sequence(txt_value, 1, attn_->text_pad_);
     }
 
     // Apply QK normalization
@@ -1446,8 +1446,8 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     // all tp all 前需要sp pad
     if (use_sp_) {
       img_attn_output = pad_sequence(
-          img_attn_output, 1, attn->img_pad_) img_attn_output =
-          all_to_all_4D(img_attn_output, 1, 2, attn->pg_->process_group_, true);
+          img_attn_output, 1, attn_->img_pad_) img_attn_output =
+          all_to_all_4D(img_attn_output, 1, 2, attn_->pg_->process_group_, true);
     }
     // Apply output projections
     img_attn_output = attn_->to_out_->forward(img_attn_output);
@@ -1455,7 +1455,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     if (use_sp_) {
       txt_attn_output = pad_sequence(
           txt_attn_output, 1, text_pad) txt_attn_output =
-          all_to_all_4D(txt_attn_output, 1, 2, attn->pg_->process_group_, true);
+          all_to_all_4D(txt_attn_output, 1, 2, attn_->pg_->process_group_, true);
     }
     txt_attn_output = attn_->to_add_out_->forward(txt_attn_output);
     return std::make_tuple(img_attn_output, txt_attn_output);
