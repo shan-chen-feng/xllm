@@ -70,7 +70,7 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
   auto model_output = model_executor_->forward(
       flatten_tokens, flatten_positions, kv_caches_, params);
   auto hidden_states = model_output.hidden_states;
-
+  hidden_states.print();
   ret = device_.synchronize_default_stream();
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
@@ -81,13 +81,14 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
   // driver prepare model output
   ForwardOutput output;
   SampleOutput sample_output;
-
+  std::cout << sampling_params.selected_token_idxes;
   if (sampling_params.selected_token_idxes.defined() &&
       input.sampling_params.is_embeddings) {
     EmbeddingVLM* em_model = dynamic_cast<EmbeddingVLM*>(model_.get());
     auto embeddings =
         em_model->pooler(hidden_states, sampling_params.selected_token_idxes);
     sample_output.embeddings = embeddings;
+    sample_output.mm_embeddings = std::vector<torch::Tensor>{embeddings};
     output.sample_output = sample_output;
     output.embedding = embeddings;
   }
