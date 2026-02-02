@@ -371,6 +371,7 @@ torch::Tensor all_to_all_4D(const torch::Tensor& input,
     const int64_t hc = sizes[2];
     const int64_t hs = sizes[3];
     const int64_t seqlen = shard_seqlen * world_size;
+    const int64_t shard_hc = hc / world_size;
     CHECK(hc % world_size == 0)
         << "hc " << hc << " not divisible by world_size " << world_size;
 
