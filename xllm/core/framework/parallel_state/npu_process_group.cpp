@@ -20,14 +20,65 @@ limitations under the License.
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
 
 namespace {
-
+#if defined(USE_NPU)
 #define HCCLCHECK(cmd)                                               \
   do {                                                               \
     HcclResult r = cmd;                                              \
     if (r != HCCL_SUCCESS) {                                         \
-      LOG(FATAL) << "Failed, HCCL error :" << HcclGetErrorString(r); \
+      LOG(FATAL) << "Failed, HCCL error code :" << r; \
     }                                                                \
   } while (0)
+#endif
+inline bool is_npu(const at::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return false;
+  }
+  return tensor.device().is_privateuseone();
+}
+inline bool is_npu(const at::TensorOptions& options) {
+  return options.device().is_privateuseone();
+}
+inline bool is_npu(const at::Device& device) {
+  return device.is_privateuseone();
+}
+at::Tensor flatten_for_scatter_gather(std::vector<at::Tensor>& tensors) {
+  auto& t = tensors[0];
+  std::vector<int64_t> sizes{static_cast<int64_t>(tensors.size())};
+  sizes.insert(sizes.end(), t.sizes().begin(), t.sizes().end());
+  return at::empty(sizes, t.options());
+}
+#if defined(USE_NPU)
+HcclDataType to_hccl_data_type(const torch::Tensor& input) {
+  const auto type = input.scalar_type();
+  switch (type) {
+    case at::kFloat:
+      return HCCL_DATA_TYPE_FP32;
+    case at::kHalf:
+      return HCCL_DATA_TYPE_FP16;
+    case at::kDouble:
+      return HCCL_DATA_TYPE_FP64;
+    case at::kLong:
+      return HCCL_DATA_TYPE_INT64;
+    case at::kInt:
+      return HCCL_DATA_TYPE_INT32;
+    case at::kChar:
+      return HCCL_DATA_TYPE_INT8;
+    case at::kByte:
+      return HCCL_DATA_TYPE_UINT8;
+    case at::kBool:
+      return HCCL_DATA_TYPE_UINT8;
+    case at::kBFloat16:
+      return HCCL_DATA_TYPE_BFP16;
+    default:
+      TORCH_CHECK(false, "Unconvertible HCCL type ", type);
+  }
+}
+#endif
+void check_input(torch::Tensor input) {
+  CHECK(is_npu(input)) << "input should be npu tensor";
+  CHECK(input.is_contiguous()) << "input should be contiguous";
+  CHECK(!input.is_sparse()) << "input have to be npu dense tensor";
+}
 }  // namespace
 
 namespace xllm {
