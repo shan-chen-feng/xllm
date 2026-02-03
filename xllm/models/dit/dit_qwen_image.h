@@ -1555,7 +1555,7 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
                                 const std::string& qk_norm = "rms_norm",
                                 double eps = 1e-6)
       : layer_id_(layer_id),
-        num_layers_(context.get_model_args().dit_num_single_layers()),
+        num_layers_(context.get_model_args().num_single_layers()),
         pg_(context.get_parallel_args()),
         zero_cond_t_(zero_cond_t) {
     world_size_ = pg_.world_size();
@@ -1693,15 +1693,15 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
           (world_size_ - (encoder_seq_len % world_size_)) % world_size_;
       LOG(INFO) << "!!! pad: " << pad << ", encoder_pad: " << encoder_pad;
       LOG(INFO) << "111 attn_processor_->attn.img_pad_: "
-                << attn_processor_->attn.img_pad_
+                << attn_processor_->attn->img_pad_
                 << ", attn_processor_->attn.text_pad_ : "
-                << attn_processor_->attn.text_pad_;
-      attn_processor_->attn.img_pad_ = encoder_pad;
-      attn_processor_->attn.text_pad_ = pad;
+                << attn_processor_->attn->text_pad_;
+      attn_processor_->attn->img_pad_ = encoder_pad;
+      attn_processor_->attn->text_pad_ = pad;
       LOG(INFO) << "=== attn_processor_->attn.img_pad_: "
-                << attn_processor_->attn.img_pad_
+                << attn_processor_->attn->img_pad_
                 << ", attn_processor_->attn.text_pad_ : "
-                << attn_processor_->attn.text_pad_;
+                << attn_processor_->attn->text_pad_;
       if (layer_id_ == 0) {
         hidden_states_ =
             split_sequence(hidden_states_, world_size_, rank_, 1, pad);
