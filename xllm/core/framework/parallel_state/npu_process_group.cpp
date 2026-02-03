@@ -20,15 +20,6 @@ limitations under the License.
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
 
 namespace {
-#if defined(USE_NPU)
-#define HCCLCHECK(cmd)                                               \
-  do {                                                               \
-    HcclResult r = cmd;                                              \
-    if (r != HCCL_SUCCESS) {                                         \
-      LOG(FATAL) << "Failed, HCCL error code :" << r; \
-    }                                                                \
-  } while (0)
-#endif
 inline bool is_npu(const at::Tensor& tensor) {
   if (!tensor.defined()) {
     return false;
