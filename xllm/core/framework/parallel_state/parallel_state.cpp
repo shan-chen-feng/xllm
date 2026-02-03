@@ -286,7 +286,7 @@ std::vector<std::unique_ptr<ProcessGroup>> create_npu_process_groups(
 std::vector<torch::Tensor> all_gather(torch::Tensor& input,
                                       ProcessGroup* process_group) {
   if (!process_group) {
-    return input;
+    return {input};
   }
   const int world_size = process_group->world_size();
   if (world_size <= 1) {
