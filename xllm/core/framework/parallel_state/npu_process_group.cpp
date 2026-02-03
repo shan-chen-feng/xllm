@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "npu_process_group.h"
 
+#include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
+#include <torch_npu/csrc/core/npu/NPUEvent.h>
+
 #include <c10d/ProcessGroup.hpp>
 #include <c10d/TCPStore.hpp>
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
@@ -82,7 +85,8 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
                                    const std::string& host,
                                    const std::string& group_name,
                                    const torch::Device& device)
-    : ProcessGroup(device) {
+    : ProcessGroup(device),
+      comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {
   c10::intrusive_ptr<c10d_npu::ProcessGroupHCCL::Options> hccl_pg_options =
       c10d_npu::ProcessGroupHCCL::Options::create();
 #if TORCH_VERSION_MAJOR > 2 || \
@@ -119,8 +123,9 @@ ProcessGroupImpl::ProcessGroupImpl(int rank,
                                    int world_size,
                                    const torch::Device& device,
                                    HcclComm comm)
-    : ProcessGroup(device), comm_(comm),
-    comm_stream_(c10_npu::getNPUStreamFromPool(device.index())){}
+    : ProcessGroup(device),
+      comm_(comm),
+      comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {}
 
 void ProcessGroupImpl::alltoall_single(
     torch::Tensor send,
