@@ -1351,21 +1351,23 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     int64_t heads = attn_->heads_;
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     img_query = img_query.unflatten(-1, reshape_dims);
-    if (use_sp_) {
-      auto pg_ = attn_->pg_->process_group_;
+    if (attn_->use_sp_) {
+      auto pg_ = attn_->pg_.process_group_;
+      auto rank_ = attn_->rank_;
+      auto world_size_ = attn_->world_size_;
       auto handle_iq =
           all_to_all_4D(img_query, rank_, world_size_, 2, 1, false, pg_);
     }
     auto img_key = attn_->to_k_->forward(hidden_states);
     img_key = img_key.unflatten(-1, reshape_dims);
-    if (use_sp_) {
+    if (attn_->use_sp_) {
       img_query = all_to_all_4D_post2(handle_iq);
       auto handle_ik =
           all_to_all_4D(img_key, rank_, world_size_, 2, 1, false, pg_);
     }
     auto img_value = attn_->to_v_->forward(hidden_states);
     img_value = img_value.unflatten(-1, reshape_dims);
-    if (use_sp_) {
+    if (attn_->use_sp_) {
       img_key = all_to_all_4D_post2(handle_ik);
       auto handle_iv =
           all_to_all_4D(img_value, rank_, world_size_, 2, 1, false, pg_);
@@ -1374,28 +1376,28 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     // Compute QKV for text stream (context projections)
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
     txt_query = txt_query.unflatten(-1, reshape_dims);
-    if (use_sp_) {
+    if (attn_->use_sp_) {
       img_value = all_to_all_4D_post2(handle_iv);
       auto handle_tq =
           all_to_all_4D(txt_query, rank_, world_size_, 2, 1, false, pg_);
     }
     auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
     txt_key = txt_key.unflatten(-1, reshape_dims);
-    if (use_sp_) {
+    if (attn_->use_sp_) {
       txt_query = all_to_all_4D_post2(handle_tq);
       auto handle_tk =
           all_to_all_4D(txt_key, rank_, world_size_, 2, 1, false, pg_);
     }
     auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
     txt_value = txt_value.unflatten(-1, reshape_dims);
-    if (use_sp_) {
+    if (attn_->use_sp_) {
       txt_key = all_to_all_4D_post2(handle_tk);
       auto handle_tv =
           all_to_all_4D(txt_value, rank_, world_size_, 2, 1, false, pg_);
     }
 
     // sp unpad
-    if (use_sp_) {
+    if (attn_->use_sp_) {
       img_query = unpad_sequence(img_query, 1, attn_->img_pad_);
       img_key = unpad_sequence(img_key, 1, attn_->img_pad_);
       img_value = unpad_sequence(img_value, 1, attn_->img_pad_);
