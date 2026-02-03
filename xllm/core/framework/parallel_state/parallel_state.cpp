@@ -316,8 +316,7 @@ torch::Tensor all_to_all_equal(torch::Tensor& send,
   if (P <= 1) return send;
   auto recv = torch::empty_like(send);
 #if defined(USE_NPU)
-  static_cast<ProcessGroupHCCL*>(process_group)
-      ->alltoall_equal(send, recv, is_sync, out_done);
+  process_group->alltoall_equal(send, recv, is_sync, out_done);
 #else
   LOG(FATAL) << "all_to_all_equal only implemented for NPU";
 #endif
@@ -373,7 +372,7 @@ std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
 
 torch::Tensor all_to_all_equal(torch::Tensor& send,
                                bool is_sync,
-                               const ParallelArgs& parallel_args
+                               ProcessGroup* process_group
 #if defined(USE_NPU)
                                ,
                                std::shared_ptr<c10_npu::NPUEvent>* out_done
@@ -381,12 +380,9 @@ torch::Tensor all_to_all_equal(torch::Tensor& send,
 ) {
   const int P = parallel_args.world_size();
   if (P <= 1) return send;
-  auto* pg = parallel_args.process_group_;
-  CHECK(pg != nullptr) << "all_to_all_equal: process_group_ is null";
   auto recv = torch::empty_like(send);
 #if defined(USE_NPU)
-  static_cast<ProcessGroupHCCL*>(pg)->alltoall_equal(
-      send, recv, is_sync, out_done);
+  process_group->alltoall_equal(send, recv, is_sync, out_done);
 #else
   LOG(FATAL) << "all_to_all_equal only implemented for NPU";
 #endif
@@ -503,7 +499,7 @@ AllToAll4DHandle all_to_all_4D(const torch::Tensor& input,
     // (P, bs x seq_len/P, hc/P, hs) scatter head
     std::shared_ptr<c10_npu::NPUEvent> ev;
     auto recv_flat =
-        parallel_state::all_to_all_equal(send_flat, is_sync, pg, &ev);
+        parallel_state::all_to_all_equal(send_flat, is_sync, process_group, &ev);
     auto mid = recv_flat.reshape({P,
                                   shard_hc,
                                   shard_seqlen,

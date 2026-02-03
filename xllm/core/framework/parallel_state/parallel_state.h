@@ -51,10 +51,10 @@ torch::Tensor scatter(torch::Tensor input,
                       int dim = -1);
 
 std::vector<torch::Tensor> all_gather(torch::Tensor& input,
-                                      const ParallelArgs& parallel_args);
+                                      ProcessGroup* process_group);
 torch::Tensor all_to_all_equal(torch::Tensor& send,
                                bool is_sync,
-                               const ParallelArgs& parallel_args);
+                               ProcessGroup* process_group);
 
 struct AllToAll4DHandle {
   torch::Tensor mid;  // branch A: (P, shard_seqlen, bs, shard_hc, hs)

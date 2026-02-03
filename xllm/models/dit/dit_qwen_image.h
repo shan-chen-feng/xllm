@@ -1128,9 +1128,9 @@ class AttentionImpl : public torch::nn::Module {
         bias_(bias),
         out_bias_(out_bias),
         added_proj_bias_(added_proj_bias),
-        pg_(context.get_parallel_args(),
-            img_pad_(img_pad),
-            text_pad_(text_pad)) {
+        pg_(context.get_parallel_args()),
+        img_pad_(img_pad),
+        text_pad_(text_pad) {
     world_size_ = pg_.world_size();
     rank_ = pg_.rank();
     use_sp_ = world_size_ > 1;
