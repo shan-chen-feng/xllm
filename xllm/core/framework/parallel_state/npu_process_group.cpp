@@ -77,7 +77,8 @@ ProcessGroupImpl::ProcessGroupImpl(int rank,
                                    int world_size,
                                    const torch::Device& device,
                                    HcclComm comm)
-    : ProcessGroup(device), comm_(comm) {}
+    : ProcessGroup(device), comm_(comm),
+    comm_stream_(c10_npu::getNPUStreamFromPool(device.index())){}
 
 void ProcessGroupImpl::alltoall_single(
     torch::Tensor send,
