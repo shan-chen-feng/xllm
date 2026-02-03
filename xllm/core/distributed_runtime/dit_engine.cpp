@@ -29,6 +29,7 @@ limitations under the License.
 namespace xllm {
 DiTEngine::DiTEngine(const runtime::Options& options) : options_(options) {
   const auto& devices = options_.devices();
+  LOG(INFO) << "DiTEngine Devices: " << devices;
   CHECK_GT(devices.size(), 0) << "At least one device is required";
 
   CHECK(!devices[0].is_cpu()) << "CPU device is not supported";
@@ -36,6 +37,14 @@ DiTEngine::DiTEngine(const runtime::Options& options) : options_(options) {
   for (const auto device : devices) {
     CHECK_EQ(device.type(), device_type)
         << "All devices should be the same type";
+    int currentDevId = device.index();
+#if defined(USE_NPU)
+    int ret = aclrtSetDevice(currentDevId);
+    if (ret != 0) {
+      LOG(ERROR) << "ACL set device id:" << currentDevId
+                 << " failed, ret:" << ret;
+    }
+#endif
   }
   if (devices.size() > 1) {
     // create a process group for each device if there are multiple gpus
@@ -71,6 +80,7 @@ DiTEngine::DiTEngine(const runtime::Options& options) : options_(options) {
         .within(std::chrono::seconds(timeout_seconds))
         .get();
   }
+  LOG(INFO) << "DiT Engine Initialized done Using devices: " << devices;
 }
 
 bool DiTEngine::init() {

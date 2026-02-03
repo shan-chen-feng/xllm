@@ -79,4 +79,109 @@ ProcessGroupImpl::ProcessGroupImpl(int rank,
                                    HcclComm comm)
     : ProcessGroup(device), comm_(comm) {}
 
+void ProcessGroupImpl::alltoall_single(
+    torch::Tensor send,
+    torch::Tensor recv,
+    const std::vector<int64_t>& send_splits,
+    const std::vector<int64_t>& recv_splits,
+    bool is_sync,
+    std::shared_ptr<c10_npu::NPUEvent>* out_done) {
+#if !defined(USE_NPU)
+  LOG(FATAL) << "alltoall_single only supported with USE_NPU";
+#else
+  check_input(send);
+  check_input(recv);
+  CHECK(send.device() == device() && recv.device() == device())
+      << "send/recv must be on the same device as the process group";
+  const int P = world_size();
+  CHECK((int)send_splits.size() == P && (int)recv_splits.size() == P)
+      << "split sizes length must equal world_size";
+
+  std::vector<uint64_t> sc(P), rc(P), sdisp(P), rdisp(P);
+  uint64_t acc = 0;
+  for (int i = 0; i < P; ++i) {
+    sc[i] = static_cast<uint64_t>(send_splits[i]);
+    sdisp[i] = acc;
+    acc += sc[i];
+  }
+  acc = 0;
+  for (int i = 0; i < P; ++i) {
+    rc[i] = static_cast<uint64_t>(recv_splits[i]);
+    rdisp[i] = acc;
+    acc += rc[i];
+  }
+
+  auto dtype = to_hccl_data_type(send);
+  auto compute_stream = c10_npu::getCurrentNPUStream();
+  c10_npu::NPUEvent ready;
+  ready.record(compute_stream);
+
+  torch::DeviceGuard guard(device());
+  // const auto prev_stream = c10_npu::getCurrentNPUStream();
+  // c10_npu::setCurrentNPUStream(comm_stream_);
+  ready.block(comm_stream_);  // compute -> comm
+  c10_npu::NPUCachingAllocator::recordStream(send.storage().data_ptr(),
+                                             comm_stream_);
+  c10_npu::NPUCachingAllocator::recordStream(recv.storage().data_ptr(),
+                                             comm_stream_);
+  HCCLCHECK(HcclAlltoAllV(
+      /*sendBuf=*/send.data_ptr(),
+      /*sendCounts=*/sc.data(),
+      /*sdispls=*/sdisp.data(),
+      /*sendType=*/dtype,
+      /*recvBuf=*/recv.data_ptr(),
+      /*recvCounts=*/rc.data(),
+      /*rdispls=*/rdisp.data(),
+      /*recvType=*/dtype,
+      /*comm=*/comm_,
+      /*stream=*/comm_stream_.stream()));
+
+  if (is_sync) {
+    c10_npu::NPUEvent ev;
+    ev.record(comm_stream_);
+    ev.synchronize();
+  } else {
+    auto done = std::make_shared<c10_npu::NPUEvent>();
+    done->record(comm_stream_);
+
+    if (out_done) {
+      *out_done = std::move(done);
+    } else {
+      done->block(compute_stream);
+    }
+  }
+  // c10_npu::setCurrentNPUStream(prev_stream);
+#endif
+}
+
+void ProcessGroupImpl::flush_comm_to_current() {
+#if defined(USE_NPU)
+  auto cur = c10_npu::getCurrentNPUStream();
+  c10_npu::NPUEvent fence;
+  fence.record(comm_stream_);  // 通信流 -> 事件
+  fence.block(cur);            // 事件 -> 当前计算流
+#endif
+}
+
+void ProcessGroupImpl::alltoall_equal(
+    torch::Tensor send,
+    torch::Tensor recv,
+    bool is_sync,
+    std::shared_ptr<c10_npu::NPUEvent>* out_done) {
+#if !defined(USE_NPU)
+  LOG(FATAL) << "alltoall_equal only supported with USE_NPU";
+#else
+  check_input(send);
+  check_input(recv);
+  const int P = world_size();
+  CHECK(send.numel() % P == 0 && recv.numel() % P == 0)
+      << "send/recv numel must be divisible by world_size";
+  const int64_t per_rank_send = send.numel() / P;
+  const int64_t per_rank_recv = recv.numel() / P;
+  std::vector<int64_t> in_splits(P, per_rank_send);
+  std::vector<int64_t> out_splits(P, per_rank_recv);
+  alltoall_single(send, recv, in_splits, out_splits, is_sync, out_done);
+#endif
+}
+
 }  // namespace xllm

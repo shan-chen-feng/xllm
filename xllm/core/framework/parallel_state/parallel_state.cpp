@@ -283,6 +283,47 @@ std::vector<std::unique_ptr<ProcessGroup>> create_npu_process_groups(
 #endif
 }
 
+std::vector<torch::Tensor> all_gather(torch::Tensor& input,
+                                      ProcessGroup* process_group) {
+  if (!process_group) {
+    return input;
+  }
+  const int world_size = process_group->world_size();
+  if (world_size <= 1) {
+    return {input};
+  }
+
+  std::vector<torch::Tensor> outputs(world_size);
+  for (int i = 0; i < world_size; ++i) {
+    outputs[i] = torch::empty_like(input);
+  }
+  process_group->allgather(input, outputs);
+  return outputs;
+}
+
+torch::Tensor all_to_all_equal(torch::Tensor& send,
+                               bool is_sync,
+                               ProcessGroup* process_group
+#if defined(USE_NPU)
+                               ,
+                               std::shared_ptr<c10_npu::NPUEvent>* out_done
+#endif
+) {
+  if (!process_group) {
+    return input;
+  }
+  const int P = process_group->world_size();
+  if (P <= 1) return send;
+  auto recv = torch::empty_like(send);
+#if defined(USE_NPU)
+  static_cast<ProcessGroupHCCL*>(process_group)
+      ->alltoall_equal(send, recv, is_sync, out_done);
+#else
+  LOG(FATAL) << "all_to_all_equal only implemented for NPU";
+#endif
+  return recv;
+}
+
 std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
     const std::vector<torch::Device>& devices,
     const runtime::Options& options) {
@@ -330,6 +371,28 @@ std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
   return process_groups;
 }
 
+torch::Tensor all_to_all_equal(torch::Tensor& send,
+                               bool is_sync,
+                               const ParallelArgs& parallel_args
+#if defined(USE_NPU)
+                               ,
+                               std::shared_ptr<c10_npu::NPUEvent>* out_done
+#endif
+) {
+  const int P = parallel_args.world_size();
+  if (P <= 1) return send;
+  auto* pg = parallel_args.process_group_;
+  CHECK(pg != nullptr) << "all_to_all_equal: process_group_ is null";
+  auto recv = torch::empty_like(send);
+#if defined(USE_NPU)
+  static_cast<ProcessGroupHCCL*>(pg)->alltoall_equal(
+      send, recv, is_sync, out_done);
+#else
+  LOG(FATAL) << "all_to_all_equal only implemented for NPU";
+#endif
+  return recv;
+}
+
 /**
  * Supports two modes:
  * 1. scatter_idx=2, gather_idx=1: Ulysses parallel "split heads" scenario
@@ -342,11 +405,13 @@ std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
  *    - Reconstructs head dimension (dim2) to full head count
  *    - Input: (bs, seqlen, hc/P, hs) -> Output: (bs, seqlen/P, hc, hs)
  */
-torch::Tensor all_to_all_4D(const torch::Tensor& input,
-                            int32_t scatter_idx,
-                            int32_t gather_idx,
-                            ProcessGroup* process_group,
-                            bool use_sync) {
+AllToAll4DHandle all_to_all_4D(const torch::Tensor& input,
+                               int rank,
+                               int world_size,
+                               int32_t scatter_idx,
+                               int32_t gather_idx,
+                               bool use_sync,
+                               ProcessGroup* process_group, ) {
   // Check input dimensions
   CHECK_EQ(input.dim(), 4) << "input must be 4D tensor, got " << input.dim()
                            << " and shape " << input.sizes();
@@ -359,7 +424,11 @@ torch::Tensor all_to_all_4D(const torch::Tensor& input,
   if (world_size == 1) {
     return input;
   }
-
+  const int64_t P = world_size;
+  const int r = rank;
+  AllToAll4DHandle h;
+  h.gather_idx = gather_idx;
+  h.gather_pad = 0;
   // Branch 1: scatter_idx=2 and gather_idx=1
   // (Ulysses parallel "split heads" scenario)
   if (scatter_idx == 2 && gather_idx == 1) {
@@ -370,44 +439,37 @@ torch::Tensor all_to_all_4D(const torch::Tensor& input,
     const int64_t shard_seqlen = sizes[1];
     const int64_t hc = sizes[2];
     const int64_t hs = sizes[3];
-    const int64_t seqlen = shard_seqlen * world_size;
     const int64_t shard_hc = hc / world_size;
     CHECK(hc % world_size == 0)
         << "hc " << hc << " not divisible by world_size " << world_size;
 
     // Transpose groups of heads with the seq-len parallel dimension
     // (bs, seqlen/P, hc, hs) -> reshape -> (bs, seq_len/P, P, hc/P, hs)
-    // -> transpose(0,2) -> (P, seq_len/P, bs, hc/P, hs)
     torch::Tensor input_t =
         input.reshape({bs, shard_seqlen, world_size, shard_hc, hs})
-            .transpose(0, 2)
+            .transpose(0,
+                       2)  // -> transpose(0,2) -> (P, seq_len/P, bs, hc/P, hs)
+            .reshape({world_size * shard_seqlen * bs * shard_hc * hs})
             .contiguous();
 
-    torch::Tensor output = torch::empty_like(input_t);
-
+    auto send_flat = input_t;
+    std::shared_ptr<c10_npu::NPUEvent> ev;
     // Perform all-to-all communication
     // (P, seq_len/P, bs, hc/P, hs) scatter seqlen -> all2all ->
     // (P, seq_len/P, bs, hc/P, hs) scatter head
-    process_group->alltoall(input_t, output);
+    auto recv_flat = parallel_state::all_to_all_equal(
+        send_flat, is_sync, process_group, &ev);
 
-    // Synchronize to ensure data consistency
-    // This is critical for all-to-all operations to prevent race conditions
-    if (use_sync) {
-#if defined(USE_NPU)
-      torch::npu::synchronize();
-#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_ILU)
-      torch::cuda::synchronize();
-#endif
-    }
-
-    // If scattering the seq-dim, transpose the heads back to original dimension
-    output = output.reshape({seqlen, bs, shard_hc, hs});
-
-    // (seq_len, bs, hc/P, hs) -> transpose(0,1) -> (bs, seq_len, hc/P, hs)
-    output =
-        output.transpose(0, 1).contiguous().reshape({bs, seqlen, shard_hc, hs});
-
-    return output;
+    auto mid = recv_flat.reshape({P, shard_seqlen, bs, shard_hc, hs});
+    h.mid = mid;
+    h.bs = bs;
+    h.seqlen = shard_seqlen * P;
+    h.shard_hc = shard_hc;
+    h.hs = hs;
+    h.use_post2 = true;
+    h.done_event = ev;
+    h.is_async = !is_sync;
+    return h;
   }
 
   // Branch 2: scatter_idx=1 and gather_idx=2
@@ -433,38 +495,65 @@ torch::Tensor all_to_all_4D(const torch::Tensor& input,
         input.reshape({bs, world_size, shard_seqlen, shard_hc, hs})
             .transpose(0, 3)
             .transpose(0, 1)
-            .contiguous()
-            .reshape({world_size, shard_hc, shard_seqlen, bs, hs});
+            .contiguous();
 
-    torch::Tensor output = torch::empty_like(input_t);
-
+    auto send_flat = input_t.reshape({P * shard_hc * shard_seqlen * bs * hs});
     // Perform all-to-all communication
     // (P, bs x hc/P, seqlen/P, hs) scatter seqlen -> all2all ->
     // (P, bs x seq_len/P, hc/P, hs) scatter head
-    process_group->alltoall(input_t, output);
-
-    // Synchronize to ensure data consistency
-    // This is critical for all-to-all operations to prevent race conditions
-    if (use_sync) {
-#if defined(USE_NPU)
-      torch::npu::synchronize();
-#elif defined(USE_CUDA) || defined(USE_MLU) || defined(USE_ILU)
-      torch::cuda::synchronize();
-#endif
-    }
-
-    // If scattering the seq-dim, transpose the heads back to original dimension
-    output = output.reshape({hc, shard_seqlen, bs, hs});
-
-    // (hc, seqlen/N, bs, hs) -> transpose(0,2) -> (bs, seqlen/N, hc, hs)
-    output =
-        output.transpose(0, 2).contiguous().reshape({bs, shard_seqlen, hc, hs});
-
-    return output;
+    std::shared_ptr<c10_npu::NPUEvent> ev;
+    auto recv_flat =
+        parallel_state::all_to_all_equal(send_flat, is_sync, pg, &ev);
+    auto mid = recv_flat.reshape({P,
+                                  shard_hc,
+                                  shard_seqlen,
+                                  bs,
+                                  hs});  // (P, shard_hc, shard_seqlen, bs, hs)
+    h.mid = mid;
+    h.bs = bs;
+    h.hc = hc;
+    h.shard_seqlen = shard_seqlen;
+    h.hs = hs;
+    h.use_post2 = false;
+    h.done_event = ev;
+    h.is_async = !is_sync;
+    return h;
   }
 
-  CHECK(false) << "scatter_idx must be 1 or 2 and gather_idx must be 1 or 2";
-  return input;
+  CHECK(false) << "all_to_all_4D: scatter_idx must be 1 or 2 and gather_idx "
+                  "must be 1 or 2";
+}
+
+// branch A post processing ： (P, shard_seqlen, bs, shard_hc, hs)
+// → (seqlen, bs, shard_hc, hs) → (bs, seqlen, shard_hc, hs)
+torch::Tensor all_to_all_4D_post2(const AllToAll4DHandle& h) {
+  TORCH_CHECK(h.use_post2, "all_to_all_4D_post2: handle not from (2->1) path");
+  if (h.is_async && h.done_event) {
+    h.done_event->block(c10_npu::getCurrentNPUStream());
+  }
+  auto out = h.mid.reshape({h.seqlen, h.bs, h.shard_hc, h.hs})
+                 .transpose(0, 1)  // (bs, seqlen, shard_hc, hs)
+                 .contiguous();
+  if (h.gather_pad > 0) {
+    out = out.narrow(h.gather_idx, 0, out.size(h.gather_idx) - h.gather_pad);
+  }
+  return out;
+}
+
+// branch B post processing： (P, shard_hc, shard_seqlen, bs, hs)
+// → (hc, shard_seqlen, bs, hs) → (bs, shard_seqlen, hc, hs)
+torch::Tensor all_to_all_4D_post(const AllToAll4DHandle& h) {
+  TORCH_CHECK(!h.use_post2, "all_to_all_4D_post: handle not from (1->2) path");
+  if (h.is_async && h.done_event) {
+    h.done_event->block(c10_npu::getCurrentNPUStream());
+  }
+  auto out = h.mid.reshape({h.hc, h.shard_seqlen, h.bs, h.hs})
+                 .transpose(0, 2)  // (bs, shard_seqlen, hc, hs)
+                 .contiguous();
+  if (h.gather_pad > 0) {
+    out = out.narrow(h.gather_idx, 0, out.size(h.gather_idx) - h.gather_pad);
+  }
+  return out;
 }
 
 }  // namespace parallel_state

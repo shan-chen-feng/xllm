@@ -50,9 +50,35 @@ torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim = -1);
 
+std::vector<torch::Tensor> all_gather(torch::Tensor& input,
+                                      const ParallelArgs& parallel_args);
+torch::Tensor all_to_all_equal(torch::Tensor& send,
+                               bool is_sync,
+                               const ParallelArgs& parallel_args);
+
+struct AllToAll4DHandle {
+  torch::Tensor mid;  // branch A: (P, shard_seqlen, bs, shard_hc, hs)
+                      // branch B: (P, shard_hc,     shard_seqlen, bs, hs)
+
+  int64_t bs = 0;
+  int64_t seqlen = 0;    // branch A
+  int64_t shard_hc = 0;  // branch A
+  int64_t hs = 0;
+
+  int64_t shard_seqlen = 0;  // branch B
+  int64_t hc = 0;            // branch B
+
+  int64_t gather_idx = 0;
+  int64_t gather_pad = 0;
+  bool use_post2 = false;
+
+  std::shared_ptr<c10_npu::NPUEvent> done_event;
+  bool is_async = false;
+};
+
 /**
- * Performs distributed all-to-all communication for 4D tensors in Ulysses parallel scenarios.
- * Supports two modes:
+ * Performs distributed all-to-all communication for 4D tensors in Ulysses
+ * parallel scenarios. Supports two modes:
  * 1. scatter_idx=2, gather_idx=1: Split heads scenario
  *    - Input: (bs, seqlen/P, hc, hs) -> Output: (bs, seqlen, hc/P, hs)
  * 2. scatter_idx=1, gather_idx=2: Merge heads scenario
