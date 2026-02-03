@@ -41,8 +41,21 @@ class DiTCache {
   bool on_before_step(const CacheStepIn& stepin);
   CacheStepOut on_after_step(const CacheStepIn& stepin);
 
+  virtual void set_infer_steps(const int64_t& infer_steps) {
+    active_cache_->set_infer_steps(infer_steps);
+    active_cond_cache_->set_infer_steps(infer_steps);
+  }
+
+  virtual void set_num_blocks(const int64_t& num_blocks) {
+    active_cache_->set_num_blocks(num_blocks);
+    active_cond_cache_->set_num_blocks(num_blocks);
+  }
+
  private:
+  torch::Tensor get_tensor_or_empty(const TensorMap& m, const std::string& k);
+
   std::unique_ptr<DitCacheImpl> active_cache_;
+  std::unique_ptr<DitCacheImpl> active_cond_cache_;
 };
 
 }  // namespace xllm

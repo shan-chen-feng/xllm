@@ -60,6 +60,17 @@ DiTCacheConfig parse_dit_cache_from_flags() {
     cache_config.fbcachetaylorseer.warmup_steps = FLAGS_dit_cache_warmup_steps;
     cache_config.fbcachetaylorseer.residual_diff_threshold =
         FLAGS_dit_cache_residual_diff_threshold;
+  } else if (FLAGS_dit_cache_policy == "ResidualCache") {
+    cache_config.selected_policy = PolicyType::ResidualCache;
+    cache_config.residual_cache.dit_cache_start_steps =
+        FLAGS_dit_cache_start_steps;
+    cache_config.residual_cache.dit_cache_end_steps = FLAGS_dit_cache_end_steps;
+    cache_config.residual_cache.dit_cache_start_blocks =
+        FLAGS_dit_cache_start_blocks;
+    cache_config.residual_cache.dit_cache_end_blocks =
+        FLAGS_dit_cache_end_blocks;
+    cache_config.residual_cache.skip_interval_steps =
+        FLAGS_dit_cache_skip_interval_steps;
   } else if (FLAGS_dit_cache_policy == "None") {
     cache_config.selected_policy = PolicyType::TaylorSeer;
   }

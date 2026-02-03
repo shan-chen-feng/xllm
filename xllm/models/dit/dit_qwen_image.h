@@ -1707,6 +1707,8 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       torch::Tensor timestep = torch::Tensor(),
       std::vector<std::vector<int64_t>> img_shapes = {},
       torch::Tensor txt_seq_lens = torch::Tensor(),
+      bool use_cfg = false,
+      int64_t step_idx = 0,
       torch::Tensor addition_t_cond = torch::Tensor(),
       torch::Tensor guidance = torch::Tensor(),
       const std::unordered_map<std::string, torch::Tensor>& attention_kwargs =
@@ -1779,19 +1781,73 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     auto image_rot = std::get<0>(image_rotary_emb);
     auto txt_rot = std::get<1>(image_rotary_emb);
 
-    for (int64_t index_block = 0; index_block < transformer_blocks_->size();
-         ++index_block) {
-      std::tie(new_hidden_states, new_encoder_hidden_states) =
-          transformer_blocks_[index_block]
-              ->as<QwenImageTransformerBlock>()
-              ->forward(new_hidden_states,
-                        new_encoder_hidden_states,
-                        /*encoder_hidden_states_mask=*/torch::Tensor(),
-                        temb,
-                        image_rotary_emb,
-                        block_attention_kwargs,
-                        modulate_index);
+    bool use_step_cache = false;
+    bool use_block_cache = false;
+
+    torch::Tensor original_hidden_states = new_hidden_states;
+    torch::Tensor original_encoder_hidden_states = new_encoder_hidden_states;
+
+    // Step start: prepare inputs (hidden_states, original_hidden_states)
+    TensorMap step_in_map = {
+        {"use_cfg",
+         torch::tensor({use_cfg}, torch::TensorOptions().dtype(torch::kBool))},
+        {"hidden_states", new_hidden_states},
+        {"original_hidden_states", original_hidden_states}};
+    CacheStepIn stepin_before(step_idx, step_in_map);
+    use_step_cache = DiTCache::get_instance().on_before_step(stepin_before);
+
+    if (!use_step_cache) {
+      for (int64_t index_block = 0; index_block < transformer_blocks_->size();
+           ++index_block) {
+        TensorMap block_in_before_map = {
+            {"use_cfg",
+             torch::tensor({use_cfg},
+                           torch::TensorOptions().dtype(torch::kBool))}};
+        CacheBlockIn blockin_before(index_block, block_in_before_map);
+        use_block_cache =
+            DiTCache::get_instance().on_before_block(blockin_before);
+
+        if (!use_block_cache) {
+          std::tie(new_hidden_states, new_encoder_hidden_states) =
+              transformer_blocks_[index_block]
+                  ->as<QwenImageTransformerBlock>()
+                  ->forward(new_hidden_states,
+                            new_encoder_hidden_states,
+                            /*encoder_hidden_states_mask=*/torch::Tensor(),
+                            temb,
+                            image_rotary_emb,
+                            block_attention_kwargs,
+                            modulate_index);
+        }
+
+        TensorMap block_in_after_map = {
+            {"use_cfg",
+             torch::tensor({use_cfg},
+                           torch::TensorOptions().dtype(torch::kBool))},
+            {"hidden_states", new_hidden_states},
+            {"encoder_hidden_states", new_encoder_hidden_states},
+            {"original_hidden_states", original_hidden_states},
+            {"original_encoder_hidden_states", original_encoder_hidden_states}};
+        CacheBlockIn blockin_after(index_block, block_in_after_map);
+        CacheBlockOut blockout_after =
+            DiTCache::get_instance().on_after_block(blockin_after);
+
+        new_hidden_states = blockout_after.tensors.at("hidden_states");
+        new_encoder_hidden_states =
+            blockout_after.tensors.at("encoder_hidden_states");
+      }
     }
+
+    // Step end: update outputs (hidden_states, original_hidden_states)
+    TensorMap step_after_map = {
+        {"use_cfg",
+         torch::tensor({use_cfg}, torch::TensorOptions().dtype(torch::kBool))},
+        {"hidden_states", new_hidden_states},
+        {"original_hidden_states", original_hidden_states}};
+    CacheStepIn stepin_after(step_idx, step_after_map);
+    CacheStepOut stepout_after =
+        DiTCache::get_instance().on_after_step(stepin_after);
+    new_hidden_states = stepout_after.tensors.at("hidden_states");
 
     if (zero_cond_t_) {
       temb = temb.chunk(2, 0)[0];

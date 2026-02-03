@@ -510,6 +510,20 @@ DEFINE_bool(enable_constrained_decoding,
             "that the output meets specific format or structural requirements "
             "through pre-defined rules.");
 
+DEFINE_int64(dit_cache_start_steps,
+             5,
+             "The number of steps to skip at the start");
+
+DEFINE_int64(dit_cache_end_steps, 5, "The number of steps to skip at the end.");
+
+DEFINE_int64(dit_cache_start_blocks,
+             5,
+             "The number of blocks to skip at the start.");
+
+DEFINE_int64(dit_cache_end_blocks,
+             5,
+             "The number of blocks to skip at the end.");
+
 DEFINE_bool(
     use_audio_in_video,
     false,

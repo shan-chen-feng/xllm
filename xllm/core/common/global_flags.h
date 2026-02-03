@@ -249,6 +249,14 @@ DECLARE_double(dit_cache_residual_diff_threshold);
 
 DECLARE_bool(enable_constrained_decoding);
 
+DECLARE_int64(dit_cache_start_steps);
+
+DECLARE_int64(dit_cache_end_steps);
+
+DECLARE_int64(dit_cache_start_blocks);
+
+DECLARE_int64(dit_cache_end_blocks);
+
 // --- multi-step decode config ---
 
 DECLARE_int32(max_decode_rounds);
