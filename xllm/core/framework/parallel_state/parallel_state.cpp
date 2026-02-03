@@ -310,7 +310,7 @@ torch::Tensor all_to_all_equal(torch::Tensor& send,
 #endif
 ) {
   if (!process_group) {
-    return input;
+    return send;
   }
   const int P = process_group->world_size();
   if (P <= 1) return send;
