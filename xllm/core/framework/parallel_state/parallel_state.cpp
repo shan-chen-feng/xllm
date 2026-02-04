@@ -387,7 +387,7 @@ AllToAll4DHandle all_to_all_4D(const torch::Tensor& input,
                                int world_size,
                                int32_t scatter_idx,
                                int32_t gather_idx,
-                               bool use_sync,
+                               bool is_sync,
                                ProcessGroup* process_group, ) {
   // Check input dimensions
   CHECK_EQ(input.dim(), 4) << "input must be 4D tensor, got " << input.dim()
