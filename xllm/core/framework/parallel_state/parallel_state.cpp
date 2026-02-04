@@ -370,25 +370,6 @@ std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
   return process_groups;
 }
 
-torch::Tensor all_to_all_equal(torch::Tensor& send,
-                               bool is_sync,
-                               ProcessGroup* process_group
-#if defined(USE_NPU)
-                               ,
-                               std::shared_ptr<c10_npu::NPUEvent>* out_done
-#endif
-) {
-  const int P = parallel_args.world_size();
-  if (P <= 1) return send;
-  auto recv = torch::empty_like(send);
-#if defined(USE_NPU)
-  process_group->alltoall_equal(send, recv, is_sync, out_done);
-#else
-  LOG(FATAL) << "all_to_all_equal only implemented for NPU";
-#endif
-  return recv;
-}
-
 /**
  * Supports two modes:
  * 1. scatter_idx=2, gather_idx=1: Ulysses parallel "split heads" scenario
