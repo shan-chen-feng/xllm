@@ -69,12 +69,12 @@ class ProcessGroup {
                        const std::vector<int64_t>& send_splits,
                        const std::vector<int64_t>& recv_splits,
                        bool is_sync = false,
-                       std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr) override;
+                       std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr);
 
   virtual void alltoall_equal(torch::Tensor send,
                       torch::Tensor recv,
                       bool is_sync = false,
-                      std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr) override;
+                      std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr);
   virtual void flush_comm_to_current();
 
  private:
