@@ -392,15 +392,6 @@ AllToAll4DHandle all_to_all_4D(const torch::Tensor& input,
   // Check input dimensions
   CHECK_EQ(input.dim(), 4) << "input must be 4D tensor, got " << input.dim()
                            << " and shape " << input.sizes();
-
-  if (!process_group) {
-    return input;
-  }
-
-  const int32_t world_size = process_group->world_size();
-  if (world_size == 1) {
-    return input;
-  }
   const int64_t P = world_size;
   const int r = rank;
   AllToAll4DHandle h;
