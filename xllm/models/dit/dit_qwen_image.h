@@ -59,7 +59,7 @@ inline torch::Tensor gather_sequence(const torch::Tensor& input_,
   }
 
   // all gather
-  auto tensor_list = parallel_state::all_gather(input, pg);
+  auto tensor_list = parallel_state::all_gather(input, pg.process_group_);
 
   // concat
   auto output = torch::cat(tensor_list, dim);
