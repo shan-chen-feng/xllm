@@ -268,7 +268,7 @@ std::vector<std::unique_ptr<ProcessGroup>> create_npu_process_groups(
 
   std::vector<HcclComm> comms(devices.size());
   const int32_t world_size = static_cast<int32_t>(devices.size());
-  HCCLCHECK(HcclCommInitAll(world_size, device_idxs.data(),comms.data()));
+  HCCLCHECK(HcclCommInitAll(world_size, device_idxs.data(), comms.data()));
 
   std::vector<std::unique_ptr<ProcessGroup>> process_groups;
   process_groups.reserve(devices.size());
@@ -470,8 +470,8 @@ AllToAll4DHandle all_to_all_4D(const torch::Tensor& input,
     // (P, bs x hc/P, seqlen/P, hs) scatter seqlen -> all2all ->
     // (P, bs x seq_len/P, hc/P, hs) scatter head
     std::shared_ptr<c10_npu::NPUEvent> ev;
-    auto recv_flat =
-        parallel_state::all_to_all_equal(send_flat, is_sync, process_group, &ev);
+    auto recv_flat = parallel_state::all_to_all_equal(
+        send_flat, is_sync, process_group, &ev);
     auto mid = recv_flat.reshape({P,
                                   shard_hc,
                                   shard_seqlen,

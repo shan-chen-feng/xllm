@@ -64,21 +64,23 @@ class ProcessGroup {
   virtual void reduce_scatter(const torch::Tensor& input,
                               torch::Tensor& output);
 
-  virtual void alltoall_single(torch::Tensor send,
-                       torch::Tensor recv,
-                       const std::vector<int64_t>& send_splits,
-                       const std::vector<int64_t>& recv_splits,
-                       bool is_sync = false,
-                       std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr);
+  virtual void alltoall_single(
+      torch::Tensor send,
+      torch::Tensor recv,
+      const std::vector<int64_t>& send_splits,
+      const std::vector<int64_t>& recv_splits,
+      bool is_sync = false,
+      std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr);
 
-  virtual void alltoall_equal(torch::Tensor send,
-                      torch::Tensor recv,
-                      bool is_sync = false,
-                      std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr);
+  virtual void alltoall_equal(
+      torch::Tensor send,
+      torch::Tensor recv,
+      bool is_sync = false,
+      std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr);
   virtual void flush_comm_to_current();
 
  private:
- // rank of current process.
+  // rank of current process.
   int32_t rank_ = 0;
 
   // number of processes.
