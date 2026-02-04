@@ -84,11 +84,15 @@ struct AllToAll4DHandle {
  * 2. scatter_idx=1, gather_idx=2: Merge heads scenario
  *    - Input: (bs, seqlen, hc/P, hs) -> Output: (bs, seqlen/P, hc, hs)
  */
-torch::Tensor all_to_all_4D(const torch::Tensor& input,
-                            int32_t scatter_idx = 2,
-                            int32_t gather_idx = 1,
-                            ProcessGroup* process_group = nullptr,
-                            bool use_sync = false);
+AllToAll4DHandle all_to_all_4D(const torch::Tensor& input,
+                               int rank,
+                               int world_size,
+                               int32_t scatter_idx,
+                               int32_t gather_idx,
+                               bool is_sync,
+                               ProcessGroup* process_group);
+torch::Tensor all_to_all_4D_post2(const AllToAll4DHandle& h);
+torch::Tensor all_to_all_4D_post(const AllToAll4DHandle& h);
 
 // Create a process group where each process has a single device
 // devices: list of devices to create process groups on.

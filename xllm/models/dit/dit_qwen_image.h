@@ -27,6 +27,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model/model_input_params.h"
@@ -119,15 +120,11 @@ inline torch::Tensor pad_sequence(const torch::Tensor& input_,
 inline torch::Tensor unpad_sequence(const torch::Tensor& input_,
                                     int64_t dim,
                                     int64_t pad) {
-  auto input = input_;
-  if (world_size == 1) {
-    return input;
-  }
-
   if (pad > 0) {
-    auto output = input.narrow(dim, 0, input.size(dim) - pad);
+    auto output = input_.narrow(dim, 0, input_.size(dim) - pad);
+    return output;
   }
-  return output;
+  return input_;
 }
 namespace qwenimage {
 
