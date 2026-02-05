@@ -1403,7 +1403,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
              torch::Tensor,
              torch::Tensor,
              torch::Tensor>
-  sp_qkv_matmul(const torch::Tensor& hidden_states,
+  qkv_matmul(const torch::Tensor& hidden_states,
                 const torch::Tensor& encoder_hidden_states) {
     int64_t seq_txt = encoder_hidden_states.size(1);
     int64_t seq_img = hidden_states.size(1);
@@ -1441,7 +1441,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       const std::tuple<at::Tensor, at::Tensor>& image_rotary_emb = {}) {
 
     // Compute QKV projections
-    if (use_sp_) {
+    if (attn_->use_sp_) {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           sp_qkv_matmul(hidden_states, encoder_hidden_states);
     } else {
@@ -1502,7 +1502,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto img_attn_output = chunks[1];
     // all tp all 前需要sp pad
     AllToAll4DHandle handle_io, handle_t_o;
-    if (use_sp_) {
+    if (attn_->use_sp_) {
       img_attn_output = pad_sequence(img_attn_output, 1, attn_->img_pad_);
       handle_io = parallel_state::all_to_all_4D(
           img_attn_output, rank_, world_size_, 1, 2, true, pg_);
@@ -1515,7 +1515,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     // Apply output projections
     img_attn_output = attn_->to_out_->forward(img_attn_output);
 
-    if (use_sp_) {
+    if (attn_->use_sp_) {
       txt_attn_output = parallel_state::all_to_all_4D_post(handle_t_o);
     }
     txt_attn_output = attn_->to_add_out_->forward(txt_attn_output);
