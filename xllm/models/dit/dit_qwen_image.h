@@ -1540,9 +1540,9 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
   void set_img_pad_(const int pad) { attn_->img_pad_ = pad; }
 
-  int get_img_pad_(const int pad) { return attn_->img_pad_; }
+  int get_img_pad_() { return attn_->img_pad_; }
 
-  int get_text_pad_(const int pad) { return attn_->text_pad_; }
+  int get_text_pad_() { return attn_->text_pad_; }
 
  private:
   Attention attn_{nullptr};
