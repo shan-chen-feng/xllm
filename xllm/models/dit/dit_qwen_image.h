@@ -1515,7 +1515,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
           img_attn_output, rank_, world_size_, 1, 2, true, pg_);
       img_attn_output = parallel_state::all_to_all_4D_post(handle_io);
 
-      txt_attn_output = pad_sequence(txt_attn_output, 1, text_pad);
+      txt_attn_output = pad_sequence(txt_attn_output, 1, attn_->text_pad);
       handle_t_o = parallel_state::all_to_all_4D(
           txt_attn_output, rank_, world_size_, 1, 2, false, pg_);
     }
