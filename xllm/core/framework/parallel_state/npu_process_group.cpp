@@ -158,7 +158,6 @@ void ProcessGroupImpl::allgather(const torch::Tensor& input,
   auto done = std::make_shared<c10_npu::NPUEvent>();
   done->record(comm_stream_);
   done->block(compute_stream);
-  comm_stream_.synchronize();
 
   for (int i = 0; i < static_cast<int>(outputs.size()); ++i) {
     outputs[i].copy_(flattened_output[i], /*non_blocking=*/true);
@@ -195,7 +194,6 @@ void ProcessGroupImpl::allreduce(torch::Tensor& input) {
   auto done = std::make_shared<c10_npu::NPUEvent>();
   done->record(comm_stream_);
   done->block(compute_stream);
-  comm_stream_.synchronize();
 }
 
 void ProcessGroupImpl::alltoall_single(

@@ -69,13 +69,14 @@ class ProcessGroupImpl : public ProcessGroup {
   c10_npu::NPUStream comm_stream_;
 };
 
+// TODO: LOG HcclGetErrorString(r)
 #if defined(USE_NPU)
-#define HCCLCHECK(cmd)                           \
-  do {                                           \
-    HcclResult r = cmd;                          \
-    if (r != HCCL_SUCCESS) {                     \
-      LOG(FATAL) << "Failed, HCCL error :" << r; \
-    }                                            \
+#define HCCLCHECK(cmd)                     \
+  do {                                     \
+    HcclResult r = cmd;                    \
+    if (r != HCCL_SUCCESS) {               \
+      LOG(FATAL) << "Failed, HCCL error."; \
+    }                                      \
   } while (0)
 #endif
 }  // namespace xllm
