@@ -1342,6 +1342,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
              torch::Tensor>
   sp_qkv_matmul(const torch::Tensor& hidden_states,
                 const torch::Tensor& encoder_hidden_states) {
+    LOG(INFO) << "sp_qkv_matmul";
     int64_t seq_txt = encoder_hidden_states.size(1);
     int64_t seq_img = hidden_states.size(1);
     auto pg_ = attn_->pg_.process_group_;
@@ -1450,6 +1451,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       const torch::Tensor& encoder_hidden_states_mask = torch::Tensor(),
       const torch::Tensor& attention_mask = torch::Tensor(),
       const std::tuple<at::Tensor, at::Tensor>& image_rotary_emb = {}) {
+    LOG(INFO) << "attention";
     torch::Tensor img_query, img_key, img_value;
     torch::Tensor txt_query, txt_key, txt_value;
     // Compute QKV projections
@@ -1536,6 +1538,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       txt_attn_output = parallel_state::all_to_all_4D_post(handle_t_o);
     }
     txt_attn_output = attn_->to_add_out_->forward(txt_attn_output);
+    LOG(INFO) << "attention end";
     return std::make_tuple(img_attn_output, txt_attn_output);
   }
 

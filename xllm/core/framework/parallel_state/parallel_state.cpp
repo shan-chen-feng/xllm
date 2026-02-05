@@ -390,6 +390,7 @@ AllToAll4DHandle all_to_all_4D(const torch::Tensor& input,
                                bool is_sync,
                                ProcessGroup* process_group) {
   // Check input dimensions
+  LOG(INFO) << "all_to_all_4D";
   CHECK_EQ(input.dim(), 4) << "input must be 4D tensor, got " << input.dim()
                            << " and shape " << input.sizes();
   const int64_t P = world_size;
@@ -495,6 +496,7 @@ AllToAll4DHandle all_to_all_4D(const torch::Tensor& input,
 // branch A post processing ： (P, shard_seqlen, bs, shard_hc, hs)
 // → (seqlen, bs, shard_hc, hs) → (bs, seqlen, shard_hc, hs)
 torch::Tensor all_to_all_4D_post2(const AllToAll4DHandle& h) {
+  LOG(INFO) << "all_to_all_4D_post2";
   TORCH_CHECK(h.use_post2, "all_to_all_4D_post2: handle not from (2->1) path");
   if (h.is_async && h.done_event) {
     h.done_event->block(c10_npu::getCurrentNPUStream());
@@ -511,6 +513,7 @@ torch::Tensor all_to_all_4D_post2(const AllToAll4DHandle& h) {
 // branch B post processing： (P, shard_hc, shard_seqlen, bs, hs)
 // → (hc, shard_seqlen, bs, hs) → (bs, shard_seqlen, hc, hs)
 torch::Tensor all_to_all_4D_post(const AllToAll4DHandle& h) {
+  LOG(INFO) << "all_to_all_4D_post";
   TORCH_CHECK(!h.use_post2, "all_to_all_4D_post: handle not from (1->2) path");
   if (h.is_async && h.done_event) {
     h.done_event->block(c10_npu::getCurrentNPUStream());
