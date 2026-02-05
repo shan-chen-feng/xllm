@@ -1321,8 +1321,8 @@ class AttentionImpl : public torch::nn::Module {
   int world_size_{1};
   int rank_{0};
   bool use_sp_{false};
-  int text_pad_;
-  int img_pad_;
+  int text_pad_{0};
+  int img_pad_{0};
   ParallelArgs pg_;
 };
 TORCH_MODULE(Attention);
@@ -1515,7 +1515,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
           img_attn_output, rank_, world_size_, 1, 2, true, pg_);
       img_attn_output = parallel_state::all_to_all_4D_post(handle_io);
 
-      txt_attn_output = pad_sequence(txt_attn_output, 1, attn_->text_pad);
+      txt_attn_output = pad_sequence(txt_attn_output, 1, attn_->text_pad_);
       handle_t_o = parallel_state::all_to_all_4D(
           txt_attn_output, rank_, world_size_, 1, 2, false, pg_);
     }
@@ -1535,6 +1535,22 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
   void verify_loaded_weights(const std::string& prefix) {
     attn_->verify_loaded_weights(prefix);
+  }
+
+  void set_text_pad_(const int pad){
+    attn->text_pad_ = pad;
+  }
+
+  void set_img_pad_(const int pad){
+    attn->img_pad_ = pad;
+  }
+
+  int get_img_pad_(const int pad){
+    return attn->img_pad_;
+  }
+
+  int get_text_pad_(const int pad){
+    return attn->text_pad_;
   }
 
  private:
@@ -1744,15 +1760,15 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
           (world_size_ - (encoder_seq_len % world_size_)) % world_size_;
       LOG(INFO) << "!!! pad: " << pad << ", encoder_pad: " << encoder_pad;
       LOG(INFO) << "111 attn_processor_->attn.img_pad_: "
-                << attn_processor_->attn->img_pad_
+                << attn_processor_->get_img_pad_()
                 << ", attn_processor_->attn.text_pad_ : "
-                << attn_processor_->attn->text_pad_;
-      attn_processor_->attn->img_pad_ = encoder_pad;
-      attn_processor_->attn->text_pad_ = pad;
+                << attn_processor_->get_text_pad_();
+      attn_processor_->set_text_pad_(encoder_pad);
+      attn_processor_->set_img_pad_(pad);
       LOG(INFO) << "=== attn_processor_->attn.img_pad_: "
-                << attn_processor_->attn->img_pad_
+                << attn_processor_->get_img_pad_()
                 << ", attn_processor_->attn.text_pad_ : "
-                << attn_processor_->attn->text_pad_;
+                << attn_processor_->get_text_pad_();
       if (layer_id_ == 0) {
         hidden_states_ =
             split_sequence(hidden_states_, world_size_, rank_, 1, pad);
