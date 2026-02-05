@@ -1536,13 +1536,13 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     attn_->verify_loaded_weights(prefix);
   }
 
-  void set_text_pad_(const int pad) { attn->text_pad_ = pad; }
+  void set_text_pad_(const int pad) { attn_->text_pad_ = pad; }
 
-  void set_img_pad_(const int pad) { attn->img_pad_ = pad; }
+  void set_img_pad_(const int pad) { attn_->img_pad_ = pad; }
 
-  int get_img_pad_(const int pad) { return attn->img_pad_; }
+  int get_img_pad_(const int pad) { return attn_->img_pad_; }
 
-  int get_text_pad_(const int pad) { return attn->text_pad_; }
+  int get_text_pad_(const int pad) { return attn_->text_pad_; }
 
  private:
   Attention attn_{nullptr};
