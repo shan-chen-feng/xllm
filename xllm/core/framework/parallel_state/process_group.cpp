@@ -103,6 +103,27 @@ void ProcessGroup::reduce_scatter(const torch::Tensor& input,
       ->wait();
 }
 
+void ProcessGroup::alltoall_single(
+    torch::Tensor send,
+    torch::Tensor recv,
+    const std::vector<int64_t>& send_splits,
+    const std::vector<int64_t>& recv_splits,
+    bool is_sync = false,
+    std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr) {
+  CHECK(pg_ != nullptr) << "Process group is not initialized.";
+};
+
+void ProcessGroup::alltoall_equal(
+    torch::Tensor send,
+    torch::Tensor recv,
+    bool is_sync = false,
+    std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr) {
+  CHECK(pg_ != nullptr) << "Process group is not initialized.";
+};
+void ProcessGroup::flush_comm_to_current() {
+  CHECK(pg_ != nullptr) << "Process group is not initialized.";
+};
+
 std::unique_ptr<ProcessGroup> create_process_group(
     int32_t rank,
     int32_t world_size,
