@@ -1439,7 +1439,9 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       const torch::Tensor& encoder_hidden_states_mask = torch::Tensor(),
       const torch::Tensor& attention_mask = torch::Tensor(),
       const std::tuple<at::Tensor, at::Tensor>& image_rotary_emb = {}) {
-
+    
+    torch::Tensor img_query, img_key, img_value;
+    torch::Tensor txt_query, txt_key, txt_value;
     // Compute QKV projections
     if (attn_->use_sp_) {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
