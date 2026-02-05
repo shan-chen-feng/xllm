@@ -1483,7 +1483,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
         joint_query,
         joint_key,
         joint_value,
-        heads,
+        attn_->heads_,
         /*input_layout=*/"BSND",
         /*pse=*/torch::nullopt,
         /*padding_mask=*/torch::nullopt,
@@ -1497,13 +1497,15 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     // Reshape back
     joint_hidden_states = joint_hidden_states.flatten(2, 3);
     joint_hidden_states = joint_hidden_states.to(joint_query.dtype());
-
+    
+    int64_t seq_txt = encoder_hidden_states.size(1);
+    int64_t seq_img = hidden_states.size(1);
     // Split attention outputs back
     auto chunks = torch::split(joint_hidden_states, {seq_txt, seq_img}, 1);
     auto txt_attn_output = chunks[0];
     auto img_attn_output = chunks[1];
     // all tp all 前需要sp pad
-    AllToAll4DHandle handle_io, handle_t_o;
+    parallel_state::AllToAll4DHandle handle_io, handle_t_o;
     if (attn_->use_sp_) {
       img_attn_output = pad_sequence(img_attn_output, 1, attn_->img_pad_);
       handle_io = parallel_state::all_to_all_4D(
