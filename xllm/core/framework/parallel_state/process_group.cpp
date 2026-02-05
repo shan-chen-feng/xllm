@@ -108,16 +108,16 @@ void ProcessGroup::alltoall_single(
     torch::Tensor recv,
     const std::vector<int64_t>& send_splits,
     const std::vector<int64_t>& recv_splits,
-    bool is_sync = false,
-    std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr) {
+    bool is_sync,
+    std::shared_ptr<c10_npu::NPUEvent>* out_done) {
   CHECK(pg_ != nullptr) << "Process group is not initialized.";
 };
 
 void ProcessGroup::alltoall_equal(
     torch::Tensor send,
     torch::Tensor recv,
-    bool is_sync = false,
-    std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr) {
+    bool is_synce,
+    std::shared_ptr<c10_npu::NPUEvent>* out_done) {
   CHECK(pg_ != nullptr) << "Process group is not initialized.";
 };
 void ProcessGroup::flush_comm_to_current() {
