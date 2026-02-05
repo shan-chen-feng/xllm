@@ -1404,7 +1404,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
              torch::Tensor,
              torch::Tensor>
   qkv_matmul(const torch::Tensor& hidden_states,
-                const torch::Tensor& encoder_hidden_states) {
+             const torch::Tensor& encoder_hidden_states) {
     int64_t seq_txt = encoder_hidden_states.size(1);
     int64_t seq_img = hidden_states.size(1);
     // Compute QKV for image stream (sample projections)
@@ -1439,7 +1439,6 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       const torch::Tensor& encoder_hidden_states_mask = torch::Tensor(),
       const torch::Tensor& attention_mask = torch::Tensor(),
       const std::tuple<at::Tensor, at::Tensor>& image_rotary_emb = {}) {
-    
     torch::Tensor img_query, img_key, img_value;
     torch::Tensor txt_query, txt_key, txt_value;
     // Compute QKV projections
@@ -1497,7 +1496,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     // Reshape back
     joint_hidden_states = joint_hidden_states.flatten(2, 3);
     joint_hidden_states = joint_hidden_states.to(joint_query.dtype());
-    
+
     int64_t seq_txt = encoder_hidden_states.size(1);
     int64_t seq_img = hidden_states.size(1);
     auto pg_ = attn_->pg_.process_group_;
@@ -1537,21 +1536,13 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     attn_->verify_loaded_weights(prefix);
   }
 
-  void set_text_pad_(const int pad){
-    attn->text_pad_ = pad;
-  }
+  void set_text_pad_(const int pad) { attn->text_pad_ = pad; }
 
-  void set_img_pad_(const int pad){
-    attn->img_pad_ = pad;
-  }
+  void set_img_pad_(const int pad) { attn->img_pad_ = pad; }
 
-  int get_img_pad_(const int pad){
-    return attn->img_pad_;
-  }
+  int get_img_pad_(const int pad) { return attn->img_pad_; }
 
-  int get_text_pad_(const int pad){
-    return attn->text_pad_;
-  }
+  int get_text_pad_(const int pad) { return attn->text_pad_; }
 
  private:
   Attention attn_{nullptr};
@@ -1905,7 +1896,9 @@ TORCH_MODULE(QwenImageTransformerBlock);
 
 class QwenImageTransformer2DModelImpl : public torch::nn::Module {
  public:
-  QwenImageTransformer2DModelImpl(const ModelContext& context) {
+  QwenImageTransformer2DModelImpl(const ModelContext& context)
+      : pg_(context.get_parallel_args()) {
+    use_sp_ = context.get_parallel_args().world_size() > 1;
     auto model_args = context.get_model_args();
     int64_t num_attention_heads = model_args.n_heads();
     int64_t attention_head_dim = model_args.head_dim();
