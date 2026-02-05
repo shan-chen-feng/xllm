@@ -1348,38 +1348,49 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto rank_ = attn_->rank_;
     auto world_size_ = attn_->world_size_;
 
+    // int64_t bs_txt = encoder_hidden_states.size(0);
+    int64_t bs_img = hidden_states.size(0);
+    int64_t inner_dim = attn_->to_k_->weight_.size(0);
+    int64_t head_dim = inner_dim / attn_heads;
+
     // Compute QKV for image stream (sample projections)
     auto img_query = attn_->to_q_->forward(hidden_states);
     // Reshape for multi-head attention
     int64_t heads = attn_->heads_;
     auto reshape_dims = std::vector<int64_t>{heads, -1};
-    img_query = img_query.unflatten(-1, reshape_dims);
+    // img_query = img_query.unflatten(-1, reshape_dims);
+    img_query = img_query.view({bs_img, -1, heads, head_dim});
     auto handle_iq = parallel_state::all_to_all_4D(
         img_query, rank_, world_size_, 2, 1, false, pg_);
     auto img_key = attn_->to_k_->forward(hidden_states);
-    img_key = img_key.unflatten(-1, reshape_dims);
+    // img_key = img_key.unflatten(-1, reshape_dims);
+    img_key = img_key.view({bs_img, -1, heads, head_dim});
     img_query = parallel_state::all_to_all_4D_post2(handle_iq);
     auto handle_ik = parallel_state::all_to_all_4D(
         img_key, rank_, world_size_, 2, 1, false, pg_);
     auto img_value = attn_->to_v_->forward(hidden_states);
-    img_value = img_value.unflatten(-1, reshape_dims);
+    // img_value = img_value.unflatten(-1, reshape_dims);
+    img_value = img_value.view({bs_img, -1, heads, head_dim});
     img_key = parallel_state::all_to_all_4D_post2(handle_ik);
     auto handle_iv = parallel_state::all_to_all_4D(
         img_value, rank_, world_size_, 2, 1, false, pg_);
 
     // Compute QKV for text stream (context projections)
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
-    txt_query = txt_query.unflatten(-1, reshape_dims);
+    // txt_query = txt_query.unflatten(-1, reshape_dims);
+    txt_query = txt_query.view({bs_img, -1, heads, head_dim});
     img_value = parallel_state::all_to_all_4D_post2(handle_iv);
     auto handle_tq = parallel_state::all_to_all_4D(
         txt_query, rank_, world_size_, 2, 1, false, pg_);
     auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
-    txt_key = txt_key.unflatten(-1, reshape_dims);
+    // txt_key = txt_key.unflatten(-1, reshape_dims);
+    txt_key = txt_key.view({bs_img, -1, heads, head_dim});
     txt_query = parallel_state::all_to_all_4D_post2(handle_tq);
     auto handle_tk = parallel_state::all_to_all_4D(
         txt_key, rank_, world_size_, 2, 1, false, pg_);
     auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
-    txt_value = txt_value.unflatten(-1, reshape_dims);
+    // txt_value = txt_value.unflatten(-1, reshape_dims);
+    txt_value = txt_value.view({bs_img, -1, heads, head_dim});
     txt_key = parallel_state::all_to_all_4D_post2(handle_tk);
     auto handle_tv = parallel_state::all_to_all_4D(
         txt_value, rank_, world_size_, 2, 1, false, pg_);
