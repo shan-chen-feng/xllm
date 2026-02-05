@@ -27,10 +27,10 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model/model_input_params.h"
+#include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
 #include "dit_linear.h"
@@ -1334,12 +1334,77 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     attn_ = register_module("attn", std::move(attn_module));
   }
 
-  std::tuple<torch::Tensor, torch::Tensor> forward(
-      const torch::Tensor& hidden_states,          // Image stream
-      const torch::Tensor& encoder_hidden_states,  // Text stream
-      const torch::Tensor& encoder_hidden_states_mask = torch::Tensor(),
-      const torch::Tensor& attention_mask = torch::Tensor(),
-      const std::tuple<at::Tensor, at::Tensor>& image_rotary_emb = {}) {
+  std::tuple<torch::Tensor,
+             torch::Tensor,
+             torch::Tensor,
+             torch::Tensor,
+             torch::Tensor,
+             torch::Tensor>
+  sp_qkv_matmul(const torch::Tensor& hidden_states,
+                const torch::Tensor& encoder_hidden_states) {
+    int64_t seq_txt = encoder_hidden_states.size(1);
+    int64_t seq_img = hidden_states.size(1);
+    auto pg_ = attn_->pg_.process_group_;
+    auto rank_ = attn_->rank_;
+    auto world_size_ = attn_->world_size_;
+
+    // Compute QKV for image stream (sample projections)
+    auto img_query = attn_->to_q_->forward(hidden_states);
+    // Reshape for multi-head attention
+    int64_t heads = attn_->heads_;
+    auto reshape_dims = std::vector<int64_t>{heads, -1};
+    img_query = img_query.unflatten(-1, reshape_dims);
+    auto handle_iq = parallel_state::all_to_all_4D(
+        img_query, rank_, world_size_, 2, 1, false, pg_);
+    auto img_key = attn_->to_k_->forward(hidden_states);
+    img_key = img_key.unflatten(-1, reshape_dims);
+    img_query = parallel_state::all_to_all_4D_post2(handle_iq);
+    auto handle_ik = parallel_state::all_to_all_4D(
+        img_key, rank_, world_size_, 2, 1, false, pg_);
+    auto img_value = attn_->to_v_->forward(hidden_states);
+    img_value = img_value.unflatten(-1, reshape_dims);
+    img_key = parallel_state::all_to_all_4D_post2(handle_ik);
+    auto handle_iv = parallel_state::all_to_all_4D(
+        img_value, rank_, world_size_, 2, 1, false, pg_);
+
+    // Compute QKV for text stream (context projections)
+    auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
+    txt_query = txt_query.unflatten(-1, reshape_dims);
+    img_value = parallel_state::all_to_all_4D_post2(handle_iv);
+    auto handle_tq = parallel_state::all_to_all_4D(
+        txt_query, rank_, world_size_, 2, 1, false, pg_);
+    auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
+    txt_key = txt_key.unflatten(-1, reshape_dims);
+    txt_query = parallel_state::all_to_all_4D_post2(handle_tq);
+    auto handle_tk = parallel_state::all_to_all_4D(
+        txt_key, rank_, world_size_, 2, 1, false, pg_);
+    auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
+    txt_value = txt_value.unflatten(-1, reshape_dims);
+    txt_key = parallel_state::all_to_all_4D_post2(handle_tk);
+    auto handle_tv = parallel_state::all_to_all_4D(
+        txt_value, rank_, world_size_, 2, 1, false, pg_);
+
+    // sp unpad
+    img_query = unpad_sequence(img_query, 1, attn_->img_pad_);
+    img_key = unpad_sequence(img_key, 1, attn_->img_pad_);
+    img_value = unpad_sequence(img_value, 1, attn_->img_pad_);
+    txt_query = unpad_sequence(txt_query, 1, attn_->text_pad_);
+    txt_key = unpad_sequence(txt_key, 1, attn_->text_pad_);
+    txt_value = parallel_state::all_to_all_4D_post2(handle_tv);
+    txt_value = unpad_sequence(txt_value, 1, attn_->text_pad_);
+
+    return std::make_tuple(
+        img_query, img_key, img_value, txt_query, txt_key, txt_value);
+  }
+
+  std::tuple<torch::Tensor,
+             torch::Tensor,
+             torch::Tensor,
+             torch::Tensor,
+             torch::Tensor,
+             torch::Tensor>
+  sp_qkv_matmul(const torch::Tensor& hidden_states,
+                const torch::Tensor& encoder_hidden_states) {
     int64_t seq_txt = encoder_hidden_states.size(1);
     int64_t seq_img = hidden_states.size(1);
     // Compute QKV for image stream (sample projections)
@@ -1348,60 +1413,40 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     int64_t heads = attn_->heads_;
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     img_query = img_query.unflatten(-1, reshape_dims);
-    if (attn_->use_sp_) {
-      auto pg_ = attn_->pg_.process_group_;
-      auto rank_ = attn_->rank_;
-      auto world_size_ = attn_->world_size_;
-      auto handle_iq =
-          parallel_state::all_to_all_4D(img_query, rank_, world_size_, 2, 1, false, pg_);
-    }
+
     auto img_key = attn_->to_k_->forward(hidden_states);
     img_key = img_key.unflatten(-1, reshape_dims);
-    if (attn_->use_sp_) {
-      img_query = parallel_state::all_to_all_4D_post2(handle_iq);
-      auto handle_ik =
-          parallel_state::all_to_all_4D(img_key, rank_, world_size_, 2, 1, false, pg_);
-    }
+
     auto img_value = attn_->to_v_->forward(hidden_states);
     img_value = img_value.unflatten(-1, reshape_dims);
-    if (attn_->use_sp_) {
-      img_key = parallel_state::all_to_all_4D_post2(handle_ik);
-      auto handle_iv =
-          parallel_state::all_to_all_4D(img_value, rank_, world_size_, 2, 1, false, pg_);
-    }
 
     // Compute QKV for text stream (context projections)
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
     txt_query = txt_query.unflatten(-1, reshape_dims);
-    if (attn_->use_sp_) {
-      img_value = parallel_state::all_to_all_4D_post2(handle_iv);
-      auto handle_tq =
-          parallel_state::all_to_all_4D(txt_query, rank_, world_size_, 2, 1, false, pg_);
-    }
+
     auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
     txt_key = txt_key.unflatten(-1, reshape_dims);
-    if (attn_->use_sp_) {
-      txt_query = parallel_state::all_to_all_4D_post2(handle_tq);
-      auto handle_tk =
-          parallel_state::all_to_all_4D(txt_key, rank_, world_size_, 2, 1, false, pg_);
-    }
+
     auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
     txt_value = txt_value.unflatten(-1, reshape_dims);
-    if (attn_->use_sp_) {
-      txt_key = parallel_state::all_to_all_4D_post2(handle_tk);
-      auto handle_tv =
-          parallel_state::all_to_all_4D(txt_value, rank_, world_size_, 2, 1, false, pg_);
-    }
+    return std::make_tuple(
+        img_query, img_key, img_value, txt_query, txt_key, txt_value);
+  }
 
-    // sp unpad
-    if (attn_->use_sp_) {
-      img_query = unpad_sequence(img_query, 1, attn_->img_pad_);
-      img_key = unpad_sequence(img_key, 1, attn_->img_pad_);
-      img_value = unpad_sequence(img_value, 1, attn_->img_pad_);
-      txt_query = unpad_sequence(txt_query, 1, attn_->text_pad_);
-      txt_key = unpad_sequence(txt_key, 1, attn_->text_pad_);
-      txt_value = parallel_state::all_to_all_4D_post2(handle_tv);
-      txt_value = unpad_sequence(txt_value, 1, attn_->text_pad_);
+  std::tuple<torch::Tensor, torch::Tensor> forward(
+      const torch::Tensor& hidden_states,          // Image stream
+      const torch::Tensor& encoder_hidden_states,  // Text stream
+      const torch::Tensor& encoder_hidden_states_mask = torch::Tensor(),
+      const torch::Tensor& attention_mask = torch::Tensor(),
+      const std::tuple<at::Tensor, at::Tensor>& image_rotary_emb = {}) {
+
+    // Compute QKV projections
+    if (use_sp_) {
+      std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
+          sp_qkv_matmul(hidden_states, encoder_hidden_states);
+    } else {
+      std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
+          qkv_matmul(hidden_states, encoder_hidden_states);
     }
 
     // Apply QK normalization
@@ -1456,14 +1501,16 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto txt_attn_output = chunks[0];
     auto img_attn_output = chunks[1];
     // all tp all 前需要sp pad
+    AllToAll4DHandle handle_io, handle_t_o;
     if (use_sp_) {
-      img_attn_output = pad_sequence(
-          img_attn_output, 1, attn_->img_pad_) handle_io =
-          parallel_state::all_to_all_4D(img_attn_output, rank_, world_size_, 1, 2, true, pg_);
+      img_attn_output = pad_sequence(img_attn_output, 1, attn_->img_pad_);
+      handle_io = parallel_state::all_to_all_4D(
+          img_attn_output, rank_, world_size_, 1, 2, true, pg_);
       img_attn_output = parallel_state::all_to_all_4D_post(handle_io);
 
-      txt_attn_output = pad_sequence(txt_attn_output, 1, text_pad) handle_t_o =
-          parallel_state::all_to_all_4D(txt_attn_output, rank_, world_size_, 1, 2, false, pg_);
+      txt_attn_output = pad_sequence(txt_attn_output, 1, text_pad);
+      handle_t_o = parallel_state::all_to_all_4D(
+          txt_attn_output, rank_, world_size_, 1, 2, false, pg_);
     }
     // Apply output projections
     img_attn_output = attn_->to_out_->forward(img_attn_output);
