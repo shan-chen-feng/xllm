@@ -1500,6 +1500,9 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     
     int64_t seq_txt = encoder_hidden_states.size(1);
     int64_t seq_img = hidden_states.size(1);
+    auto pg_ = attn_->pg_.process_group_;
+    auto rank_ = attn_->rank_;
+    auto world_size_ = attn_->world_size_;
     // Split attention outputs back
     auto chunks = torch::split(joint_hidden_states, {seq_txt, seq_img}, 1);
     auto txt_attn_output = chunks[0];
