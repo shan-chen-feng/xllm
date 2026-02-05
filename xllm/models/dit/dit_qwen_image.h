@@ -1350,13 +1350,13 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
     // int64_t bs_txt = encoder_hidden_states.size(0);
     int64_t bs_img = hidden_states.size(0);
-    int64_t inner_dim = attn_->to_k_->weight_.size(0);
-    int64_t head_dim = inner_dim / attn_heads;
+    int64_t inner_dim = attn_->to_k_->weight.size(0);
+    int64_t heads = attn_->heads_;
+    int64_t head_dim = inner_dim / heads;
 
     // Compute QKV for image stream (sample projections)
     auto img_query = attn_->to_q_->forward(hidden_states);
-    // Reshape for multi-head attention
-    int64_t heads = attn_->heads_;
+    
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     // img_query = img_query.unflatten(-1, reshape_dims);
     img_query = img_query.view({bs_img, -1, heads, head_dim});
