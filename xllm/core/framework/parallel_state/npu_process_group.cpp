@@ -120,7 +120,22 @@ ProcessGroupImpl::ProcessGroupImpl(int rank,
                                    HcclComm comm)
     : ProcessGroup(rank, world_size, device),
       comm_(comm),
-      comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {}
+      comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {
+  LOG(INFO) << "hhh " << FLAGS_backend;
+  if (FLAGS_backend == "dit") {
+    init_dit_group_mapping();
+    LOG(INFO) << "inside";
+  }
+}
+
+void ProcessGroupImpl::init_dit_group_mapping() {
+  DiTMappingNPU::Options dit_mapping_options;
+  dit_mapping_options.tp_size(FLAGS_dit_tp_size)
+      .sp_size(FLAGS_dit_sp_size)
+      .cfg_size(FLAGS_dit_cfg_size);
+  dit_mapping_npu_ =
+      std::make_unique<DiTMappingNPU>(world_size_, rank_, dit_mapping_options);
+}
 
 void ProcessGroupImpl::allgather(const torch::Tensor& input,
                                  std::vector<torch::Tensor>& outputs) {

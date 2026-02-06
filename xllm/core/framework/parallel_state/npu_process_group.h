@@ -19,6 +19,8 @@ limitations under the License.
 #include <torch_npu/csrc/core/npu/NPUEvent.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 
+#include "core/common/global_flags.h"
+#include "dit_mapping_npu.h"
 #include "hccl/hccl.h"
 #include "process_group.h"
 
@@ -49,9 +51,12 @@ class ProcessGroupImpl : public ProcessGroup {
   void allgather(const torch::Tensor& input,
                  std::vector<torch::Tensor>& outputs) override;
 
+  void init_dit_group_mapping();
+
  private:
   HcclComm comm_ = nullptr;
   c10_npu::NPUStream comm_stream_;
+  std::unique_ptr<DiTMappingNPU> dit_mapping_npu_{nullptr};
 };
 
 #if defined(USE_NPU)

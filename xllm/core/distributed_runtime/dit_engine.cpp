@@ -42,6 +42,7 @@ DiTEngine::DiTEngine(const runtime::Options& options) : options_(options) {
   }
 
   if (devices.size() > 1) {
+    LOG(INFO) << "hhh create process group";
     // create a process group for each device if there are multiple gpus
     process_groups_ = parallel_state::create_npu_process_groups(devices);
   }
@@ -111,7 +112,6 @@ bool DiTEngine::init_model() {
 
 DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   CHECK(!workers_.empty());
-
   Timer timer;
   auto forward_inputs = workers_[0]->prepare_inputs(batches[0]);
   COUNTER_ADD(prepare_input_latency_seconds, timer.elapsed_seconds());
@@ -119,7 +119,7 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   std::vector<folly::SemiFuture<std::optional<DiTForwardOutput>>> futures;
   futures.reserve(workers_.size());
   for (auto& worker : workers_) {
-    futures.emplace_back(worker->step(forward_inputs));
+    futures.emplace_back(worker->step_async(forward_inputs));
   }
 
   // wait for the all future to complete

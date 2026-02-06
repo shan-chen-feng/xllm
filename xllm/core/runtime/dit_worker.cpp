@@ -125,7 +125,6 @@ folly::SemiFuture<bool> DiTWorker::init_model_async(
 
 std::optional<DiTForwardOutput> DiTWorker::step(const DiTForwardInput& inputs) {
   Timer timer;
-
   auto output = dit_model_executor_->forward(inputs.to(device_, dtype_));
 
   auto ret = device_.synchronize_default_stream();

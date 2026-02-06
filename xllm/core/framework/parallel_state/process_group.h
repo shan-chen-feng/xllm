@@ -64,7 +64,7 @@ class ProcessGroup {
   virtual void reduce_scatter(const torch::Tensor& input,
                               torch::Tensor& output);
 
- private:
+ protected:
   // rank of current process.
   int32_t rank_ = 0;
 

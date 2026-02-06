@@ -47,7 +47,7 @@ class RankGenerator {
       return tokens;
     };
 
-    std::vector<std::string> ordered_group_name_ = split(group_order_, '-');
+    ordered_group_name_ = split(group_order_, '-');
     for (const std::string& token : ordered_group_name_) {
       auto it = group_size_map_.find(token);
       if (it != group_size_map_.end()) {
@@ -58,15 +58,16 @@ class RankGenerator {
     LOG(INFO) << "RankGenerator initialized with tp=" << tp << ", sp=" << sp
               << ", cfg=" << cfg << ", order=" << group_order_
               << ", world_size=" << world_size_;
+    print_ranks("cfg");
+    print_ranks("tp");
+    print_ranks("sp");
   }
 
   std::vector<std::vector<int32_t>> get_ranks(const std::string& group_query) {
     std::vector<bool> mask = get_mask(group_query);
-
     std::vector<std::vector<int32_t>> ranks =
         generate_masked_orthogonal_rank_groups(
             world_size_, ordered_group_size_, mask);
-
     if (rank_offset_ > 0) {
       for (auto& rank_group : ranks) {
         for (size_t i = 0; i < rank_group.size(); i++) {
@@ -176,9 +177,7 @@ class RankGenerator {
         unqueried_group_size.push_back(parallel_size[i]);
       }
     }
-
     std::vector<int32_t> global_group_stride = prefix_product(parallel_size);
-
     std::vector<int32_t> queried_group_stride;
     std::vector<int32_t> unqueried_group_stride;
     for (size_t i = 0; i < parallel_size.size(); i++) {
@@ -188,7 +187,6 @@ class RankGenerator {
         unqueried_group_stride.push_back(global_group_stride[i]);
       }
     }
-
     std::vector<int32_t> queried_group_prefix =
         prefix_product(queried_group_size);
     // group size equals to the product of queryed group type sizes;
@@ -196,17 +194,14 @@ class RankGenerator {
     int32_t num_of_group = world_size / group_size;
 
     std::vector<std::vector<int32_t>> ranks;
-
     for (int32_t group_index = 0; group_index < num_of_group; group_index++) {
       std::vector<int32_t> decomposed_group_idx =
           decompose(group_index, unqueried_group_size);
       std::vector<int32_t> rank;
-
       for (int32_t rank_in_group = 0; rank_in_group < group_size;
            rank_in_group++) {
         std::vector<int32_t> decomposed_rank_idx =
             decompose(rank_in_group, queried_group_size);
-
         int32_t calculated_rank =
             inner_product(decomposed_rank_idx, queried_group_stride) +
             inner_product(decomposed_group_idx, unqueried_group_stride);

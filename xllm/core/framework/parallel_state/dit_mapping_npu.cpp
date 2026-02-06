@@ -29,9 +29,9 @@ DiTMappingNPU::DiTMappingNPU(const int32_t world_size,
   parse_parallel_info();
   validate();
   rank_generator_ =
-      std::make_unique<RankGenerator>(cfg_.group_size(),
-                                      tp_.group_size(),
+      std::make_unique<RankGenerator>(tp_.group_size(),
                                       sp_.group_size(),
+                                      cfg_.group_size(),
                                       /*group_order=*/"tp-sp-cfg");
   get_group_by_type(tp_, "tp");
   get_group_by_type(sp_, "sp");

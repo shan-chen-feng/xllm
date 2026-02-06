@@ -23,7 +23,7 @@ namespace qwenimage {
 class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
  public:
   QwenImageEditPlusPipelineImpl(const DiTModelContext& context)
-      : vae_model_args_(context.get_model_args("vae")) {
+      : context_(context), vae_model_args_(context.get_model_args("vae")) {
     options_ = context.get_tensor_options();
     dtype_ = options_.dtype().toScalarType();
     device_ = options_.device();
@@ -434,21 +434,25 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
           t.expand({final_latents.size(0)}).to(final_latents.dtype());
 
       torch::Tensor noise_pred;
-      {
-        noise_pred = transformer_->forward(latent_model_input,
-                                           prompt_embeds,
-                                           prompt_embeds_mask,
-                                           timestep_expanded / 1000.0,
-                                           main_shape,
-                                           txt_seq_lens,
-                                           /*use_cfg=*/false,
-                                           /*step_index=*/i);
-        noise_pred = noise_pred.slice(1, 0, final_latents.size(1));
-      }
-
-      if (do_true_cfg) {
-        torch::Tensor neg_noise_pred;
-        {
+      torch::Tensor neg_noise_pred;
+      torch::Tensor pos_neg_noise_preds;
+      if (FLAGS_dit_cfg_size == 2 && do_true_cfg) {
+        int32_t device_id = options_.device().index();
+        if (device_id == 0) {
+          noise_pred = transformer_->forward(latent_model_input,
+                                             prompt_embeds,
+                                             prompt_embeds_mask,
+                                             timestep_expanded / 1000.0,
+                                             main_shape,
+                                             txt_seq_lens,
+                                             /*use_cfg=*/false,
+                                             /*step_index=*/i);
+          noise_pred = noise_pred.slice(1, 0, final_latents.size(1));
+          pos_neg_noise_preds = xllm::parallel_state::gather(
+              noise_pred,
+              context_.get_parallel_args().process_group_,
+              /*dim=*/0);
+        } else {
           neg_noise_pred = transformer_->forward(latent_model_input,
                                                  negative_prompt_embeds,
                                                  negative_prompt_embeds_mask,
@@ -459,13 +463,47 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
                                                  /*step_index=*/i);
 
           neg_noise_pred = neg_noise_pred.slice(1, 0, final_latents.size(1));
+          pos_neg_noise_preds = xllm::parallel_state::gather(
+              neg_noise_pred,
+              context_.get_parallel_args().process_group_,
+              /*dim=*/0);
         }
-
+        auto noise_preds = torch::chunk(pos_neg_noise_preds, 2, 0);
         auto comb_pred =
-            neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred);
-        auto cond_norm = torch::norm(noise_pred, 2, -1, true);
+            noise_preds[1] + true_cfg_scale * (noise_preds[0] - noise_preds[1]);
+        auto cond_norm = torch::norm(noise_preds[0], 2, -1, true);
         auto noise_norm = torch::norm(comb_pred, 2, -1, true);
         noise_pred = comb_pred * (cond_norm / noise_norm);
+
+      } else {
+        noise_pred = transformer_->forward(latent_model_input,
+                                           prompt_embeds,
+                                           prompt_embeds_mask,
+                                           timestep_expanded / 1000.0,
+                                           main_shape,
+                                           txt_seq_lens,
+                                           /*use_cfg=*/false,
+                                           /*step_index=*/i);
+        noise_pred = noise_pred.slice(1, 0, final_latents.size(1));
+
+        if (do_true_cfg) {
+          neg_noise_pred = transformer_->forward(latent_model_input,
+                                                 negative_prompt_embeds,
+                                                 negative_prompt_embeds_mask,
+                                                 timestep_expanded / 1000.0,
+                                                 main_shape,
+                                                 negative_txt_seq_lens,
+                                                 /*use_cfg=*/true,
+                                                 /*step_index=*/i);
+
+          neg_noise_pred = neg_noise_pred.slice(1, 0, final_latents.size(1));
+
+          auto comb_pred =
+              neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred);
+          auto cond_norm = torch::norm(noise_pred, 2, -1, true);
+          auto noise_norm = torch::norm(comb_pred, 2, -1, true);
+          noise_pred = comb_pred * (cond_norm / noise_norm);
+        }
       }
 
       auto latents_dtype = final_latents.dtype();
@@ -527,6 +565,7 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
   int64_t in_channels_;
   int64_t num_timesteps_;
   int64_t num_layers_;
+  DiTModelContext context_;
   torch::Tensor current_timestep_;
   string prompt_template_encode_;
   const ModelArgs& vae_model_args_;
