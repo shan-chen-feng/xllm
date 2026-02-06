@@ -177,7 +177,7 @@ class AdaLayerNormImpl : public torch::nn::Module {
     auto shift = chunks[0];
     auto scale = chunks[1];
     auto gate = chunks[2];
-
+    mod_params.print();
     torch::Tensor shift_result, scale_result, gate_result;
 
     if (index.defined()) {
@@ -218,6 +218,9 @@ class AdaLayerNormImpl : public torch::nn::Module {
       scale_result = scale.unsqueeze(1);
       gate_result = gate.unsqueeze(1);
     }
+    shift_result.print();
+    scale_result.print();
+    gate_result.print();
 
     scale_result = 1 + scale_result;
 

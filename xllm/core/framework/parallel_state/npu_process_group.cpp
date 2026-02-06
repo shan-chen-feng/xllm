@@ -121,10 +121,10 @@ ProcessGroupImpl::ProcessGroupImpl(int rank,
     : ProcessGroup(rank, world_size, device),
       comm_(comm),
       comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {
-  LOG(INFO) << "hhh " << FLAGS_backend;
   if (FLAGS_backend == "dit") {
     init_dit_group_mapping();
-    LOG(INFO) << "inside";
+    npu_comm_manager_ = std::make_unique<NPUExternalCommManager>(
+        comm, world_size, rank, /*backend=*/"hccl");
   }
 }
 

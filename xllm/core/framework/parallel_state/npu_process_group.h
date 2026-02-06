@@ -22,6 +22,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "dit_mapping_npu.h"
 #include "hccl/hccl.h"
+#include "npu_comm_manager.h"
 #include "process_group.h"
 
 namespace xllm {
@@ -57,6 +58,7 @@ class ProcessGroupImpl : public ProcessGroup {
   HcclComm comm_ = nullptr;
   c10_npu::NPUStream comm_stream_;
   std::unique_ptr<DiTMappingNPU> dit_mapping_npu_{nullptr};
+  std::unique_ptr<NPUExternalCommManager> npu_comm_manager_{nullptr};
 };
 
 #if defined(USE_NPU)
