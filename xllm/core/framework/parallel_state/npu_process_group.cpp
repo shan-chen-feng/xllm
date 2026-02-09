@@ -203,7 +203,6 @@ void ProcessGroupImpl::alltoall_single(
     const std::vector<int64_t>& recv_splits,
     bool is_sync,
     std::shared_ptr<c10_npu::NPUEvent>* out_done) {
-  LOG(INFO) << "alltoall_single";
 #if !defined(USE_NPU)
   LOG(FATAL) << "alltoall_single only supported with USE_NPU";
 #else
@@ -268,12 +267,10 @@ void ProcessGroupImpl::alltoall_single(
       done->block(compute_stream);
     }
   }
-  // c10_npu::setCurrentNPUStream(prev_stream);
 #endif
 }
 
 void ProcessGroupImpl::flush_comm_to_current() {
-LOG(INFO) << "flush_comm_to_current";
 #if defined(USE_NPU)
   auto cur = c10_npu::getCurrentNPUStream();
   c10_npu::NPUEvent fence;
@@ -287,7 +284,6 @@ void ProcessGroupImpl::alltoall_equal(
     torch::Tensor recv,
     bool is_sync,
     std::shared_ptr<c10_npu::NPUEvent>* out_done) {
-LOG(INFO) << "alltoall_equal";
 #if !defined(USE_NPU)
   LOG(FATAL) << "alltoall_equal only supported with USE_NPU";
 #else
