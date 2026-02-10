@@ -254,10 +254,12 @@ void ProcessGroupImpl::alltoall_single(
       /*comm=*/comm_,
       /*stream=*/comm_stream_.stream()));
 
-  if (is_sync) {
-    c10_npu::NPUEvent ev;
-    ev.record(comm_stream_);
-    ev.synchronize();
+  if (true) {
+    auto done = std::make_shared<c10_npu::NPUEvent>();
+    done->record(comm_stream_);
+    done->block(compute_stream);
+    comm_stream_.synchronize();
+    LOG(INFO) << "alltoall_single sync done";
   } else {
     auto done = std::make_shared<c10_npu::NPUEvent>();
     done->record(comm_stream_);
