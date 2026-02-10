@@ -2074,7 +2074,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     // 保存new_hidden_states和new_encoder_hidden_states到本地
     // torch::save(new_hidden_states.cpu(), "new_hidden_states_before.pt");
     // torch::save(new_encoder_hidden_states.cpu(),
-                // "new_encoder_hidden_states_before.pt");
+    // "new_encoder_hidden_states_before.pt");
     if (use_sp_) {
       // split the sequence for hidden_states and the encoder_hidden_states
       int32_t seq_len, encoder_seq_len;
@@ -2090,8 +2090,9 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
           new_encoder_hidden_states, world_size_, rank_, 1, encoder_pad_);
       modulate_index = split_sequence(modulate_index, world_size_, rank_, 1, 0);
     }
-    // for (int64_t index_block = 0; index_block < transformer_blocks_->size();
-    for (int64_t index_block = 0; index_block < 1; ++index_block) {
+    for (int64_t index_block = 0; index_block < transformer_blocks_->size();
+         ++index_block) {
+      // for (int64_t index_block = 0; index_block < 1; ++index_block) {
       if (use_sp_) {
         transformer_blocks_[index_block]
             ->as<QwenImageTransformerBlock>()
@@ -2122,7 +2123,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       // torch::save(new_hidden_states.cpu(), "sp/new_hidden_states_after.pt");
       // torch::save(new_encoder_hidden_states.cpu(),
       //             "sp/new_encoder_hidden_states_after.pt");
-    } 
+    }
     // else {
     //   // 保存new_hidden_states和new_encoder_hidden_states到本地
     //   // 将张量转移到CPU后保存
