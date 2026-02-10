@@ -213,7 +213,8 @@ void ProcessGroupImpl::alltoall_single(
   const int P = world_size();
   CHECK((int)send_splits.size() == P && (int)recv_splits.size() == P)
       << "split sizes length must equal world_size";
-
+  torch::DeviceGuard guard(device());
+  
   std::vector<uint64_t> sc(P), rc(P), sdisp(P), rdisp(P);
   uint64_t acc = 0;
   for (int i = 0; i < P; ++i) {
@@ -230,13 +231,13 @@ void ProcessGroupImpl::alltoall_single(
 
   auto dtype = to_hccl_data_type(send);
   auto compute_stream = c10_npu::getCurrentNPUStream();
-  c10_npu::NPUEvent ready;
-  ready.record(compute_stream);
+  auto ready = std::make_shared<c10_npu::NPUEvent>();
+  ready->record(compute_stream);
+  ready->block(comm_stream_);
 
-  torch::DeviceGuard guard(device());
   // const auto prev_stream = c10_npu::getCurrentNPUStream();
   // c10_npu::setCurrentNPUStream(comm_stream_);
-  ready.block(comm_stream_);  // compute -> comm
+  // ready.block(comm_stream_);  // compute -> comm
   c10_npu::NPUCachingAllocator::recordStream(send.storage().data_ptr(),
                                              comm_stream_);
   c10_npu::NPUCachingAllocator::recordStream(recv.storage().data_ptr(),
