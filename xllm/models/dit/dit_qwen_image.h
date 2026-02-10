@@ -177,7 +177,6 @@ class AdaLayerNormImpl : public torch::nn::Module {
     auto shift = chunks[0];
     auto scale = chunks[1];
     auto gate = chunks[2];
-    mod_params.print();
     torch::Tensor shift_result, scale_result, gate_result;
 
     if (index.defined()) {
@@ -218,9 +217,6 @@ class AdaLayerNormImpl : public torch::nn::Module {
       scale_result = scale.unsqueeze(1);
       gate_result = gate.unsqueeze(1);
     }
-    shift_result.print();
-    scale_result.print();
-    gate_result.print();
 
     scale_result = 1 + scale_result;
 
@@ -1635,7 +1631,9 @@ TORCH_MODULE(QwenImageTransformerBlock);
 
 class QwenImageTransformer2DModelImpl : public torch::nn::Module {
  public:
-  QwenImageTransformer2DModelImpl(const ModelContext& context) {
+  QwenImageTransformer2DModelImpl(const ModelContext& context,
+                                  std::shared_ptr<DiTCache> dit_cache)
+      : dit_cache_(dit_cache) {
     auto model_args = context.get_model_args();
     int64_t num_attention_heads = model_args.n_heads();
     int64_t attention_head_dim = model_args.head_dim();
@@ -1797,7 +1795,8 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
         {"hidden_states", new_hidden_states},
         {"original_hidden_states", original_hidden_states}};
     CacheStepIn stepin_before(step_idx, step_in_map);
-    use_step_cache = DiTCache::get_instance().on_before_step(stepin_before);
+    // use_step_cache = DiTCache::get_instance().on_before_step(stepin_before);
+    use_step_cache = dit_cache_->on_before_step(stepin_before);
 
     if (!use_step_cache) {
       for (int64_t index_block = 0; index_block < transformer_blocks_->size();
@@ -1807,8 +1806,9 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
              torch::tensor({use_cfg},
                            torch::TensorOptions().dtype(torch::kBool))}};
         CacheBlockIn blockin_before(index_block, block_in_before_map);
-        use_block_cache =
-            DiTCache::get_instance().on_before_block(blockin_before);
+        // use_block_cache =
+        //     DiTCache::get_instance().on_before_block(blockin_before);
+        use_block_cache = dit_cache_->on_before_block(blockin_before);
 
         if (!use_block_cache) {
           std::tie(new_hidden_states, new_encoder_hidden_states) =
@@ -1832,8 +1832,10 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
             {"original_hidden_states", original_hidden_states},
             {"original_encoder_hidden_states", original_encoder_hidden_states}};
         CacheBlockIn blockin_after(index_block, block_in_after_map);
+        // CacheBlockOut blockout_after =
+        //     DiTCache::get_instance().on_after_block(blockin_after);
         CacheBlockOut blockout_after =
-            DiTCache::get_instance().on_after_block(blockin_after);
+            dit_cache_->on_after_block(blockin_after);
 
         new_hidden_states = blockout_after.tensors.at("hidden_states");
         new_encoder_hidden_states =
@@ -1848,8 +1850,9 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
         {"hidden_states", new_hidden_states},
         {"original_hidden_states", original_hidden_states}};
     CacheStepIn stepin_after(step_idx, step_after_map);
-    CacheStepOut stepout_after =
-        DiTCache::get_instance().on_after_step(stepin_after);
+    // CacheStepOut stepout_after =
+    //     DiTCache::get_instance().on_after_step(stepin_after);
+    CacheStepOut stepout_after = dit_cache_->on_after_step(stepin_after);
     new_hidden_states = stepout_after.tensors.at("hidden_states");
 
     if (zero_cond_t_) {
@@ -1913,6 +1916,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
   // Cache objects
   bool cache_cond_;
   bool cache_uncond_;
+  std::shared_ptr<DiTCache> dit_cache_{nullptr};
 
   bool zero_cond_t_;
   bool use_layer3d_rope_;

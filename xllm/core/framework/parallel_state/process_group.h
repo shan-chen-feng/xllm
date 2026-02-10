@@ -64,6 +64,11 @@ class ProcessGroup {
   virtual void reduce_scatter(const torch::Tensor& input,
                               torch::Tensor& output);
 
+  virtual std::vector<uint32_t> get_rank_per_group(
+      const std::string& group_type) {
+    return std::vector<uint32_t>{0};
+  }
+
  protected:
   // rank of current process.
   int32_t rank_ = 0;

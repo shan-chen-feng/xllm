@@ -526,6 +526,8 @@ DEFINE_int64(dit_cache_end_blocks,
 
 // --- dit parallel config ---
 
+DEFINE_int64(dit_dp_size, 1, "The number of blocks to skip at the end.");
+
 DEFINE_int64(dit_tp_size, 1, "The number of blocks to skip at the end.");
 
 DEFINE_int64(dit_sp_size, 1, "The number of blocks to skip at the end.");

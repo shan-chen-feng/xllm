@@ -80,11 +80,11 @@ NPUExternalCommManager::NPUExternalCommManager(HcclComm globalComm,
   commInfo->rankIds_ = rankIds;
   commInfo->backend_ = backend;
   commInfo->streamId_ = streamId;
-  if (this->globalComm_ == nullptr) {
+  if (globalComm_ == nullptr) {
     LOG(ERROR) << "External Comm Manager: Create the hccl communication group "
                   "failed, please make sure the globalComm was initialized";
   }
-  commInfo->hcclComm_ = this->globalComm_;
+  commInfo->hcclComm_ = globalComm_;
   char hcclCommName[128] = {};
   HcclGetCommName(this->globalComm_, hcclCommName);
   auto commDomain = std::string(hcclCommName);
@@ -226,6 +226,7 @@ std::string NPUExternalCommManager::GetHcclSubCommDomain(
     HcclCommConfigInit(&config);
     config.hcclBufferSize = commInfo->bufferSize_;
     std::vector<uint32_t> tempRankIds = {};
+    LOG(INFO) << "start create";
     for (auto item : commInfo->rankIds_) {
       tempRankIds.push_back(item);
     }
@@ -256,6 +257,7 @@ std::string NPUExternalCommManager::GetHcclSubCommDomain(
 }
 
 HcclComm NPUExternalCommManager::GetCommPtr(std::string commDomain) {
+  LOG(INFO) << "commDomain is: " << commDomain;
   if (commDomain == "") {
     return nullptr;
   }
@@ -266,6 +268,7 @@ HcclComm NPUExternalCommManager::GetCommPtr(std::string commDomain) {
        << "] not found in cache.";
     throw std::out_of_range(ss.str());
   }
+  LOG(INFO) << "finish getting hcclcomm";
   return it->second->hcclComm_;
 }
 

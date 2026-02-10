@@ -9,14 +9,16 @@ class RankGenerator {
   RankGenerator(int32_t tp,
                 int32_t sp,
                 int32_t cfg,
-                const std::string& group_order = "tp-sp-cfg",
+                int32_t dp,
+                const std::string& group_order = "tp-sp-cfg-dp",
                 int32_t rank_offset = 0)
-      : tp_(tp), sp_(sp), cfg_(cfg), rank_offset_(rank_offset) {
-    world_size_ = tp * sp * cfg;
+      : tp_(tp), sp_(sp), cfg_(cfg), dp_(dp), rank_offset_(rank_offset) {
+    world_size_ = tp * sp * cfg * dp;
 
     group_size_map_["tp"] = tp;
     group_size_map_["sp"] = sp;
     group_size_map_["cfg"] = cfg;
+    group_size_map_["dp"] = dp;
 
     auto full_order = group_order;
     for (const auto& group_size_pair : group_size_map_) {
@@ -56,11 +58,12 @@ class RankGenerator {
     }
 
     LOG(INFO) << "RankGenerator initialized with tp=" << tp << ", sp=" << sp
-              << ", cfg=" << cfg << ", order=" << group_order_
+              << ", cfg=" << cfg << ", dp=" << dp << ", order=" << group_order_
               << ", world_size=" << world_size_;
     print_ranks("cfg");
     print_ranks("tp");
     print_ranks("sp");
+    print_ranks("dp");
   }
 
   std::vector<std::vector<int32_t>> get_ranks(const std::string& group_query) {
@@ -84,6 +87,7 @@ class RankGenerator {
   int32_t get_tp() const { return tp_; }
   int32_t get_sp() const { return sp_; }
   int32_t get_cfg() const { return cfg_; }
+  int32_t get_dp() const { return dp_; }
 
   void print_ranks(const std::string& group_query) {
     auto ranks = get_ranks(group_query);
@@ -243,6 +247,7 @@ class RankGenerator {
   int32_t tp_;
   int32_t sp_;
   int32_t cfg_;
+  int32_t dp_;
   int32_t rank_offset_;
   int32_t world_size_;
   std::string group_order_;

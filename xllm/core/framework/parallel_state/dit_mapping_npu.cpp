@@ -26,32 +26,40 @@ DiTMappingNPU::DiTMappingNPU(const int32_t world_size,
   tp_.backend("hccl");
   sp_.backend("hccl");
   cfg_.backend("hccl");
+  dp_.backend("hccl");
   parse_parallel_info();
   validate();
   rank_generator_ =
       std::make_unique<RankGenerator>(tp_.group_size(),
                                       sp_.group_size(),
                                       cfg_.group_size(),
-                                      /*group_order=*/"tp-sp-cfg");
-  get_group_by_type(tp_, "tp");
-  get_group_by_type(sp_, "sp");
-  get_group_by_type(cfg_, "cfg");
+                                      dp_.group_size(),
+                                      /*group_order=*/"tp-sp-cfg-dp");
+  set_group_by_type(tp_, "tp");
+  set_group_by_type(sp_, "sp");
+  set_group_by_type(cfg_, "cfg");
+  set_group_by_type(dp_, "dp");
 }
 
 void DiTMappingNPU::parse_parallel_info() {
-  if (options_.cfg_size() != -1) {
-    cfg_.group_size(options_.cfg_size());
-  }
   if (options_.tp_size() != -1) {
     tp_.group_size(options_.tp_size());
   }
   if (options_.sp_size() != -1) {
     sp_.group_size(options_.sp_size());
   }
+  if (options_.cfg_size() != -1) {
+    cfg_.group_size(options_.cfg_size());
+  }
+  if (options_.dp_size() != -1) {
+    dp_.group_size(options_.dp_size());
+  }
 }
 
 void DiTMappingNPU::validate() {
-  CHECK(cfg_.group_size() * tp_.group_size() * sp_.group_size() == world_size_)
+  CHECK(cfg_.group_size() * tp_.group_size() * sp_.group_size() *
+            dp_.group_size() ==
+        world_size_)
       << "World size must equal to cfg_size * tp_size * sp_size. "
          "cfg_size is " +
              std::to_string(cfg_.group_size()) +
@@ -62,10 +70,13 @@ void DiTMappingNPU::validate() {
              "sp_size is " +
              std::to_string(sp_.group_size()) +
              ". "
+             "dp_size is " +
+             std::to_string(dp_.group_size()) +
+             ". "
              "world_size is " +
              std::to_string(world_size_) +
              ". "
-             "Please check `cfg`, `tp`, `sp` and `world_size`.";
+             "Please check `cfg`, `tp`, `sp`, `dp` and `world_size`.";
 
   CHECK(cfg_.group_size() <= 2) << "cfg_size must less than 2 "
                                    "cfg_size is " +
@@ -73,7 +84,7 @@ void DiTMappingNPU::validate() {
                                        ". Please check `cfg` .";
 }
 
-void DiTMappingNPU::get_group_by_type(ParallelInfo& parallel_info,
+void DiTMappingNPU::set_group_by_type(ParallelInfo& parallel_info,
                                       const std::string& group_type) {
   auto rank_per_group = rank_generator_->get_ranks(group_type);
   parallel_info.rank_per_group(rank_per_group);
@@ -99,6 +110,21 @@ std::tuple<int32_t, int32_t> DiTMappingNPU::get_current_group_id(
   return std::make_tuple(-1, -1);
 }
 
+const ParallelInfo& DiTMappingNPU::get_parallel_info(
+    const std::string& group_type) const {
+  if (group_type == "tp") {
+    return tp_;
+  } else if (group_type == "sp") {
+    return sp_;
+  } else if (group_type == "cfg") {
+    return cfg_;
+  } else if (group_type == "dp") {
+    return dp_;
+  } else {
+    LOG(ERROR) << "get unexpected group_type: " << group_type;
+  }
+}
+
 nlohmann::json DiTMappingNPU::to_json() {
   nlohmann::json data;
 
@@ -110,6 +136,7 @@ nlohmann::json DiTMappingNPU::to_json() {
   data["sp"] = sp_.to_json();
   data["tp"] = tp_.to_json();
   data["cfg"] = cfg_.to_json();
+  data["dp"] = dp_.to_json();
   return data;
 }
 

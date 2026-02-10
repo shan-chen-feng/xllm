@@ -93,10 +93,12 @@ bool DiTWorker::init_model(const std::string& model_weights_path) {
   dtype_ = util::parse_dtype(loader->get_torch_dtype(), device_);
 
   auto tensor_options = torch::dtype(dtype_).device(device_);
+  DiTCacheConfig cache_config = parse_dit_cache_from_flags();
   context_ = DiTModelContext(parallel_args_,
                              std::move(loader->get_model_args()),
                              std::move(loader->get_quant_args()),
                              tensor_options,
+                             cache_config,
                              options_.model_id());
 
   dit_model_ = create_dit_model(context_);
@@ -106,7 +108,7 @@ bool DiTWorker::init_model(const std::string& model_weights_path) {
   dit_model_executor_ =
       std::make_unique<DiTExecutor>(dit_model_.get(), options_);
 
-  DiTCacheConfig cache_config = parse_dit_cache_from_flags();
+  // DiTCacheConfig cache_config = parse_dit_cache_from_flags();
   DiTCache::get_instance().init(cache_config);
 
   return true;

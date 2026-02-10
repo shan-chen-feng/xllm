@@ -35,6 +35,17 @@ class DiTCache {
 
   bool init(const DiTCacheConfig& cfg);
 
+  DiTCache(const DiTCacheConfig& cfg) {
+    active_cache_ = create_dit_cache(cfg);
+    active_cond_cache_ = create_dit_cache(cfg);
+    if (!active_cache_ || !active_cond_cache_) {
+      LOG(ERROR) << "failed to initialized dit cache, "
+                    "please check your config";
+    }
+    active_cache_->init(cfg);
+    active_cond_cache_->init(cfg);
+  }
+
   bool on_before_block(const CacheBlockIn& blockin);
   CacheBlockOut on_after_block(const CacheBlockIn& blockin);
 

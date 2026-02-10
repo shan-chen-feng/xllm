@@ -132,13 +132,39 @@ void ProcessGroupImpl::init_dit_group_mapping() {
   DiTMappingNPU::Options dit_mapping_options;
   dit_mapping_options.tp_size(FLAGS_dit_tp_size)
       .sp_size(FLAGS_dit_sp_size)
-      .cfg_size(FLAGS_dit_cfg_size);
+      .cfg_size(FLAGS_dit_cfg_size)
+      .dp_size(FLAGS_dit_dp_size);
   dit_mapping_npu_ =
       std::make_unique<DiTMappingNPU>(world_size_, rank_, dit_mapping_options);
 }
 
+std::vector<uint32_t> ProcessGroupImpl::get_rank_per_group(
+    const std::string& group_type) {
+  auto cfg_parallel_info = dit_mapping_npu_->get_parallel_info(group_type);
+  auto group_id = cfg_parallel_info.current_group_id();
+
+  auto& rank_per_group_int = cfg_parallel_info.rank_per_group()[group_id];
+  std::vector<uint32_t> rank_per_group_uint(rank_per_group_int.size());
+  std::transform(rank_per_group_int.begin(),
+                 rank_per_group_int.end(),
+                 rank_per_group_uint.begin(),
+                 [](int rank) { return static_cast<uint32_t>(rank); });
+  return rank_per_group_uint;
+}
+
 void ProcessGroupImpl::allgather(const torch::Tensor& input,
                                  std::vector<torch::Tensor>& outputs) {
+  auto rank_per_group = get_rank_per_group("cfg");
+  auto cfg_parallel_info = dit_mapping_npu_->get_parallel_info("cfg");
+  std::string commDomain =
+      npu_comm_manager_->GetCommDomain(cfg_parallel_info.current_group_id(),
+                                       rank_per_group,
+                                       cfg_parallel_info.rank(),
+                                       cfg_parallel_info.backend(),
+                                       cfg_parallel_info.buffer_size(),
+                                       /*streamId=*/0);
+  HcclComm hcclComm = npu_comm_manager_->GetCommPtr(commDomain);
+
   CHECK_EQ(input.device(), device())
       << "input should be on the same device as the process group";
   CHECK_EQ(outputs.size(), world_size())
@@ -167,7 +193,7 @@ void ProcessGroupImpl::allgather(const torch::Tensor& input,
       /*recvbuff=*/flattened_output.data_ptr(),
       /*sendcount=*/count,
       /*datatype=*/data_type,
-      /*comm=*/comm_,
+      /*comm=*/hcclComm,
       /*stream=*/comm_stream_.stream()));
 
   auto done = std::make_shared<c10_npu::NPUEvent>();

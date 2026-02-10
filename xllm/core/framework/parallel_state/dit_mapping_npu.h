@@ -30,8 +30,10 @@ class DiTMappingNPU final {
     PROPERTY(int32_t, cfg_size) = -1;
     // tp size
     PROPERTY(int32_t, tp_size) = -1;
-    // sp size (dont support now)
+    // sp size
     PROPERTY(int32_t, sp_size) = -1;
+    // dp size
+    PROPERTY(int32_t, dp_size) = -1;
   };
 
   DiTMappingNPU(const int32_t world_size,
@@ -44,12 +46,14 @@ class DiTMappingNPU final {
 
   void validate();
 
-  void get_group_by_type(ParallelInfo& parallel_info,
+  void set_group_by_type(ParallelInfo& parallel_info,
                          const std::string& group_type);
 
   std::tuple<int32_t, int32_t> get_current_group_id(
       const std::vector<std::vector<int>>& rank_per_group,
       int target_rank_id);
+
+  const ParallelInfo& get_parallel_info(const std::string& group_type) const;
 
   nlohmann::json to_json();
 
@@ -62,6 +66,7 @@ class DiTMappingNPU final {
   ParallelInfo sp_ = ParallelInfo();
   ParallelInfo tp_ = ParallelInfo();
   ParallelInfo cfg_ = ParallelInfo();
+  ParallelInfo dp_ = ParallelInfo();
   std::unique_ptr<RankGenerator> rank_generator_{nullptr};
 };
 }  // namespace xllm

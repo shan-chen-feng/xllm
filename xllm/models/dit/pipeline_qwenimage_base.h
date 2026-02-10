@@ -24,6 +24,7 @@ limitations under the License.
 #include "autoencoder_kl_qwenimage.h"
 #include "clip_text_model.h"
 #include "core/common/global_flags.h"
+#include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/model_context.h"

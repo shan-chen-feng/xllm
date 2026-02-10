@@ -54,6 +54,8 @@ class ProcessGroupImpl : public ProcessGroup {
 
   void init_dit_group_mapping();
 
+  std::vector<uint32_t> get_rank_per_group(const std::string& group_type);
+
  private:
   HcclComm comm_ = nullptr;
   c10_npu::NPUStream comm_stream_;
