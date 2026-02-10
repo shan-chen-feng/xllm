@@ -1456,9 +1456,31 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     if (attn_->use_sp_) {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           sp_qkv_matmul(hidden_states, encoder_hidden_states);
+    // 将注意力张量转移到CPU并保存到本地文件，文件后缀为当前rank
+    auto save_tensor = [this](const torch::Tensor& tensor, const std::string& name) {
+        if (tensor.defined()) {
+            torch::Tensor cpu_tensor = tensor.cpu();
+            std::string filename = name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
+            torch::save(cpu_tensor, filename);
+        }
+    };
+
+    save_tensor(img_query, "img_query");
+    save_tensor(img_key, "img_key");
+    save_tensor(img_value, "img_value");
+    save_tensor(txt_query, "txt_query");
+    save_tensor(txt_key, "txt_key");
+    save_tensor(txt_value, "txt_value");
     } else {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           qkv_matmul(hidden_states, encoder_hidden_states);
+    // 将张量转移到CPU并保存到本地
+    img_query.cpu().save("img_query.pt");
+    img_key.cpu().save("img_key.pt");
+    img_value.cpu().save("img_value.pt");
+    txt_query.cpu().save("txt_query.pt");
+    txt_key.cpu().save("txt_key.pt");
+    txt_value.cpu().save("txt_value.pt");
     }
 
     // Apply QK normalization
@@ -2036,8 +2058,8 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     int rank_ = pg_.rank();
     
     // 保存new_hidden_states和new_encoder_hidden_states到本地
-    torch::save(new_hidden_states, "new_hidden_states_before.pt");
-    torch::save(new_encoder_hidden_states, "new_encoder_hidden_states_before.pt");
+    torch::save(new_hidden_states.cpu(), "new_hidden_states_before.pt");
+    torch::save(new_encoder_hidden_states.cpu(), "new_encoder_hidden_states_before.pt");
     if (use_sp_) {
       // split the sequence for hidden_states and the encoder_hidden_states
       int32_t seq_len, encoder_seq_len;
@@ -2085,8 +2107,9 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
           new_encoder_hidden_states, world_size_, 1, encoder_pad_, pg_);
     }
     // 保存new_hidden_states和new_encoder_hidden_states到本地
-    torch::save(new_hidden_states, "new_hidden_states_after.pt");
-    torch::save(new_encoder_hidden_states, "new_encoder_hidden_states_after.pt");
+// 将张量转移到CPU后保存
+torch::save(new_hidden_states.cpu(), "new_hidden_states_after.pt");
+    torch::save(new_encoder_hidden_states.cpu(), "new_encoder_hidden_states_after.pt");
 
     if (zero_cond_t_) {
       temb = temb.chunk(2, 0)[0];
