@@ -1360,6 +1360,17 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     // img_query = img_query.unflatten(-1, reshape_dims);
     img_query = img_query.view({bs_img, -1, heads, head_dim});
+    auto save_tensor = [this](const torch::Tensor& tensor,
+                                const std::string& name) {
+        if (tensor.defined()) {
+          torch::Tensor cpu_tensor = tensor.cpu();
+          std::string filename =
+              name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
+          torch::save(cpu_tensor, filename);
+        }
+      };
+
+    save_tensor(img_query, "sp/img_querymm");
     auto handle_iq = parallel_state::all_to_all_4D(
         img_query, rank_, world_size_, 2, 1, false, pg_);
     auto img_key = attn_->to_k_->forward(hidden_states);
@@ -1424,6 +1435,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     int64_t heads = attn_->heads_;
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     img_query = img_query.unflatten(-1, reshape_dims);
+    torch::save(img_query.cpu(), "tp1/img_querymm.pt");
 
     auto img_key = attn_->to_k_->forward(hidden_states);
     img_key = img_key.unflatten(-1, reshape_dims);
@@ -1456,31 +1468,33 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     if (attn_->use_sp_) {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           sp_qkv_matmul(hidden_states, encoder_hidden_states);
-    // 将注意力张量转移到CPU并保存到本地文件，文件后缀为当前rank
-    auto save_tensor = [this](const torch::Tensor& tensor, const std::string& name) {
+      // 将注意力张量转移到CPU并保存到本地文件，文件后缀为当前rank
+      auto save_tensor = [this](const torch::Tensor& tensor,
+                                const std::string& name) {
         if (tensor.defined()) {
-            torch::Tensor cpu_tensor = tensor.cpu();
-            std::string filename = name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
-            torch::save(cpu_tensor, filename);
+          torch::Tensor cpu_tensor = tensor.cpu();
+          std::string filename =
+              name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
+          torch::save(cpu_tensor, filename);
         }
-    };
+      };
 
-    save_tensor(img_query, "img_query");
-    save_tensor(img_key, "img_key");
-    save_tensor(img_value, "img_value");
-    save_tensor(txt_query, "txt_query");
-    save_tensor(txt_key, "txt_key");
-    save_tensor(txt_value, "txt_value");
+      save_tensor(img_query, "sp/img_query");
+      save_tensor(img_key, "sp/img_key");
+      save_tensor(img_value, "sp/img_value");
+      save_tensor(txt_query, "sp/txt_query");
+      save_tensor(txt_key, "sp/txt_key");
+      save_tensor(txt_value, "sp/txt_value");
     } else {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           qkv_matmul(hidden_states, encoder_hidden_states);
-    // 将张量转移到CPU并保存到本地
-torch::save(img_query.cpu(), "img_query.pt");
-torch::save(img_key.cpu(), "img_key.pt");
-torch::save(img_value.cpu(), "img_value.pt");
-torch::save(txt_query.cpu(), "txt_query.pt");
-torch::save(txt_key.cpu(), "txt_key.pt");
-torch::save(txt_value.cpu(), "txt_value.pt");
+      // 将张量转移到CPU并保存到本地
+      torch::save(img_query.cpu(), "tp1/img_query.pt");
+      torch::save(img_key.cpu(), "tp1/img_key.pt");
+      torch::save(img_value.cpu(), "tp1/img_value.pt");
+      torch::save(txt_query.cpu(), "tp1/txt_query.pt");
+      torch::save(txt_key.cpu(), "tp1/txt_key.pt");
+      torch::save(txt_value.cpu(), "tp1/txt_value.pt");
     }
 
     // Apply QK normalization
@@ -2056,10 +2070,11 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
 
     int world_size_ = pg_.world_size();
     int rank_ = pg_.rank();
-    
+
     // 保存new_hidden_states和new_encoder_hidden_states到本地
     torch::save(new_hidden_states.cpu(), "new_hidden_states_before.pt");
-    torch::save(new_encoder_hidden_states.cpu(), "new_encoder_hidden_states_before.pt");
+    torch::save(new_encoder_hidden_states.cpu(),
+                "new_encoder_hidden_states_before.pt");
     if (use_sp_) {
       // split the sequence for hidden_states and the encoder_hidden_states
       int32_t seq_len, encoder_seq_len;
@@ -2076,8 +2091,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       modulate_index = split_sequence(modulate_index, world_size_, rank_, 1, 0);
     }
     // for (int64_t index_block = 0; index_block < transformer_blocks_->size();
-    for (int64_t index_block = 0; index_block < 1;
-         ++index_block) {
+    for (int64_t index_block = 0; index_block < 1; ++index_block) {
       if (use_sp_) {
         transformer_blocks_[index_block]
             ->as<QwenImageTransformerBlock>()
@@ -2105,11 +2119,16 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
           gather_sequence(new_hidden_states, world_size_, 1, pad_, pg_);
       new_encoder_hidden_states = gather_sequence(
           new_encoder_hidden_states, world_size_, 1, encoder_pad_, pg_);
+      torch::save(new_hidden_states.cpu(), "sp/new_hidden_states_after.pt");
+      torch::save(new_encoder_hidden_states.cpu(),
+                  "sp/new_encoder_hidden_states_after.pt");
+    } else {
+      // 保存new_hidden_states和new_encoder_hidden_states到本地
+      // 将张量转移到CPU后保存
+      torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_after.pt");
+      torch::save(new_encoder_hidden_states.cpu(),
+                  "tp1/new_encoder_hidden_states_after.pt");
     }
-    // 保存new_hidden_states和new_encoder_hidden_states到本地
-// 将张量转移到CPU后保存
-torch::save(new_hidden_states.cpu(), "new_hidden_states_after.pt");
-    torch::save(new_encoder_hidden_states.cpu(), "new_encoder_hidden_states_after.pt");
 
     if (zero_cond_t_) {
       temb = temb.chunk(2, 0)[0];
