@@ -1475,12 +1475,12 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           qkv_matmul(hidden_states, encoder_hidden_states);
     // 将张量转移到CPU并保存到本地
-    img_query.cpu().save("img_query.pt");
-    img_key.cpu().save("img_key.pt");
-    img_value.cpu().save("img_value.pt");
-    txt_query.cpu().save("txt_query.pt");
-    txt_key.cpu().save("txt_key.pt");
-    txt_value.cpu().save("txt_value.pt");
+torch::save(img_query.cpu(), "img_query.pt");
+torch::save(img_key.cpu(), "img_key.pt");
+torch::save(img_value.cpu(), "img_value.pt");
+torch::save(txt_query.cpu(), "txt_query.pt");
+torch::save(txt_key.cpu(), "txt_key.pt");
+torch::save(txt_value.cpu(), "txt_value.pt");
     }
 
     // Apply QK normalization
