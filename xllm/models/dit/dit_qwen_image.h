@@ -1983,7 +1983,7 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
         if (tensor.defined()) {
           torch::Tensor cpu_tensor = tensor.cpu();
           std::string filename =
-              name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
+              name + "_rank_" + std::to_string(attn_processor_->attn_->rank_) + ".pt";
           torch::save(cpu_tensor, filename);
         }
       };
