@@ -1994,11 +1994,11 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
       save_tensor(img_modulated, "sp/img_modulated");
       save_tensor(txt_modulated, "sp/txt_modulated");
     } else {
-      torch::save(modulate_index_, "tp1/modulate_index.pt");
-      torch::save(hidden_states_, "tp1/hidden_states_block.pt");
-      torch::save(encoder_hidden_states_, "tp1/encoder_hidden_states_block.pt");
-      torch::save(img_modulated, "tp1/img_modulated.pt");
-      torch::save(txt_modulated, "tp1/txt_modulated.pt");
+      torch::save(modulate_index_.cpu(), "tp1/modulate_index.pt");
+      torch::save(hidden_states_.cpu(), "tp1/hidden_states_block.pt");
+      torch::save(encoder_hidden_states_.cpu(), "tp1/encoder_hidden_states_block.pt");
+      torch::save(img_modulated.cpu(), "tp1/img_modulated.pt");
+      torch::save(txt_modulated.cpu(), "tp1/txt_modulated.pt");
     }
 
     // Use QwenAttnProcessor2_0 for joint attention computation
