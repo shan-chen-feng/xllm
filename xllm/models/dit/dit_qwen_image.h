@@ -2368,7 +2368,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
             ->set_img_pad_(pad_);
       }
       if (use_sp_) {
-        auto save_tensor = [this](const torch::Tensor& tensor,
+        auto save_tensor = [this,index_block](const torch::Tensor& tensor,
                                 const std::string& name) {
         if (tensor.defined()) {
           torch::Tensor cpu_tensor = tensor.cpu();
