@@ -2245,9 +2245,9 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     int rank_ = pg_.rank();
 
     // 保存new_hidden_states和new_encoder_hidden_states到本地
-    // torch::save(new_hidden_states.cpu(), "new_hidden_states_before.pt");
-    // torch::save(new_encoder_hidden_states.cpu(),
-    // "new_encoder_hidden_states_before.pt");
+    torch::save(new_hidden_states.cpu(), "new_hidden_states_before.pt");
+    torch::save(new_encoder_hidden_states.cpu(),
+    "new_encoder_hidden_states_before.pt");
     if (use_sp_) {
       // split the sequence for hidden_states and the encoder_hidden_states
       int32_t seq_len, encoder_seq_len;
