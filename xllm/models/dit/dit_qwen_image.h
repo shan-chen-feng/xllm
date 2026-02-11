@@ -83,6 +83,7 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
 
   torch::Tensor input = input_;
   if (pad > 0) {
+    LOG(INFO) << "split_sequence: dim=" << dim << ", pad=" << pad;
     std::vector<int64_t> pad_size(input.sizes().begin(), input.sizes().end());
     pad_size[dim] = pad;
     input = torch::cat(
@@ -92,9 +93,7 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
         dim);
   }
 
-  int64_t dim_size = input.size(dim);
-
-  auto tensor_list = torch::split(input, dim_size / world_size, dim);
+  auto tensor_list = torch::chunk(input, world_size, dim);
   auto output = tensor_list[rank].contiguous();
   return output;
 }
