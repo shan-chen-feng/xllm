@@ -1758,7 +1758,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
   int get_text_pad_() { return attn_->text_pad_; }
 
- private:
+//  private:
   Attention attn_{nullptr};
 };
 TORCH_MODULE(QwenDoubleStreamAttnProcessor2_0);
@@ -1976,6 +1976,20 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     torch::Tensor txt_modulated, txt_gate1;
     std::tie(txt_modulated, txt_gate1) =
         txt_norm1_->forward(encoder_hidden_states_, txt_mod1);
+
+    if (attn_processor_->attn_->use_sp_) {
+      torch::save(modulate_index_, "sp/modulate_index");
+      torch::save(hidden_states_, "sp/hidden_states_block");
+      torch::save(encoder_hidden_states_, "sp/encoder_hidden_states_block");
+      torch::save(img_modulated, "sp/img_modulated");
+      torch::save(txt_modulated, "sp/txt_modulated");
+    } else {
+      torch::save(modulate_index_, "tp1/modulate_index");
+      torch::save(hidden_states_, "tp1/hidden_states_block");
+      torch::save(encoder_hidden_states_, "tp1/encoder_hidden_states_block");
+      torch::save(img_modulated, "tp1/img_modulated");
+      torch::save(txt_modulated, "tp1/txt_modulated");
+    }
 
     // Use QwenAttnProcessor2_0 for joint attention computation
     auto attn_output = attn_processor_->forward(img_modulated,  // Image stream
@@ -2235,7 +2249,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
           split_sequence(new_hidden_states, world_size_, rank_, 1, pad_);
       new_encoder_hidden_states = split_sequence(
           new_encoder_hidden_states, world_size_, rank_, 1, encoder_pad_);
-      modulate_index = split_sequence(modulate_index, world_size_, rank_, 1, 0);
+      modulate_index = split_sequence(modulate_index, world_size_, rank_, 1, pad_);
     }
     // for (int64_t index_block = 0; index_block < transformer_blocks_->size();
     //      ++index_block) {
