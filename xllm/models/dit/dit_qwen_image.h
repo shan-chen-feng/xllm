@@ -80,7 +80,7 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
   if (world_size == 1) {
     return input_;
   }
-  
+
   torch::Tensor input = input_;
   torch::save(input.cpu(), "sp/input_rank_" + std::to_string(rank) + ".pt");
   if (pad > 0) {
@@ -97,7 +97,7 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
   auto tensor_list = torch::chunk(input, world_size, dim);
   auto output = tensor_list[rank].contiguous();
   torch::save(output.cpu(), "sp/output_rank_" + std::to_string(rank) + ".pt");
-  
+
   return output;
 }
 
@@ -1344,9 +1344,11 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
              torch::Tensor>
   sp_qkv_matmul(const torch::Tensor& hidden_states,
                 const torch::Tensor& encoder_hidden_states) {
-    // std::cout << "[DEBUG sp_qkv_matmul] Input hidden_states shape: " << hidden_states.sizes() << std::endl;
-    // std::cout << "[DEBUG sp_qkv_matmul] Input encoder_hidden_states shape: " << encoder_hidden_states.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] Input hidden_states shape: " <<
+    // hidden_states.sizes() << std::endl; std::cout << "[DEBUG sp_qkv_matmul]
+    // Input encoder_hidden_states shape: " << encoder_hidden_states.sizes() <<
+    // std::endl;
+
     int64_t seq_txt = encoder_hidden_states.size(1);
     int64_t seq_img = hidden_states.size(1);
     auto pg_ = attn_->pg_.process_group_;
@@ -1361,16 +1363,17 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
     // Compute QKV for image stream (sample projections)
     auto img_query = attn_->to_q_->forward(hidden_states);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_query after to_q forward shape: " << img_query.sizes() << std::endl;
+    // std::cout << "[DEBUG sp_qkv_matmul] img_query after to_q forward shape: "
+    // << img_query.sizes() << std::endl;
     auto save_tensor = [this](const torch::Tensor& tensor,
-                                const std::string& name) {
-        if (tensor.defined()) {
-          torch::Tensor cpu_tensor = tensor.cpu();
-          std::string filename =
-              name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
-          torch::save(cpu_tensor, filename);
-        }
-      };
+                              const std::string& name) {
+      if (tensor.defined()) {
+        torch::Tensor cpu_tensor = tensor.cpu();
+        std::string filename =
+            name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
+        torch::save(cpu_tensor, filename);
+      }
+    };
 
     save_tensor(hidden_states, "sp/hidden_states");
 
@@ -1379,113 +1382,145 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     img_query = img_query.view({bs_img, -1, heads, head_dim});
     save_tensor(img_query, "sp/img_querymm");
 
-    // std::cout << "[DEBUG sp_qkv_matmul] img_query after view shape: " << img_query.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] img_query after view shape: " <<
+    // img_query.sizes() << std::endl;
+
     auto handle_iq = parallel_state::all_to_all_4D(
         img_query, rank_, world_size_, 2, 1, false, pg_);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_query before all_to_all_4D shape: " << img_query.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] img_query before all_to_all_4D shape:
+    // " << img_query.sizes() << std::endl;
+
     auto img_key = attn_->to_k_->forward(hidden_states);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_key after to_k forward shape: " << img_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] img_key after to_k forward shape: "
+    // << img_key.sizes() << std::endl;
+
     // img_key = img_key.unflatten(-1, reshape_dims);
     img_key = img_key.view({bs_img, -1, heads, head_dim});
-    // std::cout << "[DEBUG sp_qkv_matmul] img_key after view shape: " << img_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] img_key after view shape: " <<
+    // img_key.sizes() << std::endl;
+
     img_query = parallel_state::all_to_all_4D_post2(handle_iq);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_query after all_to_all_4D_post2 shape: " << img_query.sizes() << std::endl;
+    // std::cout << "[DEBUG sp_qkv_matmul] img_query after all_to_all_4D_post2
+    // shape: " << img_query.sizes() << std::endl;
     save_tensor(img_query, "sp/img_query_a2a");
-    
+
     auto handle_ik = parallel_state::all_to_all_4D(
         img_key, rank_, world_size_, 2, 1, false, pg_);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_key before all_to_all_4D shape: " << img_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] img_key before all_to_all_4D shape: "
+    // << img_key.sizes() << std::endl;
+
     auto img_value = attn_->to_v_->forward(hidden_states);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_value after to_v forward shape: " << img_value.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] img_value after to_v forward shape: "
+    // << img_value.sizes() << std::endl;
+
     // img_value = img_value.unflatten(-1, reshape_dims);
     img_value = img_value.view({bs_img, -1, heads, head_dim});
-    // std::cout << "[DEBUG sp_qkv_matmul] img_value after view shape: " << img_value.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] img_value after view shape: " <<
+    // img_value.sizes() << std::endl;
+
     img_key = parallel_state::all_to_all_4D_post2(handle_ik);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_key after all_to_all_4D_post2 shape: " << img_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] img_key after all_to_all_4D_post2
+    // shape: " << img_key.sizes() << std::endl;
+
     auto handle_iv = parallel_state::all_to_all_4D(
         img_value, rank_, world_size_, 2, 1, false, pg_);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_value before all_to_all_4D shape: " << img_value.sizes() << std::endl;
+    // std::cout << "[DEBUG sp_qkv_matmul] img_value before all_to_all_4D shape:
+    // " << img_value.sizes() << std::endl;
 
     // Compute QKV for text stream (context projections)
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_query after add_q_proj forward shape: " << txt_query.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_query after add_q_proj forward
+    // shape: " << txt_query.sizes() << std::endl;
+
     // txt_query = txt_query.unflatten(-1, reshape_dims);
     txt_query = txt_query.view({bs_img, -1, heads, head_dim});
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_query after view shape: " << txt_query.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_query after view shape: " <<
+    // txt_query.sizes() << std::endl;
+
     img_value = parallel_state::all_to_all_4D_post2(handle_iv);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_value after all_to_all_4D_post2 shape: " << img_value.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] img_value after all_to_all_4D_post2
+    // shape: " << img_value.sizes() << std::endl;
+
     auto handle_tq = parallel_state::all_to_all_4D(
         txt_query, rank_, world_size_, 2, 1, false, pg_);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_query before all_to_all_4D shape: " << txt_query.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_query before all_to_all_4D shape:
+    // " << txt_query.sizes() << std::endl;
+
     auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_key after add_k_proj forward shape: " << txt_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_key after add_k_proj forward
+    // shape: " << txt_key.sizes() << std::endl;
+
     // txt_key = txt_key.unflatten(-1, reshape_dims);
     txt_key = txt_key.view({bs_img, -1, heads, head_dim});
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_key after view shape: " << txt_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_key after view shape: " <<
+    // txt_key.sizes() << std::endl;
+
     txt_query = parallel_state::all_to_all_4D_post2(handle_tq);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_query after all_to_all_4D_post2 shape: " << txt_query.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_query after all_to_all_4D_post2
+    // shape: " << txt_query.sizes() << std::endl;
+
     auto handle_tk = parallel_state::all_to_all_4D(
         txt_key, rank_, world_size_, 2, 1, false, pg_);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_key before all_to_all_4D shape: " << txt_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_key before all_to_all_4D shape: "
+    // << txt_key.sizes() << std::endl;
+
     auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_value after add_v_proj forward shape: " << txt_value.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_value after add_v_proj forward
+    // shape: " << txt_value.sizes() << std::endl;
+
     // txt_value = txt_value.unflatten(-1, reshape_dims);
     txt_value = txt_value.view({bs_img, -1, heads, head_dim});
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_value after view shape: " << txt_value.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_value after view shape: " <<
+    // txt_value.sizes() << std::endl;
+
     txt_key = parallel_state::all_to_all_4D_post2(handle_tk);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_key after all_to_all_4D_post2 shape: " << txt_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_key after all_to_all_4D_post2
+    // shape: " << txt_key.sizes() << std::endl;
+
     auto handle_tv = parallel_state::all_to_all_4D(
         txt_value, rank_, world_size_, 2, 1, false, pg_);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_value before all_to_all_4D shape: " << txt_value.sizes() << std::endl;
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_value before all_to_all_4D shape:
+    // " << txt_value.sizes() << std::endl;
 
     // sp unpad
     img_query = unpad_sequence(img_query, 1, attn_->img_pad_);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_query after unpad_sequence shape: " << img_query.sizes() << std::endl;
-    
-    img_key = unpad_sequence(img_key, 1, attn_->img_pad_);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_key after unpad_sequence shape: " << img_key.sizes() << std::endl;
-    
-    img_value = unpad_sequence(img_value, 1, attn_->img_pad_);
-    // std::cout << "[DEBUG sp_qkv_matmul] img_value after unpad_sequence shape: " << img_value.sizes() << std::endl;
-    
-    txt_query = unpad_sequence(txt_query, 1, attn_->text_pad_);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_query after unpad_sequence shape: " << txt_query.sizes() << std::endl;
-    
-    txt_key = unpad_sequence(txt_key, 1, attn_->text_pad_);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_key after unpad_sequence shape: " << txt_key.sizes() << std::endl;
-    
-    txt_value = parallel_state::all_to_all_4D_post2(handle_tv);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_value after all_to_all_4D_post2 shape: " << txt_value.sizes() << std::endl;
-    
-    txt_value = unpad_sequence(txt_value, 1, attn_->text_pad_);
-    // std::cout << "[DEBUG sp_qkv_matmul] txt_value after unpad_sequence shape: " << txt_value.sizes() << std::endl;
+    // std::cout << "[DEBUG sp_qkv_matmul] img_query after unpad_sequence shape:
+    // " << img_query.sizes() << std::endl;
 
-    // std::cout << "[DEBUG sp_qkv_matmul] Final img_query shape: " << img_query.sizes() << std::endl;
-    // std::cout << "[DEBUG sp_qkv_matmul] Final img_key shape: " << img_key.sizes() << std::endl;
-    // std::cout << "[DEBUG sp_qkv_matmul] Final img_value shape: " << img_value.sizes() << std::endl;
-    // std::cout << "[DEBUG sp_qkv_matmul] Final txt_query shape: " << txt_query.sizes() << std::endl;
-    // std::cout << "[DEBUG sp_qkv_matmul] Final txt_key shape: " << txt_key.sizes() << std::endl;
-    // std::cout << "[DEBUG sp_qkv_matmul] Final txt_value shape: " << txt_value.sizes() << std::endl;
-    
+    img_key = unpad_sequence(img_key, 1, attn_->img_pad_);
+    // std::cout << "[DEBUG sp_qkv_matmul] img_key after unpad_sequence shape: "
+    // << img_key.sizes() << std::endl;
+
+    img_value = unpad_sequence(img_value, 1, attn_->img_pad_);
+    // std::cout << "[DEBUG sp_qkv_matmul] img_value after unpad_sequence shape:
+    // " << img_value.sizes() << std::endl;
+
+    txt_query = unpad_sequence(txt_query, 1, attn_->text_pad_);
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_query after unpad_sequence shape:
+    // " << txt_query.sizes() << std::endl;
+
+    txt_key = unpad_sequence(txt_key, 1, attn_->text_pad_);
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_key after unpad_sequence shape: "
+    // << txt_key.sizes() << std::endl;
+
+    txt_value = parallel_state::all_to_all_4D_post2(handle_tv);
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_value after all_to_all_4D_post2
+    // shape: " << txt_value.sizes() << std::endl;
+
+    txt_value = unpad_sequence(txt_value, 1, attn_->text_pad_);
+    // std::cout << "[DEBUG sp_qkv_matmul] txt_value after unpad_sequence shape:
+    // " << txt_value.sizes() << std::endl;
+
+    // std::cout << "[DEBUG sp_qkv_matmul] Final img_query shape: " <<
+    // img_query.sizes() << std::endl; std::cout << "[DEBUG sp_qkv_matmul] Final
+    // img_key shape: " << img_key.sizes() << std::endl; std::cout << "[DEBUG
+    // sp_qkv_matmul] Final img_value shape: " << img_value.sizes() <<
+    // std::endl; std::cout << "[DEBUG sp_qkv_matmul] Final txt_query shape: "
+    // << txt_query.sizes() << std::endl; std::cout << "[DEBUG sp_qkv_matmul]
+    // Final txt_key shape: " << txt_key.sizes() << std::endl; std::cout <<
+    // "[DEBUG sp_qkv_matmul] Final txt_value shape: " << txt_value.sizes() <<
+    // std::endl;
+
     return std::make_tuple(
         img_query, img_key, img_value, txt_query, txt_key, txt_value);
   }
@@ -1498,61 +1533,76 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
              torch::Tensor>
   qkv_matmul(const torch::Tensor& hidden_states,
              const torch::Tensor& encoder_hidden_states) {
-    // std::cout << "[DEBUG qkv_matmul] Input hidden_states shape: " << hidden_states.sizes() << std::endl;
-    // std::cout << "[DEBUG qkv_matmul] Input encoder_hidden_states shape: " << encoder_hidden_states.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG qkv_matmul] Input hidden_states shape: " <<
+    // hidden_states.sizes() << std::endl; std::cout << "[DEBUG qkv_matmul]
+    // Input encoder_hidden_states shape: " << encoder_hidden_states.sizes() <<
+    // std::endl;
+
     int64_t seq_txt = encoder_hidden_states.size(1);
     int64_t seq_img = hidden_states.size(1);
     // Compute QKV for image stream (sample projections)
     auto img_query = attn_->to_q_->forward(hidden_states);
-    // std::cout << "[DEBUG qkv_matmul] img_query after to_q forward shape: " << img_query.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG qkv_matmul] img_query after to_q forward shape: " <<
+    // img_query.sizes() << std::endl;
 
     torch::save(hidden_states.cpu(), "tp1/hidden_states.pt");
     // Reshape for multi-head attention
     int64_t heads = attn_->heads_;
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     img_query = img_query.unflatten(-1, reshape_dims);
-    // std::cout << "[DEBUG qkv_matmul] img_query after unflatten shape: " << img_query.sizes() << std::endl;
+    // std::cout << "[DEBUG qkv_matmul] img_query after unflatten shape: " <<
+    // img_query.sizes() << std::endl;
     torch::save(img_query.cpu(), "tp1/img_querymm.pt");
     auto img_key = attn_->to_k_->forward(hidden_states);
-    // std::cout << "[DEBUG qkv_matmul] img_key after to_k forward shape: " << img_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG qkv_matmul] img_key after to_k forward shape: " <<
+    // img_key.sizes() << std::endl;
+
     img_key = img_key.unflatten(-1, reshape_dims);
-    // std::cout << "[DEBUG qkv_matmul] img_key after unflatten shape: " << img_key.sizes() << std::endl;
+    // std::cout << "[DEBUG qkv_matmul] img_key after unflatten shape: " <<
+    // img_key.sizes() << std::endl;
 
     auto img_value = attn_->to_v_->forward(hidden_states);
-    // std::cout << "[DEBUG qkv_matmul] img_value after to_v forward shape: " << img_value.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG qkv_matmul] img_value after to_v forward shape: " <<
+    // img_value.sizes() << std::endl;
+
     img_value = img_value.unflatten(-1, reshape_dims);
-    // std::cout << "[DEBUG qkv_matmul] img_value after unflatten shape: " << img_value.sizes() << std::endl;
+    // std::cout << "[DEBUG qkv_matmul] img_value after unflatten shape: " <<
+    // img_value.sizes() << std::endl;
 
     // Compute QKV for text stream (context projections)
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
-    // std::cout << "[DEBUG qkv_matmul] txt_query after add_q_proj forward shape: " << txt_query.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG qkv_matmul] txt_query after add_q_proj forward
+    // shape: " << txt_query.sizes() << std::endl;
+
     txt_query = txt_query.unflatten(-1, reshape_dims);
-    // std::cout << "[DEBUG qkv_matmul] txt_query after unflatten shape: " << txt_query.sizes() << std::endl;
+    // std::cout << "[DEBUG qkv_matmul] txt_query after unflatten shape: " <<
+    // txt_query.sizes() << std::endl;
 
     auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
-    // std::cout << "[DEBUG qkv_matmul] txt_key after add_k_proj forward shape: " << txt_key.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG qkv_matmul] txt_key after add_k_proj forward shape:
+    // " << txt_key.sizes() << std::endl;
+
     txt_key = txt_key.unflatten(-1, reshape_dims);
-    // std::cout << "[DEBUG qkv_matmul] txt_key after unflatten shape: " << txt_key.sizes() << std::endl;
+    // std::cout << "[DEBUG qkv_matmul] txt_key after unflatten shape: " <<
+    // txt_key.sizes() << std::endl;
 
     auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
-    // std::cout << "[DEBUG qkv_matmul] txt_value after add_v_proj forward shape: " << txt_value.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG qkv_matmul] txt_value after add_v_proj forward
+    // shape: " << txt_value.sizes() << std::endl;
+
     txt_value = txt_value.unflatten(-1, reshape_dims);
-    // std::cout << "[DEBUG qkv_matmul] txt_value after unflatten shape: " << txt_value.sizes() << std::endl;
-    
-    // std::cout << "[DEBUG qkv_matmul] Final img_query shape: " << img_query.sizes() << std::endl;
-    // std::cout << "[DEBUG qkv_matmul] Final img_key shape: " << img_key.sizes() << std::endl;
-    // std::cout << "[DEBUG qkv_matmul] Final img_value shape: " << img_value.sizes() << std::endl;
-    // std::cout << "[DEBUG qkv_matmul] Final txt_query shape: " << txt_query.sizes() << std::endl;
-    // std::cout << "[DEBUG qkv_matmul] Final txt_key shape: " << txt_key.sizes() << std::endl;
-    // std::cout << "[DEBUG qkv_matmul] Final txt_value shape: " << txt_value.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG qkv_matmul] txt_value after unflatten shape: " <<
+    // txt_value.sizes() << std::endl;
+
+    // std::cout << "[DEBUG qkv_matmul] Final img_query shape: " <<
+    // img_query.sizes() << std::endl; std::cout << "[DEBUG qkv_matmul] Final
+    // img_key shape: " << img_key.sizes() << std::endl; std::cout << "[DEBUG
+    // qkv_matmul] Final img_value shape: " << img_value.sizes() << std::endl;
+    // std::cout << "[DEBUG qkv_matmul] Final txt_query shape: " <<
+    // txt_query.sizes() << std::endl; std::cout << "[DEBUG qkv_matmul] Final
+    // txt_key shape: " << txt_key.sizes() << std::endl; std::cout << "[DEBUG
+    // qkv_matmul] Final txt_value shape: " << txt_value.sizes() << std::endl;
+
     return std::make_tuple(
         img_query, img_key, img_value, txt_query, txt_key, txt_value);
   }
@@ -1563,9 +1613,11 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       const torch::Tensor& encoder_hidden_states_mask = torch::Tensor(),
       const torch::Tensor& attention_mask = torch::Tensor(),
       const std::tuple<at::Tensor, at::Tensor>& image_rotary_emb = {}) {
-    // std::cout << "[DEBUG forward] Input hidden_states shape: " << hidden_states.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] Input encoder_hidden_states shape: " << encoder_hidden_states.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG forward] Input hidden_states shape: " <<
+    // hidden_states.sizes() << std::endl; std::cout << "[DEBUG forward] Input
+    // encoder_hidden_states shape: " << encoder_hidden_states.sizes() <<
+    // std::endl;
+
     torch::Tensor img_query, img_key, img_value;
     torch::Tensor txt_query, txt_key, txt_value;
     // Compute QKV projections
@@ -1600,13 +1652,16 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       torch::save(txt_key.cpu(), "tp1/txt_key.pt");
       torch::save(txt_value.cpu(), "tp1/txt_value.pt");
     }
-    
-    // std::cout << "[DEBUG forward] img_query shape after QKV matmul: " << img_query.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] img_key shape after QKV matmul: " << img_key.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] img_value shape after QKV matmul: " << img_value.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] txt_query shape after QKV matmul: " << txt_query.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] txt_key shape after QKV matmul: " << txt_key.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] txt_value shape after QKV matmul: " << txt_value.sizes() << std::endl;
+
+    // std::cout << "[DEBUG forward] img_query shape after QKV matmul: " <<
+    // img_query.sizes() << std::endl; std::cout << "[DEBUG forward] img_key
+    // shape after QKV matmul: " << img_key.sizes() << std::endl; std::cout <<
+    // "[DEBUG forward] img_value shape after QKV matmul: " << img_value.sizes()
+    // << std::endl; std::cout << "[DEBUG forward] txt_query shape after QKV
+    // matmul: " << txt_query.sizes() << std::endl; std::cout << "[DEBUG
+    // forward] txt_key shape after QKV matmul: " << txt_key.sizes() <<
+    // std::endl; std::cout << "[DEBUG forward] txt_value shape after QKV
+    // matmul: " << txt_value.sizes() << std::endl;
 
     // Apply QK normalization
     if (attn_->norm_q_) {
@@ -1621,11 +1676,13 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     if (attn_->norm_added_k_) {
       txt_key = attn_->norm_added_k_->forward(txt_key);
     }
-    
-    // std::cout << "[DEBUG forward] img_query shape after normalization: " << img_query.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] img_key shape after normalization: " << img_key.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] txt_query shape after normalization: " << txt_query.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] txt_key shape after normalization: " << txt_key.sizes() << std::endl;
+
+    // std::cout << "[DEBUG forward] img_query shape after normalization: " <<
+    // img_query.sizes() << std::endl; std::cout << "[DEBUG forward] img_key
+    // shape after normalization: " << img_key.sizes() << std::endl; std::cout
+    // << "[DEBUG forward] txt_query shape after normalization: " <<
+    // txt_query.sizes() << std::endl; std::cout << "[DEBUG forward] txt_key
+    // shape after normalization: " << txt_key.sizes() << std::endl;
 
     // Apply RoPE if provided
     auto img_freqs = std::get<0>(image_rotary_emb);
@@ -1635,20 +1692,24 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     img_key = apply_rotary_emb_qwen(img_key, img_freqs, false);
     txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, false);
     txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, false);
-    
-    // std::cout << "[DEBUG forward] img_query shape after RoPE: " << img_query.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] img_key shape after RoPE: " << img_key.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] txt_query shape after RoPE: " << txt_query.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] txt_key shape after RoPE: " << txt_key.sizes() << std::endl;
+
+    // std::cout << "[DEBUG forward] img_query shape after RoPE: " <<
+    // img_query.sizes() << std::endl; std::cout << "[DEBUG forward] img_key
+    // shape after RoPE: " << img_key.sizes() << std::endl; std::cout << "[DEBUG
+    // forward] txt_query shape after RoPE: " << txt_query.sizes() << std::endl;
+    // std::cout << "[DEBUG forward] txt_key shape after RoPE: " <<
+    // txt_key.sizes() << std::endl;
 
     // Concatenate for joint attention - Order: [text, image]
     auto joint_query = torch::cat({txt_query, img_query}, 1);
     auto joint_key = torch::cat({txt_key, img_key}, 1);
     auto joint_value = torch::cat({txt_value, img_value}, 1);
-    
-    // std::cout << "[DEBUG forward] joint_query shape after concatenation: " << joint_query.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] joint_key shape after concatenation: " << joint_key.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] joint_value shape after concatenation: " << joint_value.sizes() << std::endl;
+
+    // std::cout << "[DEBUG forward] joint_query shape after concatenation: " <<
+    // joint_query.sizes() << std::endl; std::cout << "[DEBUG forward] joint_key
+    // shape after concatenation: " << joint_key.sizes() << std::endl; std::cout
+    // << "[DEBUG forward] joint_value shape after concatenation: " <<
+    // joint_value.sizes() << std::endl;
 
     int head_num = img_query.size(2);
     // int64_t head_dim_ = img_query.size(-1);
@@ -1668,12 +1729,14 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
         /*next_tockens=*/65535);
 
     auto joint_hidden_states = std::get<0>(results);
-    // std::cout << "[DEBUG forward] joint_hidden_states shape after attention: " << joint_hidden_states.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG forward] joint_hidden_states shape after attention:
+    // " << joint_hidden_states.sizes() << std::endl;
+
     // Reshape back
     joint_hidden_states = joint_hidden_states.flatten(2, 3);
-    // std::cout << "[DEBUG forward] joint_hidden_states shape after flatten: " << joint_hidden_states.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG forward] joint_hidden_states shape after flatten: "
+    // << joint_hidden_states.sizes() << std::endl;
+
     joint_hidden_states = joint_hidden_states.to(joint_query.dtype());
 
     int64_t seq_txt = txt_query.size(1);
@@ -1685,10 +1748,11 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto chunks = torch::split(joint_hidden_states, {seq_txt, seq_img}, 1);
     auto txt_attn_output = chunks[0];
     auto img_attn_output = chunks[1];
-    
-    // std::cout << "[DEBUG forward] txt_attn_output shape after split: " << txt_attn_output.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] img_attn_output shape after split: " << img_attn_output.sizes() << std::endl;
-    // all tp all 前需要sp pad
+
+    // std::cout << "[DEBUG forward] txt_attn_output shape after split: " <<
+    // txt_attn_output.sizes() << std::endl; std::cout << "[DEBUG forward]
+    // img_attn_output shape after split: " << img_attn_output.sizes() <<
+    // std::endl; all tp all 前需要sp pad
     parallel_state::AllToAll4DHandle handle_io, handle_t_o;
     int64_t batch_size = hidden_states.size(0);
     int64_t inner_dim = attn_->to_k_->weight.size(0);
@@ -1696,8 +1760,9 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     int64_t head_dim = inner_dim / attn_heads;
     if (attn_->use_sp_) {
       img_attn_output = pad_sequence(img_attn_output, 1, attn_->img_pad_);
-      // std::cout << "[DEBUG forward] img_attn_output shape after pad_sequence: " << img_attn_output.sizes() << std::endl;
-      
+      // std::cout << "[DEBUG forward] img_attn_output shape after pad_sequence:
+      // " << img_attn_output.sizes() << std::endl;
+
       handle_io = parallel_state::all_to_all_4D(
           img_attn_output.view({batch_size, -1, head_num, head_dim}),
           rank_,
@@ -1707,14 +1772,17 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
           true,
           pg_);
       img_attn_output = parallel_state::all_to_all_4D_post(handle_io);
-      // std::cout << "[DEBUG forward] img_attn_output shape after all_to_all_4D_post: " << img_attn_output.sizes() << std::endl;
-      
+      // std::cout << "[DEBUG forward] img_attn_output shape after
+      // all_to_all_4D_post: " << img_attn_output.sizes() << std::endl;
+
       img_attn_output = img_attn_output.view({batch_size, -1, inner_dim});
-      // std::cout << "[DEBUG forward] img_attn_output shape after view: " << img_attn_output.sizes() << std::endl;
-      
+      // std::cout << "[DEBUG forward] img_attn_output shape after view: " <<
+      // img_attn_output.sizes() << std::endl;
+
       txt_attn_output = pad_sequence(txt_attn_output, 1, attn_->text_pad_);
-      // std::cout << "[DEBUG forward] txt_attn_output shape after pad_sequence: " << txt_attn_output.sizes() << std::endl;
-      
+      // std::cout << "[DEBUG forward] txt_attn_output shape after pad_sequence:
+      // " << txt_attn_output.sizes() << std::endl;
+
       handle_t_o = parallel_state::all_to_all_4D(
           txt_attn_output.view({batch_size, -1, head_num, head_dim}),
           rank_,
@@ -1726,21 +1794,26 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     }
     // Apply output projections
     img_attn_output = attn_->to_out_->forward(img_attn_output);
-    // std::cout << "[DEBUG forward] img_attn_output shape after to_out forward: " << img_attn_output.sizes() << std::endl;
+    // std::cout << "[DEBUG forward] img_attn_output shape after to_out forward:
+    // " << img_attn_output.sizes() << std::endl;
 
     if (attn_->use_sp_) {
       txt_attn_output = parallel_state::all_to_all_4D_post(handle_t_o);
-      // std::cout << "[DEBUG forward] txt_attn_output shape after all_to_all_4D_post: " << txt_attn_output.sizes() << std::endl;
-      
+      // std::cout << "[DEBUG forward] txt_attn_output shape after
+      // all_to_all_4D_post: " << txt_attn_output.sizes() << std::endl;
+
       txt_attn_output = txt_attn_output.view({batch_size, -1, inner_dim});
-      // std::cout << "[DEBUG forward] txt_attn_output shape after view: " << txt_attn_output.sizes() << std::endl;
+      // std::cout << "[DEBUG forward] txt_attn_output shape after view: " <<
+      // txt_attn_output.sizes() << std::endl;
     }
     txt_attn_output = attn_->to_add_out_->forward(txt_attn_output);
-    // std::cout << "[DEBUG forward] txt_attn_output shape after to_add_out forward: " << txt_attn_output.sizes() << std::endl;
-    
-    // std::cout << "[DEBUG forward] Final img_attn_output shape: " << img_attn_output.sizes() << std::endl;
-    // std::cout << "[DEBUG forward] Final txt_attn_output shape: " << txt_attn_output.sizes() << std::endl;
-    
+    // std::cout << "[DEBUG forward] txt_attn_output shape after to_add_out
+    // forward: " << txt_attn_output.sizes() << std::endl;
+
+    // std::cout << "[DEBUG forward] Final img_attn_output shape: " <<
+    // img_attn_output.sizes() << std::endl; std::cout << "[DEBUG forward] Final
+    // txt_attn_output shape: " << txt_attn_output.sizes() << std::endl;
+
     return std::make_tuple(img_attn_output, txt_attn_output);
   }
 
@@ -1760,7 +1833,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
   int get_text_pad_() { return attn_->text_pad_; }
 
-//  private:
+  //  private:
   Attention attn_{nullptr};
 };
 TORCH_MODULE(QwenDoubleStreamAttnProcessor2_0);
@@ -1984,8 +2057,9 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
                                 const std::string& name) {
         if (tensor.defined()) {
           torch::Tensor cpu_tensor = tensor.cpu();
-          std::string filename =
-              name + "_rank_" + std::to_string(attn_processor_->attn_->rank_) + ".pt";
+          std::string filename = name + "_rank_" +
+                                 std::to_string(attn_processor_->attn_->rank_) +
+                                 ".pt";
           torch::save(cpu_tensor, filename);
         }
       };
@@ -1998,7 +2072,8 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     } else {
       torch::save(modulate_index_.cpu(), "tp1/modulate_index.pt");
       torch::save(hidden_states_.cpu(), "tp1/hidden_states_block.pt");
-      torch::save(encoder_hidden_states_.cpu(), "tp1/encoder_hidden_states_block.pt");
+      torch::save(encoder_hidden_states_.cpu(),
+                  "tp1/encoder_hidden_states_block.pt");
       torch::save(img_modulated.cpu(), "tp1/img_modulated.pt");
       torch::save(txt_modulated.cpu(), "tp1/txt_modulated.pt");
     }
@@ -2247,7 +2322,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     // 保存new_hidden_states和new_encoder_hidden_states到本地
     torch::save(new_hidden_states.cpu(), "new_hidden_states_before.pt");
     torch::save(new_encoder_hidden_states.cpu(),
-    "new_encoder_hidden_states_before.pt");
+                "new_encoder_hidden_states_before.pt");
     if (use_sp_) {
       // split the sequence for hidden_states and the encoder_hidden_states
       int32_t seq_len, encoder_seq_len;
@@ -2257,10 +2332,10 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       encoder_pad_ =
           (world_size_ - (encoder_seq_len % world_size_)) % world_size_;
 
-      
       new_encoder_hidden_states = split_sequence(
           new_encoder_hidden_states, world_size_, rank_, 1, encoder_pad_);
-      modulate_index = split_sequence(modulate_index, world_size_, rank_, 1, pad_);
+      modulate_index =
+          split_sequence(modulate_index, world_size_, rank_, 1, pad_);
       new_hidden_states =
           split_sequence(new_hidden_states, world_size_, rank_, 1, pad_);
       auto save_tensor = [this](const torch::Tensor& tensor,
@@ -2275,15 +2350,15 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
 
       save_tensor(new_hidden_states, "sp/new_hidden_states_before");
       save_tensor(new_encoder_hidden_states, "sp/new_encoder_hidden_states");
-    }else {
-    // 保存new_hidden_states和new_encoder_hidden_states到本地
-    torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_before.pt");
-    torch::save(new_encoder_hidden_states.cpu(),
-    "tp1/new_encoder_hidden_states_before.pt"); 
+    } else {
+      // 保存new_hidden_states和new_encoder_hidden_states到本地
+      torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_before.pt");
+      torch::save(new_encoder_hidden_states.cpu(),
+                  "tp1/new_encoder_hidden_states_before.pt");
     }
-    // for (int64_t index_block = 0; index_block < transformer_blocks_->size();
-    //      ++index_block) {
-    for (int64_t index_block = 0; index_block < 1; ++index_block) {
+    for (int64_t index_block = 0; index_block < transformer_blocks_->size();
+         ++index_block) {
+      // for (int64_t index_block = 0; index_block < 1; ++index_block) {
       if (use_sp_) {
         transformer_blocks_[index_block]
             ->as<QwenImageTransformerBlock>()
@@ -2291,6 +2366,25 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
         transformer_blocks_[index_block]
             ->as<QwenImageTransformerBlock>()
             ->set_img_pad_(pad_);
+      }
+      if (use_sp_) {
+        auto save_tensor = [this](const torch::Tensor& tensor,
+                                const std::string& name) {
+        if (tensor.defined()) {
+          torch::Tensor cpu_tensor = tensor.cpu();
+          std::string filename =
+              name + std::to_string(index_block) + "_rank_" + std::to_string(pg_.rank()) + ".pt";
+          torch::save(cpu_tensor, filename);
+        }
+      };
+
+      save_tensor(new_hidden_states, "sp/new_hidden_states_");
+      save_tensor(new_encoder_hidden_states, "sp/new_encoder_hidden_states_");
+    } else {
+      // 保存new_hidden_states和new_encoder_hidden_states到本地
+      torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_" + std::to_string(index_block) + ".pt");
+      torch::save(new_encoder_hidden_states.cpu(),
+                  "tp1/new_encoder_hidden_states_" + std::to_string(index_block) + ".pt");
       }
       std::tie(new_hidden_states, new_encoder_hidden_states) =
           transformer_blocks_[index_block]
@@ -2311,17 +2405,16 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
           gather_sequence(new_hidden_states, world_size_, 1, pad_, pg_);
       new_encoder_hidden_states = gather_sequence(
           new_encoder_hidden_states, world_size_, 1, encoder_pad_, pg_);
-      // torch::save(new_hidden_states.cpu(), "sp/new_hidden_states_after.pt");
-      // torch::save(new_encoder_hidden_states.cpu(),
-      //             "sp/new_encoder_hidden_states_after.pt");
+      torch::save(new_hidden_states.cpu(), "sp/new_hidden_states_after.pt");
+      torch::save(new_encoder_hidden_states.cpu(),
+                  "sp/new_encoder_hidden_states_after.pt");
+    } else {
+      // 保存new_hidden_states和new_encoder_hidden_states到本地
+      // 将张量转移到CPU后保存
+      torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_after.pt");
+      torch::save(new_encoder_hidden_states.cpu(),
+                  "tp1/new_encoder_hidden_states_after.pt");
     }
-    // else {
-    //   // 保存new_hidden_states和new_encoder_hidden_states到本地
-    //   // 将张量转移到CPU后保存
-    //   torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_after.pt");
-    //   torch::save(new_encoder_hidden_states.cpu(),
-    //               "tp1/new_encoder_hidden_states_after.pt");
-    // }
 
     if (zero_cond_t_) {
       temb = temb.chunk(2, 0)[0];
