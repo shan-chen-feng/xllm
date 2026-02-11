@@ -56,6 +56,18 @@ class ProcessGroupImpl : public ProcessGroup {
 
   std::vector<uint32_t> get_rank_per_group(const std::string& group_type);
 
+  void alltoall_single(torch::Tensor send,
+                       torch::Tensor recv,
+                       const std::vector<int64_t>& send_splits,
+                       const std::vector<int64_t>& recv_splits,
+                       bool is_sync,
+                       std::shared_ptr<c10_npu::NPUEvent>* out_done);
+
+  void alltoall_equal(torch::Tensor send,
+                      torch::Tensor recv,
+                      bool is_sync,
+                      std::shared_ptr<c10_npu::NPUEvent>* out_done);
+
  private:
   HcclComm comm_ = nullptr;
   c10_npu::NPUStream comm_stream_;

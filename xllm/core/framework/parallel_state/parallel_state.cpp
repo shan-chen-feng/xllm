@@ -255,6 +255,18 @@ torch::Tensor scatter(torch::Tensor input,
   return tensor_list[rank];
 }
 
+torch::Tensor all_to_all_equal(torch::Tensor& send,
+                               bool is_sync,
+                               ProcessGroup* process_group,
+                               std::shared_ptr<c10_npu::NPUEvent>* out_done) {
+  const int P = process_group->world_size();
+  if (P <= 1) return send;
+  CHECK(process_group != nullptr) << "all_to_all_equal: process_group_ is null";
+  auto recv = torch::empty_like(send);
+  process_group->alltoall_equal(send, recv, is_sync, out_done);
+  return recv;
+}
+
 std::vector<std::unique_ptr<ProcessGroup>> create_npu_process_groups(
     const std::vector<torch::Device>& devices) {
 #if defined(USE_NPU)

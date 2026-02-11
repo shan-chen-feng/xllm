@@ -122,7 +122,7 @@ std::string NPUExternalCommManager::GetCommDomain(
   LOG(INFO) << "External Comm Manager: try to create comm with rankIds "
             << ranks << ", subCommRankId " << subCommRankId
             << ", backend: " << backend << ", bufferSize " << bufferSize
-            << ", streamId " << streamId;
+            << ", streamId " << streamId << ", groupId" << groupId;
 
   std::string commDomain = "";
 
@@ -230,10 +230,14 @@ std::string NPUExternalCommManager::GetHcclSubCommDomain(
     for (auto item : commInfo->rankIds_) {
       tempRankIds.push_back(item);
     }
+    int64_t number = commInfo->cacheId_;
+    if (groupId == 1) {
+      number = 2;
+    }
     auto ret = HcclCreateSubCommConfig(&globalComm_,
                                        tempRankIds.size(),
                                        tempRankIds.data(),
-                                       commInfo->cacheId_,
+                                       number,
                                        commInfo->subCommRankId_,
                                        &config,
                                        &hcclComm);

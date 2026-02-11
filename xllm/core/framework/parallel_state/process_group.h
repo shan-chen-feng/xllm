@@ -69,6 +69,22 @@ class ProcessGroup {
     return std::vector<uint32_t>{0};
   }
 
+  virtual void alltoall_single(torch::Tensor send,
+                               torch::Tensor recv,
+                               const std::vector<int64_t>& send_splits,
+                               const std::vector<int64_t>& recv_splits,
+                               bool is_sync,
+                               std::shared_ptr<c10_npu::NPUEvent>* out_done) {
+    return;
+  }
+
+  virtual void alltoall_equal(torch::Tensor send,
+                              torch::Tensor recv,
+                              bool is_sync,
+                              std::shared_ptr<c10_npu::NPUEvent>* out_done) {
+    return;
+  }
+
  protected:
   // rank of current process.
   int32_t rank_ = 0;

@@ -54,7 +54,7 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
 
     vae_ = AutoencoderKLQwenImage(context.get_model_context("vae"));
     transformer_ = QwenImageTransformer2DModel(
-        context.get_model_context("transformer"), dit_cache_);
+        context.get_model_context("transformer"), process_group_, dit_cache_);
     scheduler_ =
         FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
 
@@ -263,10 +263,9 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
     int32_t device_id = options_.device().index();
     auto ranks_per_group = process_group_->get_rank_per_group("cfg");
     torch::Tensor test_t = torch::ones({10, 10}, options_);
-    auto pos_neg_noise_preds = xllm::parallel_state::gather(test_t,
-                                                            process_group_,
-                                                            /*dim=*/0);
-
+    auto pos_neg_noise_preds =
+        xllm::parallel_state::gather(test_t, process_group_, 0);
+    LOG(INFO) << "rank " << device_id << " finish all gather";
     torch::NoGradGuard no_grad;
     const auto& generation_params = input.generation_params;
     auto height = generation_params.height;
@@ -431,6 +430,53 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
     torch::Tensor negative_txt_seq_lens;
     if (do_true_cfg && negative_prompt_embeds_mask.defined()) {
       negative_txt_seq_lens = negative_prompt_embeds_mask.sum(1);
+    }
+
+    if (prompt_embeds.size(1) % FLAGS_dit_sp_size != 0) {
+      int64_t pad_len =
+          FLAGS_dit_sp_size - prompt_embeds.size(1) % FLAGS_dit_sp_size;
+      std::vector<int64_t> pad_with = {
+          0,
+          0,  // 第3维�~Hhe   ight�~I�        ~Mpad
+          0,
+          pad_len,  // 第 2维�~Hchannels�~I�~I~M�~P~Npad
+          0,
+          0};  // 第1维�~Hbatch�~I�~Mpad
+      std::vector<int64_t> pad_with_mask = {
+          // 第3维�~Hhe   ight�~I�        ~Mpad
+          0,
+          pad_len,  // 第 2维�~Hchannels�~I�~I~M�~P~Npad
+          0,
+          0};  // 第1维�~Hbatch�~I�~Mpad
+      prompt_embeds = torch::pad(prompt_embeds, pad_with, "constant", 0);
+      prompt_embeds_mask =
+          torch::pad(prompt_embeds_mask, pad_with_mask, "constant", 0);
+      prompt_embeds.print();
+      prompt_embeds_mask.print();
+    }
+
+    if (negative_prompt_embeds.size(1) % FLAGS_dit_sp_size != 0) {
+      int64_t pad_len = FLAGS_dit_sp_size -
+                        negative_prompt_embeds.size(1) % FLAGS_dit_sp_size;
+      std::vector<int64_t> pad_with = {
+          0,
+          0,  // 第3维�~Hhe   ight�~I�        ~Mpad
+          0,
+          pad_len,  // 第 2维�~Hchannels�~I�~I~M�~P~Npad
+          0,
+          0};  // 第1维�~Hbatch�~I�~Mpad
+      std::vector<int64_t> pad_with_mask = {
+          // 第3维�~Hhe   ight�~I�        ~Mpad
+          0,
+          pad_len,  // 第 2维�~Hchannels�~I�~I~M�~P~Npad
+          0,
+          0};
+      negative_prompt_embeds =
+          torch::pad(negative_prompt_embeds, pad_with, "constant", 0);
+      negative_prompt_embeds_mask =
+          torch::pad(negative_prompt_embeds_mask, pad_with_mask, "constant", 0);
+      negative_prompt_embeds.print();
+      negative_prompt_embeds_mask.print();
     }
 
     scheduler_->set_begin_index(0);

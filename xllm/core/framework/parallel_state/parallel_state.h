@@ -50,6 +50,10 @@ torch::Tensor scatter(torch::Tensor input,
                       ProcessGroup* process_group,
                       int dim = -1);
 
+torch::Tensor all_to_all_equal(torch::Tensor& send,
+                               bool is_sync,
+                               ProcessGroup* process_group,
+                               std::shared_ptr<c10_npu::NPUEvent>* out_done);
 // Create a process group where each process has a single device
 // devices: list of devices to create process groups on.
 std::vector<std::unique_ptr<ProcessGroup>> create_npu_process_groups(

@@ -12,15 +12,17 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-
 #include "npu_process_group.h"
 
+#include <acl/acl.h>
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
+#include <unistd.h>
 
 #include <c10d/ProcessGroup.hpp>
 #include <c10d/TCPStore.hpp>
 #include <torch_npu/csrc/distributed/ProcessGroupHCCL.hpp>
 
+#include "hccl/hccl.h"
 namespace {
 inline bool is_npu(const torch::Tensor& tensor) {
   if (!tensor.defined()) {
@@ -154,6 +156,7 @@ std::vector<uint32_t> ProcessGroupImpl::get_rank_per_group(
 
 void ProcessGroupImpl::allgather(const torch::Tensor& input,
                                  std::vector<torch::Tensor>& outputs) {
+  /*
   auto rank_per_group = get_rank_per_group("cfg");
   auto cfg_parallel_info = dit_mapping_npu_->get_parallel_info("cfg");
   std::string commDomain =
@@ -162,8 +165,38 @@ void ProcessGroupImpl::allgather(const torch::Tensor& input,
                                        cfg_parallel_info.rank(),
                                        cfg_parallel_info.backend(),
                                        cfg_parallel_info.buffer_size(),
-                                       /*streamId=*/0);
+                                       0);
   HcclComm hcclComm = npu_comm_manager_->GetCommPtr(commDomain);
+  */
+
+  auto cfg_parallel_info = dit_mapping_npu_->get_parallel_info("cfg");
+  HcclCommConfig config;
+  HcclCommConfigInit(&config);
+  config.hcclBufferSize = 128;
+  strcpy(config.hcclCommName, "comm_1");
+  HcclComm hcclComm;
+  auto rank_per_group = get_rank_per_group("cfg");
+  std::ostringstream oss;
+  oss << "[";
+  for (size_t i = 0; i < rank_per_group.size(); ++i) {
+    oss << rank_per_group[i];
+    if (i != rank_per_group.size() - 1) {
+      oss << ", ";
+    }
+  }
+  oss << "]";
+  LOG(INFO) << "device: " << device() << "rank_group: " << oss.str()
+            << " local_rank: " << cfg_parallel_info.rank();
+
+  HcclCreateSubCommConfig(/*comm=*/&comm_,
+                          /*rankNum=*/2,
+                          /*rankIds=*/rank_per_group.data(),
+                          /*subCommId=*/1,
+                          /*subCommRankId=*/cfg_parallel_info.rank(),
+                          &config,
+                          &hcclComm);
+  sleep(10);
+  return;
 
   CHECK_EQ(input.device(), device())
       << "input should be on the same device as the process group";
@@ -193,14 +226,14 @@ void ProcessGroupImpl::allgather(const torch::Tensor& input,
       /*recvbuff=*/flattened_output.data_ptr(),
       /*sendcount=*/count,
       /*datatype=*/data_type,
-      /*comm=*/hcclComm,
+      /*comm=*/comm_,
       /*stream=*/comm_stream_.stream()));
 
   auto done = std::make_shared<c10_npu::NPUEvent>();
   done->record(comm_stream_);
   done->block(compute_stream);
   comm_stream_.synchronize();
-
+  LOG(INFO) << "finish all gather";
   for (int i = 0; i < static_cast<int>(outputs.size()); ++i) {
     outputs[i].copy_(flattened_output[i], /*non_blocking=*/true);
   }
@@ -237,6 +270,96 @@ void ProcessGroupImpl::allreduce(torch::Tensor& input) {
   done->record(comm_stream_);
   done->block(compute_stream);
   comm_stream_.synchronize();
+}
+
+void ProcessGroupImpl::alltoall_single(
+    torch::Tensor send,
+    torch::Tensor recv,
+    const std::vector<int64_t>& send_splits,
+    const std::vector<int64_t>& recv_splits,
+    bool is_sync,
+    std::shared_ptr<c10_npu::NPUEvent>* out_done) {
+  check_input(send);
+  check_input(recv);
+  CHECK(send.device() == device() && recv.device() == device())
+      << "send/recv must be on the same device as the process group";
+  const int P = world_size();
+  CHECK((int)send_splits.size() == P && (int)recv_splits.size() == P)
+      << "split sizes length must equal world_size";
+  torch::DeviceGuard device_guard(device());
+  std::vector<uint64_t> sc(P), rc(P), sdisp(P), rdisp(P);
+  uint64_t acc = 0;
+  for (int i = 0; i < P; ++i) {
+    sc[i] = static_cast<uint64_t>(send_splits[i]);
+    sdisp[i] = acc;
+    acc += sc[i];
+  }
+  acc = 0;
+  for (int i = 0; i < P; ++i) {
+    rc[i] = static_cast<uint64_t>(recv_splits[i]);
+    rdisp[i] = acc;
+    acc += rc[i];
+  }
+
+  auto dtype = to_hccl_data_type(send);
+  auto compute_stream = c10_npu::getCurrentNPUStream();
+  auto ready = std::make_shared<c10_npu::NPUEvent>();
+  ready->record(compute_stream);
+
+  // const auto prev_stream = c10_npu::getCurrentNPUStream();
+  // c10_npu::setCurrentNPUStream(comm_stream_);
+  ready->block(comm_stream_);  // compute -> comm
+  c10_npu::NPUCachingAllocator::recordStream(send.storage().data_ptr(),
+                                             comm_stream_);
+  c10_npu::NPUCachingAllocator::recordStream(recv.storage().data_ptr(),
+                                             comm_stream_);
+  LOG(INFO) << "begin all2all";
+  LOG(INFO) << "is syn : " << is_sync;
+  HCCLCHECK(HcclAlltoAllV(
+      /*sendBuf=*/send.data_ptr(),
+      /*sendCounts=*/sc.data(),
+      /*sdispls=*/sdisp.data(),
+      /*sendType=*/dtype,
+      /*recvBuf=*/recv.data_ptr(),
+      /*recvCounts=*/rc.data(),
+      /*rdispls=*/rdisp.data(),
+      /*recvType=*/dtype,
+      /*comm=*/comm_,
+      /*stream=*/comm_stream_.stream()));
+
+  if (is_sync) {
+    auto done = std::make_shared<c10_npu::NPUEvent>();
+    done->record(comm_stream_);
+    done->block(compute_stream);
+    comm_stream_.synchronize();
+    LOG(INFO) << "syn";
+  } else {
+    auto done = std::make_shared<c10_npu::NPUEvent>();
+    done->record(comm_stream_);
+
+    if (out_done) {
+      *out_done = std::move(done);
+    } else {
+      done->block(compute_stream);
+    }
+  }
+}
+
+void ProcessGroupImpl::alltoall_equal(
+    torch::Tensor send,
+    torch::Tensor recv,
+    bool is_sync,
+    std::shared_ptr<c10_npu::NPUEvent>* out_done) {
+  check_input(send);
+  check_input(recv);
+  const int P = world_size();
+  CHECK(send.numel() % P == 0 && recv.numel() % P == 0)
+      << "send/recv numel must be divisible by world_size";
+  const int64_t per_rank_send = send.numel() / P;
+  const int64_t per_rank_recv = recv.numel() / P;
+  std::vector<int64_t> in_splits(P, per_rank_send);
+  std::vector<int64_t> out_splits(P, per_rank_recv);
+  alltoall_single(send, recv, in_splits, out_splits, is_sync, out_done);
 }
 
 }  // namespace xllm
