@@ -82,7 +82,7 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
   }
   
   torch::Tensor input = input_;
-  torch::save(input.cpu(), "input_rank_" + std::to_string(rank) + ".pt");
+  torch::save(input.cpu(), "sp/input_rank_" + std::to_string(rank) + ".pt");
   if (pad > 0) {
     LOG(INFO) << "split_sequence: dim=" << dim << ", pad=" << pad;
     std::vector<int64_t> pad_size(input.sizes().begin(), input.sizes().end());
@@ -96,7 +96,7 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
 
   auto tensor_list = torch::chunk(input, world_size, dim);
   auto output = tensor_list[rank].contiguous();
-  torch::save(output.cpu(), "output_rank_" + std::to_string(rank) + ".pt");
+  torch::save(output.cpu(), "sp/output_rank_" + std::to_string(rank) + ".pt");
   
   return output;
 }
@@ -2257,11 +2257,12 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       encoder_pad_ =
           (world_size_ - (encoder_seq_len % world_size_)) % world_size_;
 
-      new_hidden_states =
-          split_sequence(new_hidden_states, world_size_, rank_, 1, pad_);
+      
       new_encoder_hidden_states = split_sequence(
           new_encoder_hidden_states, world_size_, rank_, 1, encoder_pad_);
       modulate_index = split_sequence(modulate_index, world_size_, rank_, 1, pad_);
+      new_hidden_states =
+          split_sequence(new_hidden_states, world_size_, rank_, 1, pad_);
       auto save_tensor = [this](const torch::Tensor& tensor,
                                 const std::string& name) {
         if (tensor.defined()) {
