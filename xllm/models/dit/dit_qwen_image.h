@@ -1978,17 +1978,27 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
         txt_norm1_->forward(encoder_hidden_states_, txt_mod1);
 
     if (attn_processor_->attn_->use_sp_) {
-      torch::save(modulate_index_, "sp/modulate_index");
-      torch::save(hidden_states_, "sp/hidden_states_block");
-      torch::save(encoder_hidden_states_, "sp/encoder_hidden_states_block");
-      torch::save(img_modulated, "sp/img_modulated");
-      torch::save(txt_modulated, "sp/txt_modulated");
+      auto save_tensor = [this](const torch::Tensor& tensor,
+                                const std::string& name) {
+        if (tensor.defined()) {
+          torch::Tensor cpu_tensor = tensor.cpu();
+          std::string filename =
+              name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
+          torch::save(cpu_tensor, filename);
+        }
+      };
+
+      save_tensor(modulate_index_, "sp/modulate_index");
+      save_tensor(hidden_states_, "sp/hidden_states_block");
+      save_tensor(encoder_hidden_states_, "sp/encoder_hidden_states_block");
+      save_tensor(img_modulated, "sp/img_modulated");
+      save_tensor(txt_modulated, "sp/txt_modulated");
     } else {
-      torch::save(modulate_index_, "tp1/modulate_index");
-      torch::save(hidden_states_, "tp1/hidden_states_block");
-      torch::save(encoder_hidden_states_, "tp1/encoder_hidden_states_block");
-      torch::save(img_modulated, "tp1/img_modulated");
-      torch::save(txt_modulated, "tp1/txt_modulated");
+      torch::save(modulate_index_, "tp1/modulate_index.pt");
+      torch::save(hidden_states_, "tp1/hidden_states_block.pt");
+      torch::save(encoder_hidden_states_, "tp1/encoder_hidden_states_block.pt");
+      torch::save(img_modulated, "tp1/img_modulated.pt");
+      torch::save(txt_modulated, "tp1/txt_modulated.pt");
     }
 
     // Use QwenAttnProcessor2_0 for joint attention computation
