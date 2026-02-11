@@ -1370,11 +1370,13 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
         }
       };
 
-    save_tensor(img_query, "sp/img_querymm");
-    
+    save_tensor(hidden_states, "sp/hidden_states");
+
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     // img_query = img_query.unflatten(-1, reshape_dims);
     img_query = img_query.view({bs_img, -1, heads, head_dim});
+    save_tensor(img_query, "sp/img_querymm");
+
     // std::cout << "[DEBUG sp_qkv_matmul] img_query after view shape: " << img_query.sizes() << std::endl;
     
     auto handle_iq = parallel_state::all_to_all_4D(
@@ -1390,6 +1392,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     
     img_query = parallel_state::all_to_all_4D_post2(handle_iq);
     // std::cout << "[DEBUG sp_qkv_matmul] img_query after all_to_all_4D_post2 shape: " << img_query.sizes() << std::endl;
+    save_tensor(img_query, "sp/img_query_a2a");
     
     auto handle_ik = parallel_state::all_to_all_4D(
         img_key, rank_, world_size_, 2, 1, false, pg_);
@@ -1502,13 +1505,14 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto img_query = attn_->to_q_->forward(hidden_states);
     // std::cout << "[DEBUG qkv_matmul] img_query after to_q forward shape: " << img_query.sizes() << std::endl;
     
-    torch::save(img_query.cpu(), "tp1/img_querymm.pt");
+
+    torch::save(hidden_states.cpu(), "tp1/hidden_states.pt");
     // Reshape for multi-head attention
     int64_t heads = attn_->heads_;
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     img_query = img_query.unflatten(-1, reshape_dims);
     // std::cout << "[DEBUG qkv_matmul] img_query after unflatten shape: " << img_query.sizes() << std::endl;
-
+    torch::save(img_query.cpu(), "tp1/img_querymm.pt");
     auto img_key = attn_->to_k_->forward(hidden_states);
     // std::cout << "[DEBUG qkv_matmul] img_key after to_k forward shape: " << img_key.sizes() << std::endl;
     
