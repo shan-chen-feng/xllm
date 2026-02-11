@@ -2260,6 +2260,23 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       new_encoder_hidden_states = split_sequence(
           new_encoder_hidden_states, world_size_, rank_, 1, encoder_pad_);
       modulate_index = split_sequence(modulate_index, world_size_, rank_, 1, pad_);
+      auto save_tensor = [this](const torch::Tensor& tensor,
+                                const std::string& name) {
+        if (tensor.defined()) {
+          torch::Tensor cpu_tensor = tensor.cpu();
+          std::string filename =
+              name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
+          torch::save(cpu_tensor, filename);
+        }
+      };
+
+    save_tensor(new_hidden_states, "sp/new_hidden_states_before");
+    save_tensor(new_encoder_hidden_states, "sp/new_encoder_hidden_states");
+    }else {
+    // 保存new_hidden_states和new_encoder_hidden_states到本地
+    torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_before.pt");
+    torch::save(new_encoder_hidden_states.cpu(),
+    "tp1/new_encoder_hidden_states_before.pt"); 
     }
     // for (int64_t index_block = 0; index_block < transformer_blocks_->size();
     //      ++index_block) {
