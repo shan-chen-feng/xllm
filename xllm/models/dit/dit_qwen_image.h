@@ -1375,7 +1375,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       }
     };
 
-    save_tensor(hidden_states, "sp/hidden_states");
+    save_tensor(encoder_hidden_states, "sp/encoder_hidden_states");
 
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     // img_query = img_query.unflatten(-1, reshape_dims);
@@ -1469,7 +1469,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     // std::cout << "[DEBUG sp_qkv_matmul] txt_value after add_v_proj forward
     // shape: " << txt_value.sizes() << std::endl;
     save_tensor(txt_value, "sp/txt_valuemm");
-    
+
     // txt_value = txt_value.unflatten(-1, reshape_dims);
     txt_value = txt_value.view({bs_img, -1, heads, head_dim});
     // std::cout << "[DEBUG sp_qkv_matmul] txt_value after view shape: " <<
@@ -1625,27 +1625,27 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
     torch::Tensor img_query, img_key, img_value;
     torch::Tensor txt_query, txt_key, txt_value;
+    // 将注意力张量转移到CPU并保存到本地文件，文件后缀为当前rank
+    auto save_tensor = [this](const torch::Tensor& tensor,
+                              const std::string& name) {
+      if (tensor.defined()) {
+        torch::Tensor cpu_tensor = tensor.cpu();
+        std::string filename =
+            name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
+        torch::save(cpu_tensor, filename);
+      }
+    };
     // Compute QKV projections
     if (attn_->use_sp_) {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           sp_qkv_matmul(hidden_states, encoder_hidden_states);
-      // 将注意力张量转移到CPU并保存到本地文件，文件后缀为当前rank
-      auto save_tensor = [this](const torch::Tensor& tensor,
-                                const std::string& name) {
-        if (tensor.defined()) {
-          torch::Tensor cpu_tensor = tensor.cpu();
-          std::string filename =
-              name + "_rank_" + std::to_string(attn_->rank_) + ".pt";
-          torch::save(cpu_tensor, filename);
-        }
-      };
 
       // save_tensor(img_query, "sp/img_query");
       // save_tensor(img_key, "sp/img_key");
       // save_tensor(img_value, "sp/img_value");
-      // save_tensor(txt_query, "sp/txt_query");
-      // save_tensor(txt_key, "sp/txt_key");
-      // save_tensor(txt_value, "sp/txt_value");
+      save_tensor(txt_query, "sp/txt_query");
+      save_tensor(txt_key, "sp/txt_key");
+      save_tensor(txt_value, "sp/txt_value");
     } else {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           qkv_matmul(hidden_states, encoder_hidden_states);
@@ -1653,9 +1653,9 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       // torch::save(img_query.cpu(), "tp1/img_query.pt");
       // torch::save(img_key.cpu(), "tp1/img_key.pt");
       // torch::save(img_value.cpu(), "tp1/img_value.pt");
-      // torch::save(txt_query.cpu(), "tp1/txt_query.pt");
-      // torch::save(txt_key.cpu(), "tp1/txt_key.pt");
-      // torch::save(txt_value.cpu(), "tp1/txt_value.pt");
+      torch::save(txt_query.cpu(), "tp1/txt_query.pt");
+      torch::save(txt_key.cpu(), "tp1/txt_key.pt");
+      torch::save(txt_value.cpu(), "tp1/txt_value.pt");
     }
 
     // std::cout << "[DEBUG forward] img_query shape after QKV matmul: " <<
@@ -1682,6 +1682,15 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       txt_key = attn_->norm_added_k_->forward(txt_key);
     }
 
+    if (attn_->use_sp_) {
+      save_tensor(txt_query, "sp/txt_query_norm");
+      save_tensor(txt_key, "sp/txt_key_norm");  
+    } else {
+      torch::save(txt_query.cpu(), "tp1/txt_query_norm.pt");
+      torch::save(txt_key.cpu(), "tp1/txt_key_norm.pt");
+    }
+
+
     // std::cout << "[DEBUG forward] img_query shape after normalization: " <<
     // img_query.sizes() << std::endl; std::cout << "[DEBUG forward] img_key
     // shape after normalization: " << img_key.sizes() << std::endl; std::cout
@@ -1697,6 +1706,14 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     img_key = apply_rotary_emb_qwen(img_key, img_freqs, false);
     txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, false);
     txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, false);
+
+    if (attn_->use_sp_) {
+      save_tensor(txt_query, "sp/txt_query_rope");
+      save_tensor(txt_key, "sp/txt_key_rope");  
+    } else {
+      torch::save(txt_query.cpu(), "tp1/txt_query_rope.pt");
+      torch::save(txt_key.cpu(), "tp1/txt_key_rope.pt");
+    }
 
     // std::cout << "[DEBUG forward] img_query shape after RoPE: " <<
     // img_query.sizes() << std::endl; std::cout << "[DEBUG forward] img_key
@@ -1818,7 +1835,11 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     // std::cout << "[DEBUG forward] Final img_attn_output shape: " <<
     // img_attn_output.sizes() << std::endl; std::cout << "[DEBUG forward] Final
     // txt_attn_output shape: " << txt_attn_output.sizes() << std::endl;
-
+    if (attn_->use_sp_) {
+      save_tensor(txt_attn_output, "sp/txt_attn_output_rope");
+    } else {
+      torch::save(txt_attn_output.cpu(), "tp1/txt_attn_output_rope.pt");
+    }
     return std::make_tuple(img_attn_output, txt_attn_output);
   }
 
