@@ -2486,7 +2486,20 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     }
 
     new_hidden_states = norm_out_->forward(new_hidden_states, temb);
+    if (use_sp_) {
+      torch::save(new_hidden_states.cpu(), "sp/new_hidden_states_norm_out.pt");
+
+    } else {
+      torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_norm_out.pt");
+
+    }
     new_hidden_states = proj_out_->forward(new_hidden_states);
+
+    if (use_sp_) {
+      torch::save(new_hidden_states.cpu(), "sp/new_hidden_states_proj_out.pt");
+    } else {
+      torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_proj_out.pt");
+    }
     return new_hidden_states;
   }
 
