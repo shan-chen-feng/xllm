@@ -39,19 +39,14 @@ c10::intrusive_ptr<c10d::Store> create_tcp_store(const std::string& host,
 
 class ProcessGroup {
  public:
-  ProcessGroup(const torch::Device& device) : device_(device) {}
+  ProcessGroup(int32_t rank, int32_t world_size, const torch::Device& device)
+      : rank_(rank), world_size_(world_size), device_(device) {}
 
   virtual ~ProcessGroup() = default;
 
-  int rank() const {
-    CHECK(pg_ != nullptr) << "Process group is not initialized.";
-    return pg_->getRank();
-  }
+  int32_t rank() const { return rank_; }
 
-  int world_size() const {
-    CHECK(pg_ != nullptr) << "Process group is not initialized.";
-    return pg_->getSize();
-  }
+  int32_t world_size() const { return world_size_; }
 
   const torch::Device& device() const { return device_; }
 
@@ -69,8 +64,29 @@ class ProcessGroup {
   virtual void reduce_scatter(const torch::Tensor& input,
                               torch::Tensor& output);
 
+  virtual void alltoall_single(
+      torch::Tensor send,
+      torch::Tensor recv,
+      const std::vector<int64_t>& send_splits,
+      const std::vector<int64_t>& recv_splits,
+      bool is_sync = false,
+      std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr);
+
+  virtual void alltoall_equal(
+      torch::Tensor send,
+      torch::Tensor recv,
+      bool is_sync = false,
+      std::shared_ptr<c10_npu::NPUEvent>* out_done = nullptr);
+  virtual void flush_comm_to_current();
+
  private:
-  // device of current process
+  // rank of current process.
+  int32_t rank_ = 0;
+
+  // number of processes.
+  int32_t world_size_ = 0;
+
+  // device of current process.
   torch::Device device_;
 
  protected:
