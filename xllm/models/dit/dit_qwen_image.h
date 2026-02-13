@@ -2309,6 +2309,11 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       const std::unordered_map<std::string, torch::Tensor>& attention_kwargs =
           {},
       const std::vector<torch::Tensor>& controlnet_block_samples = {}) {
+    if (use_sp_) {
+      torch::save(hidden_states.cpu(), "sp/hidden_states_in.pt");
+    } else {
+      torch::save(hidden_states.cpu(), "tp1/hidden_states_in.pt");
+    }
     auto new_hidden_states = img_in_->forward(hidden_states);
     auto new_timestep = timestep.to(new_hidden_states.dtype());
 
