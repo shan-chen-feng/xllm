@@ -2,7 +2,7 @@
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+you may obtain a copy of the License at
 
     https://github.com/jd-opensource/xllm/blob/main/LICENSE
 
@@ -26,6 +26,8 @@ limitations under the License.
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <fstream>
+#include <iomanip>
 
 #include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
@@ -46,6 +48,63 @@ limitations under the License.
 
 #include <torch_npu/csrc/libs/init_npu.h>
 #include <torch_npu/torch_npu.h>
+
+// Debug utility for saving tensors to files
+namespace {
+  // Global debug flag - set to true to enable debugging
+  static bool DEBUG_SP_PRECISION = false;
+  
+  // Helper function to save tensor for debugging
+  void save_tensor_for_debug(const torch::Tensor& tensor, const std::string& filename_prefix,
+                            const std::string& step_name, int rank = 0) {
+    if (!DEBUG_SP_PRECISION || !tensor.defined()) {
+      return;
+    }
+    
+    // Create debug directory if it doesn't exist
+    std::string debug_dir = "./debug_tensors";
+    std::filesystem::create_directories(debug_dir);
+    
+    // Create filename with timestamp and rank info
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << debug_dir << "/" << filename_prefix << "_" << step_name
+       << "_rank" << rank << "_" << time_t << ".pt";
+    
+    try {
+      torch::save(tensor.cpu(), ss.str());
+      std::cout << "[DEBUG] Saved tensor for step '" << step_name
+                << "' to: " << ss.str() << std::endl;
+    } catch (const std::exception& e) {
+      std::cerr << "[ERROR] Failed to save tensor for step '" << step_name
+                << "': " << e.what() << std::endl;
+    }
+  }
+  
+  // Helper function to print tensor stats for quick debugging
+  void print_tensor_stats(const torch::Tensor& tensor, const std::string& name) {
+    if (!DEBUG_SP_PRECISION || !tensor.defined() || tensor.numel() == 0) {
+      return;
+    }
+    
+    auto tensor_cpu = tensor.cpu().to(torch::kFloat32);
+    auto min_val = tensor_cpu.min().item<float>();
+    auto max_val = tensor_cpu.max().item<float>();
+    auto mean_val = tensor_cpu.mean().item<float>();
+    auto std_val = tensor_cpu.std().item<float>();
+    
+    std::cout << "[DEBUG] Tensor " << name << " - Shape: " << tensor.sizes()
+              << ", Min: " << min_val << ", Max: " << max_val
+              << ", Mean: " << mean_val << ", Std: " << std_val << std::endl;
+  }
+  
+  // Helper function to enable/disable debug mode
+  void enable_sp_debug(bool enable) {
+    DEBUG_SP_PRECISION = enable;
+    std::cout << "[DEBUG] SP precision debugging " << (enable ? "enabled" : "disabled") << std::endl;
+  }
+}
 
 namespace xllm {
 
@@ -104,6 +163,12 @@ inline torch::Tensor pad_sequence(const torch::Tensor& input_,
                                   int64_t pad) {
   torch::Tensor input = input_;
   if (pad > 0) {
+    // DEBUG: Print pad info
+    if (DEBUG_SP_PRECISION) {
+      std::cout << "[DEBUG] pad_sequence - input shape: " << input.sizes()
+                << ", dim: " << dim << ", pad: " << pad << std::endl;
+    }
+    
     std::vector<int64_t> pad_size(input.sizes().begin(), input.sizes().end());
     pad_size[dim] = pad;
     input = torch::cat(
@@ -111,6 +176,11 @@ inline torch::Tensor pad_sequence(const torch::Tensor& input_,
          torch::zeros(pad_size,
                       torch::dtype(input.dtype()).device(input.device()))},
         dim);
+    
+    // DEBUG: Print output shape
+    if (DEBUG_SP_PRECISION) {
+      std::cout << "[DEBUG] pad_sequence - output shape: " << input.sizes() << std::endl;
+    }
   }
 
   auto output = input.contiguous();
@@ -121,7 +191,19 @@ inline torch::Tensor unpad_sequence(const torch::Tensor& input_,
                                     int64_t dim,
                                     int64_t pad) {
   if (pad > 0) {
+    // DEBUG: Print unpad info
+    if (DEBUG_SP_PRECISION) {
+      std::cout << "[DEBUG] unpad_sequence - input shape: " << input_.sizes()
+                << ", dim: " << dim << ", pad: " << pad << std::endl;
+    }
+    
     auto output = input_.narrow(dim, 0, input_.size(dim) - pad);
+    
+    // DEBUG: Print output shape
+    if (DEBUG_SP_PRECISION) {
+      std::cout << "[DEBUG] unpad_sequence - output shape: " << output.sizes() << std::endl;
+    }
+    
     return output;
   }
   return input_;
@@ -145,11 +227,18 @@ class RMSNormImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states) {
+    // DEBUG: Save input tensor for RMSNorm
+    print_tensor_stats(hidden_states, "RMSNorm_input");
+    
     auto [output, rstd] =
         at_npu::native::custom_ops::npu_rms_norm(hidden_states, weight_, eps_);
     if (is_bias_ && bias_.defined()) {
       output = output + bias_;
     }
+    
+    // DEBUG: Save output tensor for RMSNorm
+    print_tensor_stats(output, "RMSNorm_output");
+    
     return output;
   }
 
@@ -205,6 +294,10 @@ class AdaLayerNormContinuousImpl : public torch::nn::Module {
 
   torch::Tensor forward(const torch::Tensor& x,
                         const torch::Tensor& conditioning_embedding) {
+    // DEBUG: Print input stats for AdaLayerNormContinuous
+    print_tensor_stats(x, "AdaLayerNormContinuous_input_x");
+    print_tensor_stats(conditioning_embedding, "AdaLayerNormContinuous_input_conditioning");
+    
     auto cond_emb = silu_->forward(conditioning_embedding);
     cond_emb = cond_emb.to(x.dtype());
 
@@ -215,7 +308,18 @@ class AdaLayerNormContinuousImpl : public torch::nn::Module {
     scale = chunks[0];
     shift = chunks[1];
     auto x_norm = norm_->forward(x);
-    return x_norm * (1 + scale).unsqueeze(1) + shift.unsqueeze(1);
+    
+    // DEBUG: Print intermediate results
+    print_tensor_stats(x_norm, "AdaLayerNormContinuous_after_norm");
+    print_tensor_stats(scale, "AdaLayerNormContinuous_scale");
+    print_tensor_stats(shift, "AdaLayerNormContinuous_shift");
+    
+    auto result = x_norm * (1 + scale).unsqueeze(1) + shift.unsqueeze(1);
+    
+    // DEBUG: Print final result
+    print_tensor_stats(result, "AdaLayerNormContinuous_output");
+    
+    return result;
   }
 
   void load_state_dict(const StateDict& state_dict) {
@@ -252,6 +356,10 @@ class AdaLayerNormImpl : public torch::nn::Module {
       const torch::Tensor& x,
       const torch::Tensor& mod_params,
       const torch::Tensor& index = torch::Tensor()) {
+    // DEBUG: Print input stats for AdaLayerNorm
+    print_tensor_stats(x, "AdaLayerNorm_input_x");
+    print_tensor_stats(mod_params, "AdaLayerNorm_input_mod_params");
+    
     auto chunks = mod_params.chunk(3, -1);
     auto shift = chunks[0];
     auto scale = chunks[1];
@@ -300,8 +408,17 @@ class AdaLayerNormImpl : public torch::nn::Module {
 
     scale_result = 1 + scale_result;
 
+    // DEBUG: Print intermediate results
+    print_tensor_stats(shift_result, "AdaLayerNorm_shift_result");
+    print_tensor_stats(scale_result, "AdaLayerNorm_scale_result");
+    print_tensor_stats(gate_result, "AdaLayerNorm_gate_result");
+    
     auto result = at_npu::native::custom_ops::npu_layer_norm_eval(
         x, {hidden_size_}, scale_result, shift_result, eps_);
+    
+    // DEBUG: Print final results
+    print_tensor_stats(result, "AdaLayerNorm_output_result");
+    print_tensor_stats(gate_result, "AdaLayerNorm_output_gate");
 
     return std::make_tuple(result, gate_result);
   }
@@ -1354,44 +1471,78 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     int64_t heads = attn_->heads_;
     int64_t head_dim = inner_dim / heads;
 
+    // DEBUG: Save input tensors
+    save_tensor_for_debug(hidden_states, "sp_qkv", "input_hidden_states", rank_);
+    save_tensor_for_debug(encoder_hidden_states, "sp_qkv", "input_encoder_hidden_states", rank_);
+    print_tensor_stats(hidden_states, "hidden_states_input");
+    print_tensor_stats(encoder_hidden_states, "encoder_hidden_states_input");
+
     // Compute QKV for image stream (sample projections)
     auto img_query = attn_->to_q_->forward(hidden_states);
+    save_tensor_for_debug(img_query, "sp_qkv", "img_query_before_reshape", rank_);
 
     auto reshape_dims = std::vector<int64_t>{heads, -1};
     // img_query = img_query.unflatten(-1, reshape_dims);
     img_query = img_query.view({bs_img, -1, heads, head_dim});
+    save_tensor_for_debug(img_query, "sp_qkv", "img_query_after_reshape", rank_);
+    
     auto handle_iq = parallel_state::all_to_all_4D(
         img_query, rank_, world_size_, 2, 1, false, pg_);
     auto img_key = attn_->to_k_->forward(hidden_states);
+    save_tensor_for_debug(img_key, "sp_qkv", "img_key_before_reshape", rank_);
     // img_key = img_key.unflatten(-1, reshape_dims);
     img_key = img_key.view({bs_img, -1, heads, head_dim});
+    save_tensor_for_debug(img_key, "sp_qkv", "img_key_after_reshape", rank_);
+    
     img_query = parallel_state::all_to_all_4D_post2(handle_iq);
+    save_tensor_for_debug(img_query, "sp_qkv", "img_query_after_alltoall", rank_);
+    
     auto handle_ik = parallel_state::all_to_all_4D(
         img_key, rank_, world_size_, 2, 1, false, pg_);
     auto img_value = attn_->to_v_->forward(hidden_states);
+    save_tensor_for_debug(img_value, "sp_qkv", "img_value_before_reshape", rank_);
     // img_value = img_value.unflatten(-1, reshape_dims);
     img_value = img_value.view({bs_img, -1, heads, head_dim});
+    save_tensor_for_debug(img_value, "sp_qkv", "img_value_after_reshape", rank_);
+    
     img_key = parallel_state::all_to_all_4D_post2(handle_ik);
+    save_tensor_for_debug(img_key, "sp_qkv", "img_key_after_alltoall", rank_);
+    
     auto handle_iv = parallel_state::all_to_all_4D(
         img_value, rank_, world_size_, 2, 1, false, pg_);
 
     // Compute QKV for text stream (context projections)
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
+    save_tensor_for_debug(txt_query, "sp_qkv", "txt_query_before_reshape", rank_);
     // txt_query = txt_query.unflatten(-1, reshape_dims);
     txt_query = txt_query.view({bs_img, -1, heads, head_dim});
+    save_tensor_for_debug(txt_query, "sp_qkv", "txt_query_after_reshape", rank_);
+    
     img_value = parallel_state::all_to_all_4D_post2(handle_iv);
+    save_tensor_for_debug(img_value, "sp_qkv", "img_value_after_alltoall", rank_);
+    
     auto handle_tq = parallel_state::all_to_all_4D(
         txt_query, rank_, world_size_, 2, 1, false, pg_);
     auto txt_key = attn_->add_k_proj_->forward(encoder_hidden_states);
+    save_tensor_for_debug(txt_key, "sp_qkv", "txt_key_before_reshape", rank_);
     // txt_key = txt_key.unflatten(-1, reshape_dims);
     txt_key = txt_key.view({bs_img, -1, heads, head_dim});
+    save_tensor_for_debug(txt_key, "sp_qkv", "txt_key_after_reshape", rank_);
+    
     txt_query = parallel_state::all_to_all_4D_post2(handle_tq);
+    save_tensor_for_debug(txt_query, "sp_qkv", "txt_query_after_alltoall", rank_);
+    
     auto handle_tk = parallel_state::all_to_all_4D(
         txt_key, rank_, world_size_, 2, 1, false, pg_);
     auto txt_value = attn_->add_v_proj_->forward(encoder_hidden_states);
+    save_tensor_for_debug(txt_value, "sp_qkv", "txt_value_before_reshape", rank_);
     // txt_value = txt_value.unflatten(-1, reshape_dims);
     txt_value = txt_value.view({bs_img, -1, heads, head_dim});
+    save_tensor_for_debug(txt_value, "sp_qkv", "txt_value_after_reshape", rank_);
+    
     txt_key = parallel_state::all_to_all_4D_post2(handle_tk);
+    save_tensor_for_debug(txt_key, "sp_qkv", "txt_key_after_alltoall", rank_);
+    
     auto handle_tv = parallel_state::all_to_all_4D(
         txt_value, rank_, world_size_, 2, 1, false, pg_);
 
@@ -1402,7 +1553,23 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     txt_query = unpad_sequence(txt_query, 1, attn_->text_pad_);
     txt_key = unpad_sequence(txt_key, 1, attn_->text_pad_);
     txt_value = parallel_state::all_to_all_4D_post2(handle_tv);
+    save_tensor_for_debug(txt_value, "sp_qkv", "txt_value_after_alltoall", rank_);
     txt_value = unpad_sequence(txt_value, 1, attn_->text_pad_);
+
+    // DEBUG: Save final tensors
+    save_tensor_for_debug(img_query, "sp_qkv", "final_img_query", rank_);
+    save_tensor_for_debug(img_key, "sp_qkv", "final_img_key", rank_);
+    save_tensor_for_debug(img_value, "sp_qkv", "final_img_value", rank_);
+    save_tensor_for_debug(txt_query, "sp_qkv", "final_txt_query", rank_);
+    save_tensor_for_debug(txt_key, "sp_qkv", "final_txt_key", rank_);
+    save_tensor_for_debug(txt_value, "sp_qkv", "final_txt_value", rank_);
+    
+    print_tensor_stats(img_query, "img_query_final");
+    print_tensor_stats(img_key, "img_key_final");
+    print_tensor_stats(img_value, "img_value_final");
+    print_tensor_stats(txt_query, "txt_query_final");
+    print_tensor_stats(txt_key, "txt_key_final");
+    print_tensor_stats(txt_value, "txt_value_final");
 
     return std::make_tuple(
         img_query, img_key, img_value, txt_query, txt_key, txt_value);
@@ -1452,6 +1619,14 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       const std::tuple<at::Tensor, at::Tensor>& image_rotary_emb = {}) {
     torch::Tensor img_query, img_key, img_value;
     torch::Tensor txt_query, txt_key, txt_value;
+    auto rank_ = attn_->rank_;
+    
+    // DEBUG: Save input tensors
+    save_tensor_for_debug(hidden_states, "attention", "input_hidden_states", rank_);
+    save_tensor_for_debug(encoder_hidden_states, "attention", "input_encoder_hidden_states", rank_);
+    print_tensor_stats(hidden_states, "hidden_states_attention_input");
+    print_tensor_stats(encoder_hidden_states, "encoder_hidden_states_attention_input");
+
     // Compute QKV projections
     if (attn_->use_sp_) {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
@@ -1461,18 +1636,30 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
           qkv_matmul(hidden_states, encoder_hidden_states);
     }
 
+    // DEBUG: Save QKV tensors after computation
+    save_tensor_for_debug(img_query, "attention", "img_query_after_qkv", rank_);
+    save_tensor_for_debug(img_key, "attention", "img_key_after_qkv", rank_);
+    save_tensor_for_debug(img_value, "attention", "img_value_after_qkv", rank_);
+    save_tensor_for_debug(txt_query, "attention", "txt_query_after_qkv", rank_);
+    save_tensor_for_debug(txt_key, "attention", "txt_key_after_qkv", rank_);
+    save_tensor_for_debug(txt_value, "attention", "txt_value_after_qkv", rank_);
+
     // Apply QK normalization
     if (attn_->norm_q_) {
       img_query = attn_->norm_q_->forward(img_query);
+      save_tensor_for_debug(img_query, "attention", "img_query_after_norm", rank_);
     }
     if (attn_->norm_k_) {
       img_key = attn_->norm_k_->forward(img_key);
+      save_tensor_for_debug(img_key, "attention", "img_key_after_norm", rank_);
     }
     if (attn_->norm_added_q_) {
       txt_query = attn_->norm_added_q_->forward(txt_query);
+      save_tensor_for_debug(txt_query, "attention", "txt_query_after_norm", rank_);
     }
     if (attn_->norm_added_k_) {
       txt_key = attn_->norm_added_k_->forward(txt_key);
+      save_tensor_for_debug(txt_key, "attention", "txt_key_after_norm", rank_);
     }
 
     // Apply RoPE if provided
@@ -1484,10 +1671,21 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, false);
     txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, false);
 
+    // DEBUG: Save tensors after RoPE
+    save_tensor_for_debug(img_query, "attention", "img_query_after_rope", rank_);
+    save_tensor_for_debug(img_key, "attention", "img_key_after_rope", rank_);
+    save_tensor_for_debug(txt_query, "attention", "txt_query_after_rope", rank_);
+    save_tensor_for_debug(txt_key, "attention", "txt_key_after_rope", rank_);
+
     // Concatenate for joint attention - Order: [text, image]
     auto joint_query = torch::cat({txt_query, img_query}, 1);
     auto joint_key = torch::cat({txt_key, img_key}, 1);
     auto joint_value = torch::cat({txt_value, img_value}, 1);
+
+    // DEBUG: Save joint tensors
+    save_tensor_for_debug(joint_query, "attention", "joint_query", rank_);
+    save_tensor_for_debug(joint_key, "attention", "joint_key", rank_);
+    save_tensor_for_debug(joint_value, "attention", "joint_value", rank_);
 
     int head_num = img_query.size(2);
     // int64_t head_dim_ = img_query.size(-1);
@@ -1507,9 +1705,15 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
         /*next_tockens=*/65535);
 
     auto joint_hidden_states = std::get<0>(results);
+    // DEBUG: Save attention output
+    save_tensor_for_debug(joint_hidden_states, "attention", "joint_hidden_states_after_attention", rank_);
+    
     // Reshape back
     joint_hidden_states = joint_hidden_states.flatten(2, 3);
     joint_hidden_states = joint_hidden_states.to(joint_query.dtype());
+    
+    // DEBUG: Save after reshape
+    save_tensor_for_debug(joint_hidden_states, "attention", "joint_hidden_states_after_reshape", rank_);
 
     int64_t seq_txt = txt_query.size(1);
     int64_t seq_img = img_query.size(1);
@@ -1520,6 +1724,11 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto chunks = torch::split(joint_hidden_states, {seq_txt, seq_img}, 1);
     auto txt_attn_output = chunks[0];
     auto img_attn_output = chunks[1];
+    
+    // DEBUG: Save split attention outputs
+    save_tensor_for_debug(txt_attn_output, "attention", "txt_attn_output_split", rank_);
+    save_tensor_for_debug(img_attn_output, "attention", "img_attn_output_split", rank_);
+    
     // all tp all 前需要sp pad
     parallel_state::AllToAll4DHandle handle_io, handle_t_o;
     int64_t batch_size = hidden_states.size(0);
@@ -1527,7 +1736,13 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     int64_t attn_heads = attn_->heads_;
     int64_t head_dim = inner_dim / attn_heads;
     if (attn_->use_sp_) {
+      // DEBUG: Save before pad
+      save_tensor_for_debug(img_attn_output, "attention", "img_attn_output_before_pad", rank_);
+      save_tensor_for_debug(txt_attn_output, "attention", "txt_attn_output_before_pad", rank_);
+      
       img_attn_output = pad_sequence(img_attn_output, 1, attn_->img_pad_);
+      save_tensor_for_debug(img_attn_output, "attention", "img_attn_output_after_pad", rank_);
+      
       handle_io = parallel_state::all_to_all_4D(
           img_attn_output.view({batch_size, -1, head_num, head_dim}),
           rank_,
@@ -1537,8 +1752,13 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
           true,
           pg_);
       img_attn_output = parallel_state::all_to_all_4D_post(handle_io);
+      save_tensor_for_debug(img_attn_output, "attention", "img_attn_output_after_alltoall", rank_);
+      
       img_attn_output = img_attn_output.view({batch_size, -1, inner_dim});
+      
       txt_attn_output = pad_sequence(txt_attn_output, 1, attn_->text_pad_);
+      save_tensor_for_debug(txt_attn_output, "attention", "txt_attn_output_after_pad", rank_);
+      
       handle_t_o = parallel_state::all_to_all_4D(
           txt_attn_output.view({batch_size, -1, head_num, head_dim}),
           rank_,
@@ -1549,13 +1769,29 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
           pg_);
     }
     // Apply output projections
+    // DEBUG: Save before output projection
+    save_tensor_for_debug(img_attn_output, "attention", "img_attn_output_before_projection", rank_);
+    
     img_attn_output = attn_->to_out_->forward(img_attn_output);
+    save_tensor_for_debug(img_attn_output, "attention", "img_attn_output_after_projection", rank_);
 
     if (attn_->use_sp_) {
       txt_attn_output = parallel_state::all_to_all_4D_post(handle_t_o);
+      save_tensor_for_debug(txt_attn_output, "attention", "txt_attn_output_after_alltoall", rank_);
+      
       txt_attn_output = txt_attn_output.view({batch_size, -1, inner_dim});
     }
+    
+    // DEBUG: Save before text output projection
+    save_tensor_for_debug(txt_attn_output, "attention", "txt_attn_output_before_projection", rank_);
+    
     txt_attn_output = attn_->to_add_out_->forward(txt_attn_output);
+    save_tensor_for_debug(txt_attn_output, "attention", "txt_attn_output_after_projection", rank_);
+    
+    // DEBUG: Print final output stats
+    print_tensor_stats(img_attn_output, "img_attn_output_final");
+    print_tensor_stats(txt_attn_output, "txt_attn_output_final");
+    
     return std::make_tuple(img_attn_output, txt_attn_output);
   }
 
@@ -1605,9 +1841,18 @@ class FeedForwardImpl : public torch::nn::Module {
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states) {
+    // DEBUG: Print input stats for FeedForward
+    print_tensor_stats(hidden_states, "FeedForward_input");
+    
     torch::Tensor out = linear1_->forward(hidden_states);
+    print_tensor_stats(out, "FeedForward_after_linear1");
+    
     out = activation_(out);
+    print_tensor_stats(out, "FeedForward_after_activation");
+    
     out = linear2_->forward(out);
+    print_tensor_stats(out, "FeedForward_output");
+    
     return out;
   }
 
