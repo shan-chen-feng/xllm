@@ -1430,10 +1430,10 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
     // std::cout << "[DEBUG sp_qkv_matmul] txt_query after add_q_proj forward
     // shape: " << txt_query.sizes() << std::endl;
-    save_tensor(txt_query, "sp/txt_querymm");
-
+    
     // txt_query = txt_query.unflatten(-1, reshape_dims);
     txt_query = txt_query.view({bs_img, -1, heads, head_dim});
+    save_tensor(txt_query, "sp/txt_querymm");
     // std::cout << "[DEBUG sp_qkv_matmul] txt_query after view shape: " <<
     // txt_query.sizes() << std::endl;
 
@@ -1547,7 +1547,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     // std::cout << "[DEBUG qkv_matmul] img_query after to_q forward shape: " <<
     // img_query.sizes() << std::endl;
 
-    torch::save(hidden_states.cpu(), "tp1/hidden_states.pt");
+    torch::save(encoder_hidden_states.cpu(), "tp1/encoder_hidden_states.pt");
     // Reshape for multi-head attention
     int64_t heads = attn_->heads_;
     auto reshape_dims = std::vector<int64_t>{heads, -1};
@@ -1771,6 +1771,12 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto txt_attn_output = chunks[0];
     auto img_attn_output = chunks[1];
 
+    if (attn_->use_sp_) {
+      save_tensor(txt_attn_output, "sp/txt_attn_output");
+    } else {
+      torch::save(txt_attn_output.cpu(), "tp1/txt_attn_output.pt");
+    }
+
     // std::cout << "[DEBUG forward] txt_attn_output shape after split: " <<
     // txt_attn_output.sizes() << std::endl; std::cout << "[DEBUG forward]
     // img_attn_output shape after split: " << img_attn_output.sizes() <<
@@ -1828,6 +1834,9 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       // std::cout << "[DEBUG forward] txt_attn_output shape after view: " <<
       // txt_attn_output.sizes() << std::endl;
     }
+    if (attn_->use_sp_) {
+      save_tensor(txt_attn_output, "sp/txt_attn_output_a2a");
+    }
     txt_attn_output = attn_->to_add_out_->forward(txt_attn_output);
     // std::cout << "[DEBUG forward] txt_attn_output shape after to_add_out
     // forward: " << txt_attn_output.sizes() << std::endl;
@@ -1836,9 +1845,9 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     // img_attn_output.sizes() << std::endl; std::cout << "[DEBUG forward] Final
     // txt_attn_output shape: " << txt_attn_output.sizes() << std::endl;
     if (attn_->use_sp_) {
-      save_tensor(txt_attn_output, "sp/txt_attn_output_rope");
+      save_tensor(txt_attn_output, "sp/txt_attn_output_o");
     } else {
-      torch::save(txt_attn_output.cpu(), "tp1/txt_attn_output_rope.pt");
+      torch::save(txt_attn_output.cpu(), "tp1/txt_attn_output_o.pt");
     }
     return std::make_tuple(img_attn_output, txt_attn_output);
   }
