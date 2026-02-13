@@ -1430,7 +1430,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto txt_query = attn_->add_q_proj_->forward(encoder_hidden_states);
     // std::cout << "[DEBUG sp_qkv_matmul] txt_query after add_q_proj forward
     // shape: " << txt_query.sizes() << std::endl;
-    
+
     // txt_query = txt_query.unflatten(-1, reshape_dims);
     txt_query = txt_query.view({bs_img, -1, heads, head_dim});
     save_tensor(txt_query, "sp/txt_querymm");
@@ -1684,7 +1684,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
     if (attn_->use_sp_) {
       save_tensor(txt_query, "sp/txt_query_norm");
-      save_tensor(txt_key, "sp/txt_key_norm");  
+      save_tensor(txt_key, "sp/txt_key_norm");
     } else {
       torch::save(txt_query.cpu(), "tp1/txt_query_norm.pt");
       torch::save(txt_key.cpu(), "tp1/txt_key_norm.pt");
@@ -1709,7 +1709,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
     if (attn_->use_sp_) {
       save_tensor(txt_query, "sp/txt_query_rope");
-      save_tensor(txt_key, "sp/txt_key_rope");  
+      save_tensor(txt_key, "sp/txt_key_rope");
     } else {
       torch::save(txt_query.cpu(), "tp1/txt_query_rope.pt");
       torch::save(txt_key.cpu(), "tp1/txt_key_rope.pt");
@@ -2087,24 +2087,25 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     std::tie(txt_modulated, txt_gate1) =
         txt_norm1_->forward(encoder_hidden_states_, txt_mod1);
 
+    auto save_tensor = [this](const torch::Tensor& tensor,
+                              const std::string& name) {
+      if (tensor.defined()) {
+        torch::Tensor cpu_tensor = tensor.cpu();
+        std::string filename = name + "_rank_" +
+                               std::to_string(attn_processor_->attn_->rank_) +
+                               ".pt";
+        torch::save(cpu_tensor, filename);
+      }
+    };
     if (attn_processor_->attn_->use_sp_) {
-      auto save_tensor = [this](const torch::Tensor& tensor,
-                                const std::string& name) {
-        if (tensor.defined()) {
-          torch::Tensor cpu_tensor = tensor.cpu();
-          std::string filename = name + "_rank_" +
-                                 std::to_string(attn_processor_->attn_->rank_) +
-                                 ".pt";
-          torch::save(cpu_tensor, filename);
-        }
-      };
-
       save_tensor(modulate_index_, "sp/modulate_index");
       save_tensor(hidden_states_,
                   "sp/hidden_states_block");  // step2  有误差， 比较大
       save_tensor(encoder_hidden_states_, "sp/encoder_hidden_states_block");
       save_tensor(img_modulated, "sp/img_modulated");  // 有误差但能接受
-      save_tensor(txt_modulated, "sp/txt_modulated");
+      save_tensor(txt_modulated, "sp/txt_modulated");  
+      save_tensor(img_gate1, "sp/img_gate1");
+      save_tensor(img_gate1, "sp/txt_gate1");
     } else {
       torch::save(modulate_index_.cpu(), "tp1/modulate_index.pt");
       torch::save(hidden_states_.cpu(), "tp1/hidden_states_block.pt");
@@ -2112,6 +2113,8 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
                   "tp1/encoder_hidden_states_block.pt");
       torch::save(img_modulated.cpu(), "tp1/img_modulated.pt");
       torch::save(txt_modulated.cpu(), "tp1/txt_modulated.pt");
+      torch::save(img_gate1.cpu(), "tp1/img_gate1.pt");
+      torch::save(txt_gate1.cpu(), "tp1/txt_gate1.pt");
     }
 
     // Use QwenAttnProcessor2_0 for joint attention computation
@@ -2146,6 +2149,15 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     auto txt_mlp_output = txt_mlp_->forward(txt_modulated2);
     new_encoder_hidden_states =
         new_encoder_hidden_states + txt_gate2 * txt_mlp_output;
+    
+    if (attn_processor_->attn_->use_sp_) {
+      save_tensor(new_encoder_hidden_states, "sp/new_encoder_hidden_states_norm2"); 
+      save_tensor(new_hidden_states, "sp/new_hidden_states_norm2"); 
+      
+    } else {
+      torch::save(new_encoder_hidden_states.cpu(), "tp1/new_encoder_hidden_states_norm2.pt");
+      torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_norm2.pt");
+    }
 
     //  Clip to prevent overflow for fp16
     if (new_encoder_hidden_states.dtype() == torch::kFloat16) {
@@ -2154,6 +2166,18 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     }
     if (new_hidden_states.dtype() == torch::kFloat16) {
       new_hidden_states = new_hidden_states.clamp(-65504, 65504);
+    }
+    if (attn_processor_->attn_->use_sp_) {
+      save_tensor(img_gate2, "sp/img_gate2"); 
+      save_tensor(txt_gate2, "sp/txt_gate2"); 
+      save_tensor(new_encoder_hidden_states, "sp/new_encoder_hidden_states_overflow"); 
+      save_tensor(new_hidden_states, "sp/new_hidden_states_overflow"); 
+      
+    } else {
+      torch::save(img_gate2.cpu(), "tp1/img_gate2.pt");
+      torch::save(txt_gate2.cpu(), "tp1/txt_gate2.pt");
+      torch::save(new_encoder_hidden_states.cpu(), "tp1/new_encoder_hidden_states_overflow.pt");
+      torch::save(new_hidden_states.cpu(), "tp1/new_hidden_states_overflow.pt");
     }
     return std::make_tuple(new_hidden_states, new_encoder_hidden_states);
   }
