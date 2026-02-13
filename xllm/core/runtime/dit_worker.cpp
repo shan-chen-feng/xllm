@@ -73,7 +73,7 @@ DiTCacheConfig parse_dit_cache_from_flags() {
     cache_config.residual_cache.skip_interval_steps =
         FLAGS_dit_cache_skip_interval_steps;
   } else if (FLAGS_dit_cache_policy == "None") {
-    cache_config.selected_policy = PolicyType::TaylorSeer;
+    cache_config.selected_policy = PolicyType::None;
   }
   return cache_config;
 }

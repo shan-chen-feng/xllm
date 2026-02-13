@@ -168,7 +168,7 @@ void ProcessGroupImpl::allgather(const torch::Tensor& input,
                                        0);
   HcclComm hcclComm = npu_comm_manager_->GetCommPtr(commDomain);
   */
-
+  /*
   auto cfg_parallel_info = dit_mapping_npu_->get_parallel_info("cfg");
   HcclCommConfig config;
   HcclCommConfigInit(&config);
@@ -187,16 +187,16 @@ void ProcessGroupImpl::allgather(const torch::Tensor& input,
   oss << "]";
   LOG(INFO) << "device: " << device() << "rank_group: " << oss.str()
             << " local_rank: " << cfg_parallel_info.rank();
-
-  HcclCreateSubCommConfig(/*comm=*/&comm_,
-                          /*rankNum=*/2,
-                          /*rankIds=*/rank_per_group.data(),
-                          /*subCommId=*/1,
-                          /*subCommRankId=*/cfg_parallel_info.rank(),
-                          &config,
-                          &hcclComm);
-  sleep(10);
-  return;
+  */
+  // HcclCreateSubCommConfig(/*comm=*/&comm_,
+  //                         /*rankNum=*/2,
+  //                         /*rankIds=*/rank_per_group.data(),
+  //                         /*subCommId=*/1,
+  //                         /*subCommRankId=*/cfg_parallel_info.rank(),
+  //                         &config,
+  //                         &hcclComm);
+  // sleep(10);
+  // return;
 
   CHECK_EQ(input.device(), device())
       << "input should be on the same device as the process group";
@@ -233,7 +233,6 @@ void ProcessGroupImpl::allgather(const torch::Tensor& input,
   done->record(comm_stream_);
   done->block(compute_stream);
   comm_stream_.synchronize();
-  LOG(INFO) << "finish all gather";
   for (int i = 0; i < static_cast<int>(outputs.size()); ++i) {
     outputs[i].copy_(flattened_output[i], /*non_blocking=*/true);
   }
@@ -313,8 +312,6 @@ void ProcessGroupImpl::alltoall_single(
                                              comm_stream_);
   c10_npu::NPUCachingAllocator::recordStream(recv.storage().data_ptr(),
                                              comm_stream_);
-  LOG(INFO) << "begin all2all";
-  LOG(INFO) << "is syn : " << is_sync;
   HCCLCHECK(HcclAlltoAllV(
       /*sendBuf=*/send.data_ptr(),
       /*sendCounts=*/sc.data(),
@@ -332,7 +329,6 @@ void ProcessGroupImpl::alltoall_single(
     done->record(comm_stream_);
     done->block(compute_stream);
     comm_stream_.synchronize();
-    LOG(INFO) << "syn";
   } else {
     auto done = std::make_shared<c10_npu::NPUEvent>();
     done->record(comm_stream_);

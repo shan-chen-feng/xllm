@@ -260,12 +260,6 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
   }
 
   DiTForwardOutput forward(const DiTForwardInput& input) {
-    int32_t device_id = options_.device().index();
-    auto ranks_per_group = process_group_->get_rank_per_group("cfg");
-    torch::Tensor test_t = torch::ones({10, 10}, options_);
-    auto pos_neg_noise_preds =
-        xllm::parallel_state::gather(test_t, process_group_, 0);
-    LOG(INFO) << "rank " << device_id << " finish all gather";
     torch::NoGradGuard no_grad;
     const auto& generation_params = input.generation_params;
     auto height = generation_params.height;
@@ -303,13 +297,47 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
     auto negative_pooled_prompt_embeds = input.negative_pooled_prompt_embeds;
     torch::Tensor negative_prompt_embeds_mask;
 
-    CHECK(input.images.defined())
-        << "expected image inputs, but got an empty tensor";
+    std::vector<torch::Tensor> image_list;
 
-    CHECK(input.images.dim() == 4)
-        << "image inputs are expected to be a 4 dim tensor, but got: "
-        << input.images.dim() << "s tensor";
-    auto images = input.images.to(options_.device(), dtype_);
+    torch::Tensor images;
+    if (input.images.defined()) {
+      images = input.images.to(options_.device(), dtype_);
+      if (input.images.dim() == 3) {
+        image_list.emplace_back(images);
+      } else if (input.images.dim() == 4) {
+        if (input.images.size(0) > 1) {
+          LOG(ERROR) << "currently dit models doesn't support batch inference"
+                     << "batch size: " << input.images.size(0);
+        }
+        image_list.emplace_back(images[0]);
+      } else {
+        LOG(ERROR)
+            << "image inputs are expected to be a 4 dim tensor, but got: "
+            << input.images.dim() << "s tensor";
+      }
+    } else {
+      LOG(ERROR) << "QwenImageEditPlus pipeline expected to have "
+                 << "image inputs";
+    }
+
+    torch::Tensor conditional_images;
+    if (input.condition_images.defined()) {
+      conditional_images = input.condition_images.to(options_.device(), dtype_);
+      if (input.condition_images.dim() == 3) {
+        image_list.emplace_back(conditional_images);
+      } else if (input.condition_images.dim() == 4) {
+        if (input.condition_images.size(0) > 1) {
+          LOG(ERROR) << "currently dit models doesn't support batch inference"
+                     << "batch size: " << input.condition_images.size(0);
+        }
+        image_list.emplace_back(conditional_images[0]);
+      } else {
+        LOG(ERROR)
+            << "image inputs are expected to be a 4 dim tensor, but got: "
+            << input.condition_images.dim() << "s tensor";
+      }
+    }
+
     double height_size = images.size(2);
     double width_size = images.size(3);
     int64_t num_images_per_prompt = 1;
@@ -334,7 +362,7 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
     std::vector<std::pair<int64_t, int64_t>> vae_image_sizes;
 
     if (images.defined() && !(images.size(1) == latent_channels_)) {
-      for (size_t i = 0; i < images.size(0); i++) {
+      for (size_t i = 0; i < image_list.size(); i++) {
         auto [condition_width, condition_height] =
             calculate_dimensions(CONDITION_IMAGE_SIZE, aspect_ratio);
         auto [vae_width, vae_height] =
@@ -343,7 +371,7 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
         condition_image_sizes.push_back({condition_width, condition_height});
         vae_image_sizes.push_back({vae_width, vae_height});
 
-        auto img = images[i].unsqueeze(0);
+        auto img = image_list[i].unsqueeze(0);
         auto condition_img = vae_image_processor_->resize(
             img, condition_height, condition_width);
         auto vae_img =
@@ -545,7 +573,7 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
                                            /*use_cfg=*/false,
                                            /*step_index=*/i);
         noise_pred = noise_pred.slice(1, 0, final_latents.size(1));
-
+        LOG(INFO) << do_true_cfg;
         if (do_true_cfg) {
           neg_noise_pred = transformer_->forward(latent_model_input,
                                                  negative_prompt_embeds,

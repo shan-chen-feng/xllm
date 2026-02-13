@@ -82,6 +82,8 @@ struct DiTForwardInput {
 
   torch::Tensor images;
 
+  torch::Tensor condition_images;
+
   torch::Tensor mask_images;
 
   torch::Tensor control_image;

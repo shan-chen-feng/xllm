@@ -1542,8 +1542,6 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       txt_query = all_to_all_4D_post2(handle_tq);
       txt_key = all_to_all_4D_post2(handle_tk);
       txt_value = all_to_all_4D_post2(handle_tv);
-      // img_query.print();
-      // txt_query.print();
     }
     // Apply RoPE if provided
     auto img_freqs = std::get<0>(image_rotary_emb);
@@ -2010,7 +2008,6 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       const std::unordered_map<std::string, torch::Tensor>& attention_kwargs =
           {},
       const std::vector<torch::Tensor>& controlnet_block_samples = {}) {
-    hidden_states.print();
     auto new_hidden_states = img_in_->forward(hidden_states);
     auto new_timestep = timestep.to(new_hidden_states.dtype());
     torch::Tensor modulate_index;
@@ -2037,7 +2034,6 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     } else {
       modulate_index = torch::Tensor();
     }
-
     auto new_encoder_hidden_states = txt_norm_->forward(encoder_hidden_states);
     new_encoder_hidden_states = txt_in_->forward(new_encoder_hidden_states);
 
@@ -2046,10 +2042,8 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     auto [text_seq_len, per_sample_len, new_encoder_hidden_states_mask] =
         compute_text_seq_len_from_mask(new_encoder_hidden_states,
                                        encoder_hidden_states_mask);
-
     auto temb = time_text_embed_->forward(
         new_timestep, new_hidden_states, addition_t_cond);
-
     std::tuple<torch::Tensor, torch::Tensor> image_rotary_emb;
     if (use_layer3d_rope_) {
       image_rotary_emb = pos_embed_3d_rope_->forward(
@@ -2165,12 +2159,9 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
 
     new_hidden_states = norm_out_->forward(new_hidden_states, temb);
     new_hidden_states = proj_out_->forward(new_hidden_states);
-    new_hidden_states.print();
-    LOG(INFO) << "hhh";
     if (FLAGS_dit_sp_size > 1) {
       new_hidden_states =
           gather_sequence(new_hidden_states, 1, 0, process_group_);
-      new_hidden_states.print();
     }
     return new_hidden_states;
   }
