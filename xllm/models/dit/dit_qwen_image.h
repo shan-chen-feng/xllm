@@ -300,7 +300,7 @@ class AdaLayerNormImpl : public torch::nn::Module {
       gate_result = gate.unsqueeze(1);
     }
 
-    scale_result = 1 + scale_result;
+    // scale_result = 1 + scale_result;
 
     auto result = at_npu::native::custom_ops::npu_layer_norm_eval(
         x, {hidden_size_}, scale_result, shift_result, eps_);
