@@ -299,11 +299,23 @@ class AdaLayerNormImpl : public torch::nn::Module {
       scale_result = scale.unsqueeze(1);
       gate_result = gate.unsqueeze(1);
     }
-
     // scale_result = 1 + scale_result;
 
-    auto result = at_npu::native::custom_ops::npu_layer_norm_eval(
-        x, {hidden_size_}, scale_result, shift_result, eps_);
+    // auto result = at_npu::native::custom_ops::npu_layer_norm_eval(
+    //     x, {hidden_size_}, scale_result, shift_result, eps_);
+
+    
+    // Apply layer norm first, then affine transformation
+    // x: [B, L, H], shift_result/scale_result: [B, L, D] or [2B, 1, D]
+    
+    // Scale should be 1 + scale
+    auto scale_adjusted = 1 + scale_result;
+    
+    // First apply layer norm to x
+    auto x_normalized = torch::layer_norm(x, {hidden_size_}, torch::Tensor(), torch::Tensor(), eps_);
+    
+    // Then apply affine transformation: LayerNorm(x) * scale + shift
+    auto result = x_normalized * scale_adjusted + shift_result;
 
     return std::make_tuple(result, gate_result);
   }
