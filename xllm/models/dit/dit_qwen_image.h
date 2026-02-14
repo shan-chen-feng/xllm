@@ -1640,9 +1640,9 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           sp_qkv_matmul(hidden_states, encoder_hidden_states);
 
-      // save_tensor(img_query, "sp/img_query");
-      // save_tensor(img_key, "sp/img_key");
-      // save_tensor(img_value, "sp/img_value");
+      save_tensor(img_query, "sp/img_query");
+      save_tensor(img_key, "sp/img_key");
+      save_tensor(img_value, "sp/img_value");
       save_tensor(txt_query, "sp/txt_query");
       save_tensor(txt_key, "sp/txt_key");
       save_tensor(txt_value, "sp/txt_value");
@@ -1650,9 +1650,9 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       std::tie(img_query, img_key, img_value, txt_query, txt_key, txt_value) =
           qkv_matmul(hidden_states, encoder_hidden_states);
       // 将张量转移到CPU并保存到本地
-      // torch::save(img_query.cpu(), "tp1/img_query.pt");
-      // torch::save(img_key.cpu(), "tp1/img_key.pt");
-      // torch::save(img_value.cpu(), "tp1/img_value.pt");
+      torch::save(img_query.cpu(), "tp1/img_query.pt");
+      torch::save(img_key.cpu(), "tp1/img_key.pt");
+      torch::save(img_value.cpu(), "tp1/img_value.pt");
       torch::save(txt_query.cpu(), "tp1/txt_query.pt");
       torch::save(txt_key.cpu(), "tp1/txt_key.pt");
       torch::save(txt_value.cpu(), "tp1/txt_value.pt");
@@ -1773,8 +1773,10 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
     if (attn_->use_sp_) {
       save_tensor(txt_attn_output, "sp/txt_attn_output");
+      save_tensor(img_attn_output, "sp/img_attn_output");
     } else {
       torch::save(txt_attn_output.cpu(), "tp1/txt_attn_output.pt");
+      torch::save(img_attn_output.cpu(), "tp1/img_attn_output.pt");
     }
 
     // std::cout << "[DEBUG forward] txt_attn_output shape after split: " <<
@@ -2129,6 +2131,13 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     // QwenAttnProcessor2_0 returns (img_output, txt_output)
     auto img_attn_output = std::get<0>(attn_output);
     auto txt_attn_output = std::get<1>(attn_output);
+    if (attn_processor_->attn_->use_sp_) {
+      save_tensor(img_attn_output, "sp/img_attn_output_block"); 
+      save_tensor(txt_attn_output, "sp/txt_attn_output_block"); 
+    } else {
+      torch::save(img_attn_output.cpu(), "tp1/img_attn_output_block.pt");
+      torch::save(txt_attn_output.cpu(), "tp1/txt_attn_output_block.pt");
+    }
 
     //  Apply attention gates and add residual
     auto new_hidden_states = hidden_states_ + img_gate1 * img_attn_output;
