@@ -1710,9 +1710,17 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     if (attn_->use_sp_) {
       save_tensor(txt_query, "sp/txt_query_rope");
       save_tensor(txt_key, "sp/txt_key_rope");
+      save_tensor(img_query, "sp/img_query_rope");
+      save_tensor(img_key, "sp/img_key_rope");
+      save_tensor(txt_value, "sp/txt_value_rope");
+      save_tensor(img_value, "sp/img_value_rope");
     } else {
       torch::save(txt_query.cpu(), "tp1/txt_query_rope.pt");
       torch::save(txt_key.cpu(), "tp1/txt_key_rope.pt");
+      torch::save(img_query.cpu(), "tp1/img_query_rope.pt");
+      torch::save(img_key.cpu(), "tp1/img_key_rope.pt");  
+      torch::save(txt_value.cpu(), "tp1/txt_value_rope.pt");
+      torch::save(img_value.cpu(), "tp1/img_value_rope.pt");
     }
 
     // std::cout << "[DEBUG forward] img_query shape after RoPE: " <<
