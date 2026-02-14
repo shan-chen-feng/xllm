@@ -2324,7 +2324,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     if (use_sp_) {
       torch::save(hidden_states.cpu(), "sp/hidden_states_in.pt");
       torch::save(hidden_states.cpu(), "sp/encoder_hidden_states.pt");
-      hidden_states_ = torch::load("tp1/hidden_states_in.pt");
+      torch::load(hidden_states_, "tp1/hidden_states_in.pt");
     } else {
       torch::save(hidden_states.cpu(), "tp1/hidden_states_in.pt");
       torch::save(hidden_states.cpu(), "sp/encoder_hidden_states.pt");
