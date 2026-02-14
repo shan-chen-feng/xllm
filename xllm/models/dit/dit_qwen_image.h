@@ -2322,12 +2322,13 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
       const std::vector<torch::Tensor>& controlnet_block_samples = {}) {
     torch::Tensor hidden_states_ = hidden_states;
     if (use_sp_) {
-      torch::load(hidden_states_, "tp1/hidden_states_in.pt");
-      hidden_states_ = hidden_states_.to("npu");
+      torch::load(hidden_states_, "tp1/hidden_states_in_npu.pt");
+      hidden_states_ = hidden_states_.to(hidden_states.device());
       torch::save(hidden_states.cpu(), "sp/hidden_states_in.pt");
       torch::save(hidden_states.cpu(), "sp/encoder_hidden_states.pt");
     } else {
       torch::save(hidden_states.cpu(), "tp1/hidden_states_in.pt");
+      torch::save(hidden_states, "tp1/hidden_states_in_npu.pt");
       torch::save(hidden_states.cpu(), "sp/encoder_hidden_states.pt");
     }
     auto new_hidden_states = img_in_->forward(hidden_states_);
