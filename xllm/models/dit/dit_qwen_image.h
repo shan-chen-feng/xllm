@@ -2102,6 +2102,7 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
       save_tensor(hidden_states_,
                   "sp/hidden_states_block");  // step2  有误差， 比较大
       save_tensor(encoder_hidden_states_, "sp/encoder_hidden_states_block");
+      save_tensor(img_mod1, "sp/img_mod1");
       save_tensor(img_modulated, "sp/img_modulated");  // 有误差但能接受
       save_tensor(txt_modulated, "sp/txt_modulated");  
       save_tensor(img_gate1, "sp/img_gate1");
@@ -2112,6 +2113,7 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
       torch::save(encoder_hidden_states_.cpu(),
                   "tp1/encoder_hidden_states_block.pt");
       torch::save(img_modulated.cpu(), "tp1/img_modulated.pt");
+      torch::save(img_mod1.cpu(), "tp1/img_mod1.pt");
       torch::save(txt_modulated.cpu(), "tp1/txt_modulated.pt");
       torch::save(img_gate1.cpu(), "tp1/img_gate1.pt");
       torch::save(txt_gate1.cpu(), "tp1/txt_gate1.pt");
