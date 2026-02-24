@@ -47,6 +47,7 @@ limitations under the License.
 #include <torch_npu/csrc/libs/init_npu.h>
 #include <torch_npu/torch_npu.h>
 
+#include <cstdlib>
 namespace xllm {
 namespace qwenimage {
 
@@ -380,7 +381,13 @@ class AdaLayerNormImpl : public torch::nn::Module {
   AdaLayerNormImpl(const ModelContext& contex,
                    int64_t hidden_size,
                    double eps = 1e-6)
-      : hidden_size_(hidden_size), eps_(eps) {}
+      : hidden_size_(hidden_size), eps_(eps) {
+    norm_ = register_module(
+        "norm",
+        torch::nn::LayerNorm(torch::nn::LayerNormOptions({hidden_size})
+                                 .elementwise_affine(false)
+                                 .eps(eps)));
+  }
 
   std::tuple<torch::Tensor, torch::Tensor> forward(
       const torch::Tensor& x,
@@ -433,15 +440,17 @@ class AdaLayerNormImpl : public torch::nn::Module {
 
     scale_result = 1 + scale_result;
 
-    auto result = at_npu::native::custom_ops::npu_layer_norm_eval(
-        x, {hidden_size_}, scale_result, shift_result, eps_);
-
+    // auto result = at_npu::native::custom_ops::npu_layer_norm_eval(
+    //     x, {hidden_size_}, scale_result, shift_result, eps_);
+    auto x_norm = norm_->forward(x);
+    auto result = x_norm * scale_result + shift_result;
     return std::make_tuple(result, gate_result);
   }
 
  private:
   double eps_;
   int64_t hidden_size_;
+  torch::nn::LayerNorm norm_{nullptr};
 };
 TORCH_MODULE(AdaLayerNorm);
 
@@ -1833,7 +1842,6 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     torch::Tensor img_modulated, img_gate1;
     std::tie(img_modulated, img_gate1) =
         img_norm1_->forward(hidden_states, img_mod1, modulate_index);
-
     //  Process text stream - norm1 + modulation
     torch::Tensor txt_modulated, txt_gate1;
     std::tie(txt_modulated, txt_gate1) =
