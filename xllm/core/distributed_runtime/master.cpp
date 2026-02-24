@@ -268,6 +268,27 @@ Master::Master(const Options& options, EngineType type) : options_(options) {
             options_.max_tokens_per_chunk_for_prefill());
 
     engine_ = std::make_unique<RecEngine>(eng_options);
+  } else if (type == EngineType::DIT) {
+    // construct dit engine
+    runtime::Options eng_options;
+    eng_options.model_path(options.model_path())
+        .model_id(options.model_id())
+        .devices(devices)
+        .backend(options.backend())
+        .max_memory_utilization(options_.max_memory_utilization())
+        .master_node_addr(options.master_node_addr())
+        .nnodes(options.nnodes())
+        .task_type(options_.task_type())
+        .enable_shm(options_.enable_shm())
+        .input_shm_size(options_.input_shm_size() * 1024 * 1024)
+        .output_shm_size(options_.output_shm_size() * 1024 * 1024)
+        .is_local(options_.is_local())
+        .node_rank(options_.node_rank())
+        .enable_schedule_overlap(options_.enable_schedule_overlap())
+        .dp_size(options_.dp_size());
+
+    auto dit_engine = std::make_unique<DiTEngine>(eng_options);
+    engine_ = std::move(dit_engine);
   } else {
     LOG(WARNING) << "Not supported llm engine type: "
                  << static_cast<size_t>(type);

@@ -28,7 +28,7 @@ namespace xllm {
 // dit related forward input params
 struct DiTForwardInput {
   DiTForwardInput to(const torch::Device& device,
-                     torch::ScalarType dtype) const {
+                     torch::ScalarType dtype = torch::kBFloat16) const {
     DiTForwardInput input = *this;
 
     if (prompt_embeds.defined()) {
