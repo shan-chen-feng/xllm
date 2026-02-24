@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/common/options.h"
 #include "core/common/types.h"
+#include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/master.h"
 #include "core/util/json_reader.h"
 #include "core/util/net.h"
@@ -246,10 +247,14 @@ int run() {
       .is_local(is_local);
 
   InstanceName::name()->set_name(options.instance_name().value_or(""));
-
   // working node
   if (options.node_rank() != 0) {
-    auto master = std::make_unique<LLMAssistantMaster>(options);
+    std::unique_ptr<Master> master;
+    if (FLAGS_backend == "dit") {
+      master = std::make_unique<DiTAssistantMaster>(options);
+    } else {
+      master = std::make_unique<LLMAssistantMaster>(options);
+    }
     master->run();
     return 0;
   } else {

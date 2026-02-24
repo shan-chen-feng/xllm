@@ -59,13 +59,17 @@ bool ShmChannel::execute_model_with_shm(const RawForwardInput& input,
       return false;
     }
   }
+  LOG(INFO) << "enter, output_shm";
   output_shm_manager_->raw_output_read(raw_output);
+  LOG(INFO) << "finish, output_shm";
   return true;
 }
 
 void ShmChannel::execute_model_async(
     const RawForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
+  LOG(INFO) << "inside shm";
+  LOG(INFO) << enable_shm_;
   if (enable_shm_) {
     // write to shared memory, then wait output.
     RawForwardOutput raw_output;

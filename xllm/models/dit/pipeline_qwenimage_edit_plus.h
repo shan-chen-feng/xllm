@@ -275,6 +275,7 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
 
     auto prompts = input.prompts;
     auto prompts_2 = input.prompts_2;
+    LOG(INFO) << prompts[0];
     auto negative_prompts = input.negative_prompts;
     auto negative_prompts_2 = input.negative_prompts_2;
     auto latents = input.latents;
@@ -300,6 +301,9 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
     std::vector<torch::Tensor> image_list;
 
     torch::Tensor images;
+    LOG(INFO) << input.images.defined();
+    input.debug_print();
+    input.save_with_prefix("after_");
     if (input.images.defined()) {
       images = input.images.to(options_.device(), dtype_);
       if (input.images.dim() == 3) {
@@ -460,6 +464,8 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
       negative_txt_seq_lens = negative_prompt_embeds_mask.sum(1);
     }
 
+    prompt_embeds.print();
+    prompt_embeds_mask.print();
     if (prompt_embeds.size(1) % FLAGS_dit_sp_size != 0) {
       int64_t pad_len =
           FLAGS_dit_sp_size - prompt_embeds.size(1) % FLAGS_dit_sp_size;

@@ -109,7 +109,15 @@ void WorkerServer::create_server(
   std::unique_ptr<Worker> worker =
       std::make_unique<Worker>(*parallel_args, device, options, worker_type);
   worker_service->set_worker(std::move(worker));
-  if (options.enable_shm() && input_shm_manager && output_shm_manager) {
+  LOG(INFO) << options.enable_shm() && input_shm_manager && output_shm_manager;
+  bool create_shm =
+      options.enable_shm() && input_shm_manager && output_shm_manager;
+  LOG(INFO) << create_shm;
+  LOG(INFO) << options.enable_shm();
+  LOG(INFO) << input_shm_manager;
+  LOG(INFO) << output_shm_manager;
+  if (create_shm) {
+    LOG(INFO) << "inside";
     worker_service->create_polling_shm_thread(std::move(input_shm_manager),
                                               std::move(output_shm_manager));
   }
@@ -206,10 +214,16 @@ void WorkerServer::prepare_shm(
         "xllm_" + net::extract_port(options.master_node_addr().value());
     string name = ForwardSharedMemoryManager::create_unique_name(
         name_prefix, dp_group, FORWARD_RAW_INPUT_TYPE, parallel_args.rank());
+    LOG(INFO) << options.input_shm_size();
+    LOG(INFO) << is_creator;
+    LOG(INFO) << FORWARD_RAW_INPUT_TYPE;
     input_shm_manager = std::make_unique<ForwardSharedMemoryManager>(
         name, options.input_shm_size(), is_creator, FORWARD_RAW_INPUT_TYPE);
     LOG(INFO) << "Create input shared memory manager with name: " << name;
 
+    LOG(INFO) << options.output_shm_size();
+    LOG(INFO) << is_creator;
+    LOG(INFO) << FORWARD_RAW_OUTPUT_TYPE;
     name = ForwardSharedMemoryManager::create_unique_name(
         name_prefix, dp_group, FORWARD_RAW_OUTPUT_TYPE, parallel_args.rank());
     output_shm_manager = std::make_unique<ForwardSharedMemoryManager>(
@@ -231,7 +245,8 @@ WorkerServer::WorkerServer(int local_worker_idx,
 
   if (worker_type == WorkerType::LLM || worker_type == WorkerType::ELM ||
       worker_type == WorkerType::VLM || worker_type == WorkerType::EVLM ||
-      worker_type == WorkerType::REC || worker_type == WorkerType::MMEVLM) {
+      worker_type == WorkerType::REC || worker_type == WorkerType::MMEVLM ||
+      worker_type == WorkerType::DIT) {
     if (use_spawn_worker) {
       // start worker in a spawn process(for offline inference worker.)
       create_spawn_server(local_worker_idx,

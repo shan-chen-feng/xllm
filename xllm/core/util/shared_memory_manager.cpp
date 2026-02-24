@@ -44,7 +44,7 @@ SharedMemoryManager::SharedMemoryManager(const std::string& name,
   // First try to create exclusively (O_CREAT | O_EXCL)
   fd_ = shm_open(name.c_str(), O_CREAT | O_RDWR | O_EXCL, 0666);
   is_creator = (fd_ != -1);
-
+  LOG(INFO) << " is_creator " << is_creator;
   // If creation failed, try opening existing
   if (!is_creator) {
     fd_ = shm_open(name.c_str(), O_RDWR, 0666);
@@ -97,9 +97,9 @@ SharedMemoryManager::SharedMemoryManager(const std::string& name,
   }
 
   // Initialize memory to zero only for creator.
-  if (is_creator) {
-    std::memset(addr_, 0, size_);
-  }
+  // if (is_creator) {
+  std::memset(addr_, 0, size_);
+  //}
 }
 
 SharedMemoryManager::~SharedMemoryManager() {

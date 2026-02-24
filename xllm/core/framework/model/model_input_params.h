@@ -28,6 +28,7 @@ limitations under the License.
 #include "framework/batch/batch_forward_type.h"
 #include "framework/request/mm_batch_data.h"
 #include "npu_dp_ep_padding.h"
+#include "runtime/dit_forward_params.h"
 #include "util/hash_util.h"
 #include "util/tensor_helper.h"
 
@@ -284,6 +285,8 @@ struct ModelInputParams {
 
     params.batch_id = batch_id;
 
+    params.dit_forward_input = dit_forward_input.to(device);
+
     if (const auto* onerec = onerec_params()) {
       params.rec_params = onerec->to(device);
     }
@@ -436,6 +439,9 @@ struct ModelInputParams {
   std::vector<int32_t> ring_cache_seqlen_host;
 
   RecModelInputParams rec_params;
+
+  // dit input data
+  DiTForwardInput dit_forward_input;
 
   const OneRecModelInputParams* onerec_params() const {
     return std::get_if<OneRecModelInputParams>(&rec_params);

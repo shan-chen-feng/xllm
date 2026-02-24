@@ -19,6 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <sys/sysinfo.h>
 
+#include "common/device_monitor.h"
 #include "core/common/metrics.h"
 #include "core/platform/device.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -28,24 +29,43 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
-DiTEngine::DiTEngine(const runtime::Options& options) : options_(options) {
+DiTEngine::DiTEngine(const runtime::Options& options,
+                     std::shared_ptr<DistManager> dist_manager)
+    : options_(options), dist_manager_(dist_manager) {
+  auto master_node_addr = options.master_node_addr().value_or("");
+  CHECK(!master_node_addr.empty())
+      << " DIT need to set master node addr, Please set --master_node_addr.";
+
   const auto& devices = options_.devices();
+  // initialize device monitor
+  DeviceMonitor::get_instance().initialize(devices);
   CHECK_GT(devices.size(), 0) << "At least one device is required";
 
   CHECK(!devices[0].is_cpu()) << "CPU device is not supported";
   const auto device_type = devices[0].type();
-  for (size_t i = 0; i < devices.size(); ++i) {
-    CHECK(devices[i].type() == device_type)
+  for (const auto device : devices) {
+    CHECK_EQ(device.type(), device_type)
         << "All devices should be the same type";
-    Device device(devices[i]);
-    device.set_device();
+#if defined(USE_NPU)
+    FLAGS_enable_atb_comm_multiprocess =
+        options.enable_offline_inference() || (options.nnodes() > 1);
+#endif
   }
 
+  // setup all workers and create worker clients in nnode_rank=0 engine side.
+  setup_workers(options);
+  worker_clients_num_ = worker_clients_.size();
+
+  // init thread pool
+  threadpool_ = std::make_unique<ThreadPool>(16);
+
+  /*
   if (devices.size() > 1) {
     LOG(INFO) << "hhh create process group";
     // create a process group for each device if there are multiple gpus
     process_groups_ = parallel_state::create_npu_process_groups(devices);
   }
+
   const int32_t world_size = static_cast<int32_t>(devices.size());
 
   CHECK(!options_.enable_shm()) << "Dit can not support enable_shm currently.";
@@ -76,6 +96,14 @@ DiTEngine::DiTEngine(const runtime::Options& options) : options_(options) {
         .within(std::chrono::seconds(timeout_seconds))
         .get();
   }
+  */
+}
+
+void DiTEngine::setup_workers(const runtime::Options& options) {
+  if (!dist_manager_) {
+    dist_manager_ = std::make_shared<DistManager>(options);
+  }
+  worker_clients_ = dist_manager_->get_worker_clients();
 }
 
 bool DiTEngine::init() {
@@ -88,13 +116,13 @@ bool DiTEngine::init() {
 
 bool DiTEngine::init_model() {
   const std::string& model_path = options_.model_path();
+
   // init model for each worker in parallel
   // multiple workers, call async init
   std::vector<folly::SemiFuture<bool>> futures;
-  LOG(INFO) << "Starting to init model on " << workers_.size() << " workers.";
-  futures.reserve(workers_.size());
-  for (auto& worker : workers_) {
-    futures.push_back(worker->init_model_async(model_path));
+  futures.reserve(worker_clients_num_);
+  for (auto& worker : worker_clients_) {
+    futures.push_back(worker->init_model_async(model_path, FLAGS_random_seed));
   }
 
   // wait for all futures to complete
@@ -110,16 +138,28 @@ bool DiTEngine::init_model() {
   return true;
 }
 
+// TODO : change to ForwardOutput?
 DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
-  CHECK(!workers_.empty());
+  if (worker_clients_.empty()) {
+    // empty worker, return
+    return {};
+  }
+
   Timer timer;
-  auto forward_inputs = workers_[0]->prepare_inputs(batches[0]);
+  auto dit_forward_input = batches[0].prepare_forward_input();
+  RawForwardInput raw_forward_input;
+  raw_forward_input.dit_forward_input = dit_forward_input;
+  dit_forward_input.debug_print();
+  dit_forward_input.save_with_prefix("before_");
+  LOG(INFO) << dit_forward_input.images.defined();
   COUNTER_ADD(prepare_input_latency_seconds, timer.elapsed_seconds());
 
-  std::vector<folly::SemiFuture<std::optional<DiTForwardOutput>>> futures;
-  futures.reserve(workers_.size());
-  for (auto& worker : workers_) {
-    futures.emplace_back(worker->step_async(forward_inputs));
+  std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
+  futures.reserve(worker_clients_num_);
+
+  for (auto worker_rank = 0; worker_rank < worker_clients_num_; ++worker_rank) {
+    futures.emplace_back(
+        worker_clients_[worker_rank]->step_async(raw_forward_input));
   }
 
   // wait for the all future to complete
@@ -128,22 +168,24 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   // return the result from the driver
   auto forward_output = results.front().value();
   DCHECK(forward_output.has_value()) << "Failed to execute model";
-  batches[0].process_forward_output(forward_output.value());
-  return forward_output.value();
+  // forward_output.value().dit_forward_output.save_with_prefix("after_");
+  batches[0].process_forward_output(forward_output.value().dit_forward_output);
+  // forward_output.value().dit_forward_output.save_with_prefix("after2_");
+  return forward_output.value().dit_forward_output;
 }
 
 std::vector<int64_t> DiTEngine::get_active_activation_memory() const {
   // call worker to get active activation memory
   std::vector<folly::SemiFuture<int64_t>> futures;
-  futures.reserve(workers_.size());
-  for (auto& worker : workers_) {
-    futures.push_back(worker->get_active_activation_memory());
+  futures.reserve(worker_clients_num_);
+  for (auto& worker : worker_clients_) {
+    futures.push_back(worker->get_active_activation_memory_async());
   }
 
   // wait for all futures to complete
   auto results = folly::collectAll(futures).get();
   std::vector<int64_t> active_activation_memories;
-  active_activation_memories.reserve(workers_.size());
+  active_activation_memories.reserve(worker_clients_num_);
   for (auto& result : results) {
     active_activation_memories.push_back(result.value());
   }

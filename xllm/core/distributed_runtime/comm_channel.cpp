@@ -513,6 +513,7 @@ bool CommChannel::get_active_activation_memory_async(
 bool CommChannel::execute_model_with_brpc(
     const RawForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
+  LOG(INFO) << "start brpc";
   // convert to proto::ForwardInput
   proto::ForwardInput pb_forward_input;
   forward_input_to_proto(input, &pb_forward_input);
