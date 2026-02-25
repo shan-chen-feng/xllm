@@ -268,7 +268,7 @@ std::vector<std::unique_ptr<ProcessGroup>> create_npu_process_groups(
 
   std::vector<HcclComm> comms(devices.size());
   const int32_t world_size = static_cast<int32_t>(devices.size());
-  // HCCLCHECK(HcclCommInitAll(world_size, device_idxs.data(),comms.data()));
+  HCCLCHECK(HcclCommInitAll(world_size, device_idxs.data(), comms.data()));
 
   std::vector<std::unique_ptr<ProcessGroup>> process_groups;
   process_groups.reserve(devices.size());
@@ -281,6 +281,46 @@ std::vector<std::unique_ptr<ProcessGroup>> create_npu_process_groups(
 #else
   LOG(FATAL) << "non-NPU device is not supported";
 #endif
+}
+
+std::vector<torch::Tensor> all_gather(torch::Tensor& input,
+                                      ProcessGroup* process_group) {
+  if (!process_group) {
+    return {input};
+  }
+  const int world_size = process_group->world_size();
+  if (world_size <= 1) {
+    return {input};
+  }
+
+  std::vector<torch::Tensor> outputs(world_size);
+  for (int i = 0; i < world_size; ++i) {
+    outputs[i] = torch::empty_like(input);
+  }
+  process_group->allgather(input, outputs);
+  return outputs;
+}
+
+torch::Tensor all_to_all_equal(torch::Tensor& send,
+                               bool is_sync,
+                               ProcessGroup* process_group
+#if defined(USE_NPU)
+                               ,
+                               std::shared_ptr<c10_npu::NPUEvent>* out_done
+#endif
+) {
+  if (!process_group) {
+    return send;
+  }
+  const int P = process_group->world_size();
+  if (P <= 1) return send;
+  auto recv = torch::empty_like(send);
+#if defined(USE_NPU)
+  process_group->alltoall_equal(send, recv, is_sync, out_done);
+#else
+  LOG(FATAL) << "all_to_all_equal only implemented for NPU";
+#endif
+  return recv;
 }
 
 std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
@@ -328,6 +368,164 @@ std::vector<std::unique_ptr<ProcessGroup>> create_local_process_groups(
 #endif
 
   return process_groups;
+}
+
+/**
+ * Supports two modes:
+ * 1. scatter_idx=2, gather_idx=1: Ulysses parallel "split heads" scenario
+ *    - Splits tensor along head dimension (dim2)
+ *    - Reconstructs sequence dimension (dim1) to full length
+ *    - Input: (bs, seqlen/P, hc, hs) -> Output: (bs, seqlen, hc/P, hs)
+ *
+ * 2. scatter_idx=1, gather_idx=2: Ulysses parallel "merge heads" scenario
+ *    - Splits tensor along sequence dimension (dim1)
+ *    - Reconstructs head dimension (dim2) to full head count
+ *    - Input: (bs, seqlen, hc/P, hs) -> Output: (bs, seqlen/P, hc, hs)
+ */
+AllToAll4DHandle all_to_all_4D(const torch::Tensor& input,
+                               int rank,
+                               int world_size,
+                               int32_t scatter_idx,
+                               int32_t gather_idx,
+                               bool is_sync,
+                               ProcessGroup* process_group) {
+  // Check input dimensions
+  // LOG(INFO) << "all_to_all_4D";
+  CHECK_EQ(input.dim(), 4) << "input must be 4D tensor, got " << input.dim()
+                           << " and shape " << input.sizes();
+  const int64_t P = world_size;
+  const int r = rank;
+  AllToAll4DHandle h;
+  h.gather_idx = gather_idx;
+  h.gather_pad = 0;
+  // Branch 1: scatter_idx=2 and gather_idx=1
+  // (Ulysses parallel "split heads" scenario)
+  if (scatter_idx == 2 && gather_idx == 1) {
+    // input: tensor sharded along dim 1 (bs, seqlen/P, hc, hs)
+    // output: (bs, seqlen, hc/P, hs)
+    auto sizes = input.sizes().vec();
+    const int64_t bs = sizes[0];
+    const int64_t shard_seqlen = sizes[1];
+    const int64_t hc = sizes[2];
+    const int64_t hs = sizes[3];
+    const int64_t shard_hc = hc / world_size;
+    CHECK(hc % world_size == 0)
+        << "hc " << hc << " not divisible by world_size " << world_size;
+
+    // Transpose groups of heads with the seq-len parallel dimension
+    // (bs, seqlen/P, hc, hs) -> reshape -> (bs, seq_len/P, P, hc/P, hs)
+    torch::Tensor input_t =
+        input.reshape({bs, shard_seqlen, world_size, shard_hc, hs})
+            .transpose(0,
+                       2)  // -> transpose(0,2) -> (P, seq_len/P, bs, hc/P, hs)
+            .reshape({world_size * shard_seqlen * bs * shard_hc * hs})
+            .contiguous();
+
+    auto send_flat = input_t;
+    std::shared_ptr<c10_npu::NPUEvent> ev;
+    // Perform all-to-all communication
+    // (P, seq_len/P, bs, hc/P, hs) scatter seqlen -> all2all ->
+    // (P, seq_len/P, bs, hc/P, hs) scatter head
+    auto recv_flat = parallel_state::all_to_all_equal(
+        send_flat, is_sync, process_group, &ev);
+
+    auto mid = recv_flat.reshape({P, shard_seqlen, bs, shard_hc, hs});
+    h.mid = mid;
+    h.bs = bs;
+    h.seqlen = shard_seqlen * P;
+    h.shard_hc = shard_hc;
+    h.hs = hs;
+    h.use_post2 = true;
+    h.done_event = ev;
+    h.is_async = !is_sync;
+    return h;
+  }
+
+  // Branch 2: scatter_idx=1 and gather_idx=2
+  // (Ulysses parallel "merge heads" scenario)
+  if (scatter_idx == 1 && gather_idx == 2) {
+    // input: tensor sharded along dim 1 (bs, seqlen, hc/P, hs)
+    // output: (bs, seqlen/P, hc, hs)
+    auto sizes = input.sizes().vec();
+    const int64_t bs = sizes[0];
+    const int64_t seqlen = sizes[1];
+    const int64_t shard_hc = sizes[2];
+    const int64_t hs = sizes[3];
+    const int64_t hc = shard_hc * world_size;
+    const int64_t shard_seqlen = seqlen / world_size;
+    CHECK(seqlen % world_size == 0)
+        << "seqlen " << seqlen << " not divisible by world_size " << world_size;
+
+    // Transpose groups of heads with the seq-len parallel dimension
+    // (bs, seqlen, hc/P, hs) -> reshape -> (bs, P, seq_len/P, hc/P, hs)
+    // -> transpose(0,3) -> (hc/P, P, seqlen/P, bs, hs)
+    // -> transpose(0,1) -> (P, hc/P, seqlen/P, bs, hs)
+    torch::Tensor input_t =
+        input.reshape({bs, world_size, shard_seqlen, shard_hc, hs})
+            .transpose(0, 3)
+            .transpose(0, 1)
+            .contiguous();
+
+    auto send_flat = input_t.reshape({P * shard_hc * shard_seqlen * bs * hs});
+    // Perform all-to-all communication
+    // (P, bs x hc/P, seqlen/P, hs) scatter seqlen -> all2all ->
+    // (P, bs x seq_len/P, hc/P, hs) scatter head
+    std::shared_ptr<c10_npu::NPUEvent> ev;
+    auto recv_flat = parallel_state::all_to_all_equal(
+        send_flat, is_sync, process_group, &ev);
+    auto mid = recv_flat.reshape({P,
+                                  shard_hc,
+                                  shard_seqlen,
+                                  bs,
+                                  hs});  // (P, shard_hc, shard_seqlen, bs, hs)
+    h.mid = mid;
+    h.bs = bs;
+    h.hc = hc;
+    h.shard_seqlen = shard_seqlen;
+    h.hs = hs;
+    h.use_post2 = false;
+    h.done_event = ev;
+    h.is_async = !is_sync;
+    return h;
+  }
+
+  CHECK(false) << "all_to_all_4D: scatter_idx must be 1 or 2 and gather_idx "
+                  "must be 1 or 2";
+}
+
+// branch A post processing ： (P, shard_seqlen, bs, shard_hc, hs)
+// → (seqlen, bs, shard_hc, hs) → (bs, seqlen, shard_hc, hs)
+torch::Tensor all_to_all_4D_post2(const AllToAll4DHandle& h) {
+  // LOG(INFO) << "all_to_all_4D_post2";
+  TORCH_CHECK(h.use_post2, "all_to_all_4D_post2: handle not from (2->1) path");
+  if (h.is_async && h.done_event) {
+    // LOG(INFO) << "all_to_all_4D_post2: is_async ---> block done_event";
+    h.done_event->block(c10_npu::getCurrentNPUStream());
+  }
+  auto out = h.mid.reshape({h.seqlen, h.bs, h.shard_hc, h.hs})
+                 .transpose(0, 1)  // (bs, seqlen, shard_hc, hs)
+                 .contiguous();
+  if (h.gather_pad > 0) {
+    out = out.narrow(h.gather_idx, 0, out.size(h.gather_idx) - h.gather_pad);
+  }
+  return out;
+}
+
+// branch B post processing： (P, shard_hc, shard_seqlen, bs, hs)
+// → (hc, shard_seqlen, bs, hs) → (bs, shard_seqlen, hc, hs)
+torch::Tensor all_to_all_4D_post(const AllToAll4DHandle& h) {
+  // LOG(INFO) << "all_to_all_4D_post";
+  TORCH_CHECK(!h.use_post2, "all_to_all_4D_post: handle not from (1->2) path");
+  if (h.is_async && h.done_event) {
+    h.done_event->block(c10_npu::getCurrentNPUStream());
+  }
+  auto out = h.mid.reshape({h.hc, h.shard_seqlen, h.bs, h.hs})
+                 .transpose(0, 2)  // (bs, shard_seqlen, hc, hs)
+                 .contiguous();
+  if (h.gather_pad > 0) {
+    out = out.narrow(h.gather_idx, 0, out.size(h.gather_idx) - h.gather_pad);
+  }
+  return out;
 }
 
 }  // namespace parallel_state

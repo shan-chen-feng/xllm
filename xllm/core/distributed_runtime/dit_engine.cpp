@@ -20,6 +20,7 @@ limitations under the License.
 #include <sys/sysinfo.h>
 
 #include "core/common/metrics.h"
+#include "core/platform/device.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "runtime/worker.h"
@@ -29,14 +30,18 @@ limitations under the License.
 namespace xllm {
 DiTEngine::DiTEngine(const runtime::Options& options) : options_(options) {
   const auto& devices = options_.devices();
+  LOG(INFO) << "DiTEngine Devices: " << devices;
   CHECK_GT(devices.size(), 0) << "At least one device is required";
 
   CHECK(!devices[0].is_cpu()) << "CPU device is not supported";
   const auto device_type = devices[0].type();
-  for (const auto device : devices) {
-    CHECK_EQ(device.type(), device_type)
+  for (size_t i = 0; i < devices.size(); ++i) {
+    CHECK(devices[i].type() == device_type)
         << "All devices should be the same type";
+    Device device(devices[i]);
+    device.set_device();
   }
+
   if (devices.size() > 1) {
     // create a process group for each device if there are multiple gpus
     process_groups_ = parallel_state::create_npu_process_groups(devices);
@@ -71,6 +76,7 @@ DiTEngine::DiTEngine(const runtime::Options& options) : options_(options) {
         .within(std::chrono::seconds(timeout_seconds))
         .get();
   }
+  LOG(INFO) << "DiT Engine Initialized done Using devices: " << devices;
 }
 
 bool DiTEngine::init() {
@@ -115,7 +121,7 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   std::vector<folly::SemiFuture<std::optional<DiTForwardOutput>>> futures;
   futures.reserve(workers_.size());
   for (auto& worker : workers_) {
-    futures.emplace_back(worker->step(forward_inputs));
+    futures.emplace_back(worker->step_async(forward_inputs));
   }
 
   // wait for the all future to complete
