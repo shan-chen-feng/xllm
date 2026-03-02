@@ -70,7 +70,6 @@ std::unique_ptr<CommChannel> create_channel(const std::string& worker_addrs,
     if (r % dp_local_tp_size == 0) {
       is_driver = true;
     }
-    LOG(INFO) << "creating shm channel";
     channel = std::make_unique<ShmChannel>(dp_group, r, is_driver, options);
   } else {
     channel = std::make_unique<CommChannel>();
@@ -129,7 +128,6 @@ void DistManager::setup_multi_node_workers(
   worker_server_options.world_size(world_size);
   WorkerType worker_type("LLM");
   const auto& model_backend = options.backend();
-  LOG(INFO) << model_backend;
   if (model_backend == "llm") {
     if (options.task_type() == "generate") {
       worker_type = WorkerType::LLM;

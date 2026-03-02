@@ -138,8 +138,8 @@ folly::SemiFuture<bool> DiTWorkerImpl::init_model_async(
 }
 
 std::optional<ForwardOutput> DiTWorkerImpl::step(const ForwardInput& inputs) {
+  torch::DeviceGuard device_guard(device_);
   Timer timer;
-  LOG(INFO) << inputs.input_params.dit_forward_input.images.defined();
   auto output = dit_model_executor_->forward(
       inputs.input_params.dit_forward_input.to(device_, dtype_));
 

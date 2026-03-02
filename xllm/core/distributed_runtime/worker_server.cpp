@@ -34,6 +34,7 @@ limitations under the License.
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_input_params.h"
 #include "framework/parallel_state/collective_communicator.h"
+#include "framework/parallel_state/dit_collective_communicator.h"
 #include "framework/parallel_state/mapping_npu.h"
 #include "framework/state_dict/state_dict.h"
 #include "runtime/forward_params.h"
@@ -102,22 +103,27 @@ void WorkerServer::create_server(
   proto::CommUniqueIdList uids;
   sync_master_node(master_node_addr, addr_info, uids);
 
-  CollectiveCommunicator comm(worker_global_rank, world_size, dp_size, ep_size);
-  const ParallelArgs* parallel_args = comm.parallel_args();
-  comm.create_process_groups(master_node_addr, device);
+  const ParallelArgs* parallel_args = nullptr;
+  std::unique_ptr<CollectiveCommunicatorBase> comm;
+  if (worker_type == WorkerType::DIT) {
+    auto dit_comm = std::make_unique<DiTCollectiveCommunicator>(
+        worker_global_rank, world_size);
+    comm = std::move(dit_comm);
+  } else {
+    auto common_comm = std::make_unique<CollectiveCommunicator>(
+        worker_global_rank, world_size, dp_size, ep_size);
+    comm = std::move(common_comm);
+  }
+
+  comm->create_process_groups(master_node_addr, device);
+  parallel_args = comm->parallel_args();
 
   std::unique_ptr<Worker> worker =
       std::make_unique<Worker>(*parallel_args, device, options, worker_type);
   worker_service->set_worker(std::move(worker));
-  LOG(INFO) << options.enable_shm() && input_shm_manager && output_shm_manager;
   bool create_shm =
       options.enable_shm() && input_shm_manager && output_shm_manager;
-  LOG(INFO) << create_shm;
-  LOG(INFO) << options.enable_shm();
-  LOG(INFO) << input_shm_manager;
-  LOG(INFO) << output_shm_manager;
   if (create_shm) {
-    LOG(INFO) << "inside";
     worker_service->create_polling_shm_thread(std::move(input_shm_manager),
                                               std::move(output_shm_manager));
   }
@@ -214,16 +220,10 @@ void WorkerServer::prepare_shm(
         "xllm_" + net::extract_port(options.master_node_addr().value());
     string name = ForwardSharedMemoryManager::create_unique_name(
         name_prefix, dp_group, FORWARD_RAW_INPUT_TYPE, parallel_args.rank());
-    LOG(INFO) << options.input_shm_size();
-    LOG(INFO) << is_creator;
-    LOG(INFO) << FORWARD_RAW_INPUT_TYPE;
     input_shm_manager = std::make_unique<ForwardSharedMemoryManager>(
         name, options.input_shm_size(), is_creator, FORWARD_RAW_INPUT_TYPE);
     LOG(INFO) << "Create input shared memory manager with name: " << name;
 
-    LOG(INFO) << options.output_shm_size();
-    LOG(INFO) << is_creator;
-    LOG(INFO) << FORWARD_RAW_OUTPUT_TYPE;
     name = ForwardSharedMemoryManager::create_unique_name(
         name_prefix, dp_group, FORWARD_RAW_OUTPUT_TYPE, parallel_args.rank());
     output_shm_manager = std::make_unique<ForwardSharedMemoryManager>(

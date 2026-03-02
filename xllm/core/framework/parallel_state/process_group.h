@@ -35,7 +35,8 @@ std::pair<int, std::vector<uint64_t>> get_group_rank(int world_size,
 
 c10::intrusive_ptr<c10d::Store> create_tcp_store(const std::string& host,
                                                  int port,
-                                                 int rank);
+                                                 int rank,
+                                                 int world_size = 2);
 
 class ProcessGroup {
  public:
@@ -47,6 +48,23 @@ class ProcessGroup {
   int32_t rank() const { return rank_; }
 
   int32_t world_size() const { return world_size_; }
+
+  // TODO: currently group_size and rank_per_group functions are
+  // only implemented for npu_process_group, other process group
+  // may get uninitialized value
+  int32_t group_size() {
+    if (group_size_ == 0) {
+      LOG(ERROR) << "The group size of process group must be greater than 0";
+    }
+    return group_size_;
+  };
+
+  std::vector<uint32_t>& rank_per_group() {
+    if (rank_per_group_.size() == 0) {
+      LOG(ERROR) << "the group ranks is not initialized";
+    }
+    return rank_per_group_;
+  }
 
   const torch::Device& device() const { return device_; }
 
@@ -64,26 +82,13 @@ class ProcessGroup {
   virtual void reduce_scatter(const torch::Tensor& input,
                               torch::Tensor& output);
 
-  virtual std::vector<uint32_t> get_rank_per_group(
-      const std::string& group_type) {
-    return std::vector<uint32_t>{0};
-  }
-
-  virtual void alltoall_single(torch::Tensor send,
-                               torch::Tensor recv,
-                               const std::vector<int64_t>& send_splits,
-                               const std::vector<int64_t>& recv_splits,
-                               bool is_sync,
-                               std::shared_ptr<c10_npu::NPUEvent>* out_done) {
-    return;
-  }
-
-  virtual void alltoall_equal(torch::Tensor send,
-                              torch::Tensor recv,
-                              bool is_sync,
-                              std::shared_ptr<c10_npu::NPUEvent>* out_done) {
-    return;
-  }
+  virtual void all_to_all_single(
+      torch::Tensor output,
+      torch::Tensor input,
+      std::vector<int64_t> output_split_sizes = {},
+      std::vector<int64_t> input_split_sizes = {},
+      bool async_op = false,
+      c10::intrusive_ptr<c10d::Work>* async_work = nullptr);
 
  protected:
   // rank of current process.
@@ -94,6 +99,12 @@ class ProcessGroup {
 
   // device of current process.
   torch::Device device_;
+
+  // num of devices in current group
+  int32_t group_size_ = 0;
+
+  // global devices indices in current group
+  std::vector<uint32_t> rank_per_group_;
 
  protected:
 #if defined(USE_NPU) &&         \
@@ -114,6 +125,17 @@ std::unique_ptr<xllm::ProcessGroup> create_process_group(
     int32_t rank_size,
     int32_t port,
     bool trans,
+    const std::string& host,
+    const std::string& group_name,
+    const torch::Device& device);
+
+std::unique_ptr<xllm::ProcessGroup> create_process_group(
+    int32_t global_rank,
+    int32_t local_rank,
+    const std::vector<int32_t>& group_ranks,
+    int32_t world_size,
+    int32_t rank_size,
+    int32_t port,
     const std::string& host,
     const std::string& group_name,
     const torch::Device& device);

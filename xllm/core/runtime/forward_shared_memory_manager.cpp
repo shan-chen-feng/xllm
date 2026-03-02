@@ -367,7 +367,6 @@ inline void write_string_vector(char*& buffer,
   write_data(buffer, size);
   if (size > 0) {
     for (auto& str : vec) {
-      LOG(INFO) << "start write string " << str;
       write_string(buffer, str);
     }
   }
@@ -1228,8 +1227,6 @@ inline void deserialize_raw_forward_input(const char*& buffer,
 
   // read dit input
   read_dit_forward_input(buffer, input_params.dit_forward_input);
-  LOG(INFO) << "deserialize_ "
-            << input_params.dit_forward_input.images.defined();
 }
 
 inline void serialize_raw_forward_input(const RawForwardInput& input,
@@ -1240,7 +1237,6 @@ inline void serialize_raw_forward_input(const RawForwardInput& input,
   } else {
     write_2d_vector_to_tensor(buffer, input.m_positions_vec);
   }
-  LOG(INFO) << "serialize_ " << input.dit_forward_input.images.defined();
   // ModelInputParams
   write_data(buffer, input.batch_forward_type.value());
   write_data(buffer, input.num_sequences);
@@ -1315,7 +1311,6 @@ inline void serialize_raw_forward_input(const RawForwardInput& input,
 
   // write dit input
   write_dit_forward_input(buffer, input.dit_forward_input);
-  LOG(INFO) << "finish serlize";
 }
 
 size_t calculate_raw_token_size(const RawToken& token) {
@@ -1658,11 +1653,8 @@ ForwardSharedMemoryManager::ForwardSharedMemoryManager(const std::string& name,
                                                        bool& is_creator,
                                                        ForwardType type)
     : SharedMemoryManager(name, size, is_creator), forward_type_(type) {
-  LOG(INFO) << "base address is " << base_address();
   control_ptr_ = static_cast<ControlMetadata*>(base_address());
   metadata_addr_ = static_cast<char*>(base_address()) + sizeof(ControlMetadata);
-  // control_ptr_->version = 0;
-  LOG(INFO) << "control_ptr_ start verision " << control_ptr_->version;
 }
 
 ForwardSharedMemoryManager::~ForwardSharedMemoryManager() = default;
@@ -1689,7 +1681,6 @@ std::string ForwardSharedMemoryManager::create_unique_name(
 }
 
 bool ForwardSharedMemoryManager::raw_input_write(const RawForwardInput& input) {
-  LOG(INFO) << "start raw input write";
   uint64_t total_size = sizeof(ControlMetadata);
   total_size += type_size<uint64_t> + calculate_raw_forward_input_size(input);
   if (unlikely(total_size > size())) {
@@ -1708,17 +1699,13 @@ bool ForwardSharedMemoryManager::raw_input_write(const RawForwardInput& input) {
   CHECK(total_size == real_size) << "total_size != real_size.";
   std::atomic_thread_fence(std::memory_order_release);
   control_ptr_->version = ++last_version_;
-  LOG(INFO) << "finish raw input write";
   return true;
 }
 
 void ForwardSharedMemoryManager::raw_input_read(ForwardInput& input,
                                                 const torch::Device& device) {
-  LOG(INFO) << "start raw input read";
   while (true) {
     if (control_ptr_->version != last_version_) {
-      LOG(INFO) << "control_ptr_->version is " << control_ptr_->version;
-      LOG(INFO) << "last_version_ is " << last_version_;
       last_version_ = control_ptr_->version;
       std::atomic_thread_fence(std::memory_order_acquire);
       break;
@@ -1731,7 +1718,6 @@ void ForwardSharedMemoryManager::raw_input_read(ForwardInput& input,
   uint64_t total_size;
   read_data(data_ptr, total_size);
   deserialize_raw_forward_input(data_ptr, total_size, input, device);
-  LOG(INFO) << "finish raw input read";
   return;
 }
 
@@ -1748,7 +1734,6 @@ bool ForwardSharedMemoryManager::raw_output_write(
     const torch::Tensor& src_seq_idxes,
     const torch::Tensor& out_tokens,
     const torch::Tensor& out_logprobs) {
-  LOG(INFO) << "begine raw_output_write";
   RawForwardOutput output;
   convert_tensor_to_raw_output(next_tokens,
                                logprobs,
@@ -1776,15 +1761,12 @@ bool ForwardSharedMemoryManager::raw_output_write(
   char* test = static_cast<char*>(base_address()) + sizeof(ControlMetadata);
   std::atomic_thread_fence(std::memory_order_release);
   control_ptr_->version = ++last_version_;
-  LOG(INFO) << "after raw_output_write";
   return true;
 }
 
 void ForwardSharedMemoryManager::raw_output_read(RawForwardOutput& output) {
   while (true) {
     if (control_ptr_->version != last_version_) {
-      LOG(INFO) << "control_ptr_->version is " << control_ptr_->version;
-      LOG(INFO) << "last_version_ is " << last_version_;
       last_version_ = control_ptr_->version;
       std::atomic_thread_fence(std::memory_order_acquire);
       break;

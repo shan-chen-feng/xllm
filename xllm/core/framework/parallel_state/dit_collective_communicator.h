@@ -1,4 +1,4 @@
-/* Copyright 2025 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,16 +16,14 @@ limitations under the License.
 #pragma once
 
 #include "collective_communicator_base.h"
+#include "dit_mapping_npu.h"
 
 namespace xllm {
 
-class CollectiveCommunicator : public CollectiveCommunicatorBase {
+class DiTCollectiveCommunicator : public CollectiveCommunicatorBase {
  public:
-  CollectiveCommunicator(int global_rank,
-                         int world_size,
-                         int dp_size,
-                         int ep_size);
-  ~CollectiveCommunicator() = default;
+  DiTCollectiveCommunicator(int global_rank, int world_size);
+  ~DiTCollectiveCommunicator() = default;
 
   void create_process_groups(const std::string& master_addr,
                              const torch::Device& device) override;
@@ -34,12 +32,13 @@ class CollectiveCommunicator : public CollectiveCommunicatorBase {
   const ParallelArgs* parallel_args() override;
 
  private:
+  std::unique_ptr<DiTMappingNPU> dit_mapping_npu_{nullptr};
   std::unique_ptr<ParallelArgs> parallel_args_;
   std::unique_ptr<ProcessGroup> process_group_;
-  std::unique_ptr<ProcessGroup> dp_local_process_group_;
   std::unique_ptr<ProcessGroup> tp_group_;
-  std::unique_ptr<ProcessGroup> moe_tp_group_;
-  std::unique_ptr<ProcessGroup> moe_ep_group_;
+  std::unique_ptr<ProcessGroup> sp_group_;
+  std::unique_ptr<ProcessGroup> dp_group_;
+  std::unique_ptr<ProcessGroup> cfg_group_;
 };
 
 }  // namespace xllm

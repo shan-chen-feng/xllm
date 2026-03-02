@@ -58,45 +58,6 @@ DiTEngine::DiTEngine(const runtime::Options& options,
 
   // init thread pool
   threadpool_ = std::make_unique<ThreadPool>(16);
-
-  /*
-  if (devices.size() > 1) {
-    LOG(INFO) << "hhh create process group";
-    // create a process group for each device if there are multiple gpus
-    process_groups_ = parallel_state::create_npu_process_groups(devices);
-  }
-
-  const int32_t world_size = static_cast<int32_t>(devices.size());
-
-  CHECK(!options_.enable_shm()) << "Dit can not support enable_shm currently.";
-
-  // create workers
-  for (size_t i = 0; i < devices.size(); ++i) {
-    const int32_t rank = static_cast<int32_t>(i);
-    ProcessGroup* pg = world_size > 1 ? process_groups_[i].get() : nullptr;
-    ParallelArgs parallel_args(rank, world_size, pg);
-    workers_.emplace_back(
-        std::make_unique<DiTWorker>(parallel_args, devices[i], options_));
-  }
-
-  if (workers_.size() > 1) {
-    // test process group
-    std::vector<folly::SemiFuture<folly::Unit>> futures;
-    futures.reserve(workers_.size());
-    for (auto& worker : workers_) {
-      futures.emplace_back(worker->process_group_test_async());
-    }
-    // Wait for all futures to complete with a configurable timeout.
-    // The timeout can be adjusted via the
-    // XLLM_PROCESS_GROUP_ASYNC_TIMEOUT_SECONDS environment variable (default: 4
-    // seconds). This is particularly important in multi-node multi-device
-    // scenarios where network latency may require a longer timeout period.
-    const int timeout_seconds = util::get_process_group_test_timeout_seconds();
-    folly::collectAll(futures)
-        .within(std::chrono::seconds(timeout_seconds))
-        .get();
-  }
-  */
 }
 
 void DiTEngine::setup_workers(const runtime::Options& options) {
@@ -150,8 +111,6 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   RawForwardInput raw_forward_input;
   raw_forward_input.dit_forward_input = dit_forward_input;
   dit_forward_input.debug_print();
-  dit_forward_input.save_with_prefix("before_");
-  LOG(INFO) << dit_forward_input.images.defined();
   COUNTER_ADD(prepare_input_latency_seconds, timer.elapsed_seconds());
 
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;

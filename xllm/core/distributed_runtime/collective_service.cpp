@@ -29,6 +29,7 @@ CollectiveService::CollectiveService(int dp_group_num,
 #if defined(USE_NPU)
   root_infos_.reserve(dp_group_num + 1);
   for (size_t i = 0; i < (dp_group_num + 1); ++i) {
+    LOG(INFO) << "i is " << i;
     HcclRootInfo root_info;
     auto error = aclrtSetDevice(device_idx);
     CHECK_EQ(error, ACL_SUCCESS)

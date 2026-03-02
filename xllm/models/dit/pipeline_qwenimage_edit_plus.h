@@ -23,7 +23,7 @@ namespace qwenimage {
 class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
  public:
   QwenImageEditPlusPipelineImpl(const DiTModelContext& context)
-      : process_group_(context.get_parallel_args().process_group_),
+      : parallel_args_(context.get_parallel_args()),
         vae_model_args_(context.get_model_args("vae")) {
     options_ = context.get_tensor_options();
     dtype_ = options_.dtype().toScalarType();
@@ -54,7 +54,7 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
 
     vae_ = AutoencoderKLQwenImage(context.get_model_context("vae"));
     transformer_ = QwenImageTransformer2DModel(
-        context.get_model_context("transformer"), process_group_, dit_cache_);
+        context.get_model_context("transformer"), parallel_args_, dit_cache_);
     scheduler_ =
         FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
 
@@ -275,7 +275,6 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
 
     auto prompts = input.prompts;
     auto prompts_2 = input.prompts_2;
-    LOG(INFO) << prompts[0];
     auto negative_prompts = input.negative_prompts;
     auto negative_prompts_2 = input.negative_prompts_2;
     auto latents = input.latents;
@@ -301,9 +300,7 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
     std::vector<torch::Tensor> image_list;
 
     torch::Tensor images;
-    LOG(INFO) << input.images.defined();
     input.debug_print();
-    input.save_with_prefix("after_");
     if (input.images.defined()) {
       images = input.images.to(options_.device(), dtype_);
       if (input.images.dim() == 3) {
@@ -530,10 +527,14 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
       torch::Tensor neg_noise_pred;
       torch::Tensor pos_neg_noise_preds;
       if (FLAGS_dit_cfg_size == 2 && do_true_cfg) {
-        int32_t device_id = options_.device().index();
-        auto ranks_per_group = process_group_->get_rank_per_group("cfg");
-        if (device_id == ranks_per_group[0]) {
-          LOG(INFO) << "ranks as 0: " << device_id;
+        LOG(INFO) << "begin get group";
+        auto ranks_per_group = parallel_args_.cfg_group_->rank_per_group();
+        auto rank = parallel_args_.cfg_group_->rank();
+        LOG(INFO) << ranks_per_group.size();
+        LOG(INFO) << "after get group";
+        LOG(INFO) << "rank is" << rank;
+        if (rank == ranks_per_group[0]) {
+          LOG(INFO) << "ranks as 0: " << rank;
           noise_pred = transformer_->forward(latent_model_input,
                                              prompt_embeds,
                                              prompt_embeds_mask,
@@ -543,11 +544,12 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
                                              /*use_cfg=*/false,
                                              /*step_index=*/i);
           noise_pred = noise_pred.slice(1, 0, final_latents.size(1));
-          pos_neg_noise_preds = xllm::parallel_state::gather(noise_pred,
-                                                             process_group_,
-                                                             /*dim=*/0);
+          pos_neg_noise_preds =
+              xllm::parallel_state::gather(noise_pred,
+                                           parallel_args_.cfg_group_,
+                                           /*dim=*/0);
         } else {
-          LOG(INFO) << "ranks as 1: " << device_id;
+          LOG(INFO) << "ranks as 1: " << rank;
           neg_noise_pred = transformer_->forward(latent_model_input,
                                                  negative_prompt_embeds,
                                                  negative_prompt_embeds_mask,
@@ -558,9 +560,10 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
                                                  /*step_index=*/i);
 
           neg_noise_pred = neg_noise_pred.slice(1, 0, final_latents.size(1));
-          pos_neg_noise_preds = xllm::parallel_state::gather(neg_noise_pred,
-                                                             process_group_,
-                                                             /*dim=*/0);
+          pos_neg_noise_preds =
+              xllm::parallel_state::gather(neg_noise_pred,
+                                           parallel_args_.cfg_group_,
+                                           /*dim=*/0);
         }
         auto noise_preds = torch::chunk(pos_neg_noise_preds, 2, 0);
         auto comb_pred =
@@ -659,7 +662,7 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
   int64_t in_channels_;
   int64_t num_timesteps_;
   int64_t num_layers_;
-  ProcessGroup* process_group_;
+  const ParallelArgs parallel_args_;
   torch::Tensor current_timestep_;
   string prompt_template_encode_;
   const ModelArgs& vae_model_args_;

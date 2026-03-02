@@ -67,10 +67,15 @@ std::pair<int, std::vector<uint64_t>> get_group_rank(int world_size,
 
 c10::intrusive_ptr<c10d::Store> create_tcp_store(const std::string& host,
                                                  int port,
-                                                 int rank) {
+                                                 int rank,
+                                                 int world_size) {
+  LOG(INFO) << "rank is" << rank;
   c10d::TCPStoreOptions tcp_options;
   tcp_options.isServer = (rank == 0);
-  tcp_options.port = port;
+  tcp_options.port = port + 3;
+  tcp_options.timeout = std::chrono::milliseconds(50000);
+  LOG(INFO) << "host " << host;
+  LOG(INFO) << "port " << port;
   return c10::make_intrusive<c10d::TCPStore>(host, tcp_options);
 }
 
@@ -82,9 +87,11 @@ void ProcessGroup::allreduce(torch::Tensor& input) {
 
 void ProcessGroup::allgather(const torch::Tensor& input,
                              std::vector<torch::Tensor>& outputs) {
+  LOG(INFO) << "inside allgather";
   CHECK(pg_ != nullptr) << "Process group is not initialized.";
   std::vector<torch::Tensor> input_tensors = {input};
   std::vector<std::vector<torch::Tensor>> output_tensors = {outputs};
+  LOG(INFO) << "output size " << outputs.size();
   pg_->allgather(output_tensors, input_tensors)->wait();
 }
 
@@ -103,6 +110,35 @@ void ProcessGroup::reduce_scatter(const torch::Tensor& input,
       ->wait();
 }
 
+void ProcessGroup::all_to_all_single(
+    torch::Tensor output,
+    torch::Tensor input,
+    std::vector<int64_t> output_split_sizes,
+    std::vector<int64_t> input_split_sizes,
+    bool async_op,
+    c10::intrusive_ptr<c10d::Work>* async_work) {
+  CHECK(pg_ != nullptr) << "Process group is not initialized.";
+  CHECK(output.defined())
+      << "Output of all_to_all_single function is not defined";
+  CHECK(input.defined())
+      << "Input of all_to_all_single function is not defined";
+  if (input.is_complex()) {
+    input = torch::view_as_real(input);
+  }
+  if (output.is_complex()) {
+    output = torch::view_as_real(output);
+  }
+
+  auto opts = c10d::AllToAllOptions();
+  auto work = pg_->alltoall_base(
+      output, input, output_split_sizes, input_split_sizes, opts);
+  if (async_op) {
+    *async_work = work;
+  } else {
+    work->wait();
+  }
+}
+
 std::unique_ptr<ProcessGroup> create_process_group(
     int32_t rank,
     int32_t world_size,
@@ -116,4 +152,24 @@ std::unique_ptr<ProcessGroup> create_process_group(
       rank, world_size, rank_size, port, trans, host, group_name, device);
 }
 
+std::unique_ptr<ProcessGroup> create_process_group(
+    int32_t global_rank,
+    int32_t local_rank,
+    const std::vector<int32_t>& group_ranks,
+    int32_t world_size,
+    int32_t rank_size,
+    int32_t port,
+    const std::string& host,
+    const std::string& group_name,
+    const torch::Device& device) {
+  return std::make_unique<ProcessGroupImpl>(global_rank,
+                                            local_rank,
+                                            group_ranks,
+                                            world_size,
+                                            rank_size,
+                                            port,
+                                            host,
+                                            group_name,
+                                            device);
+}
 }  // namespace xllm

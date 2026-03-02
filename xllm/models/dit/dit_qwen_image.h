@@ -51,174 +51,13 @@ limitations under the License.
 namespace xllm {
 namespace qwenimage {
 
-struct AllToAll4DHandle {
-  torch::Tensor mid;  // branch A: (P, shard_seqlen, bs, shard_hc, hs)
-                      // branch B: (P, shard_hc,     shard_seqlen, bs, hs)
-
-  int64_t bs = 0;
-  int64_t seqlen = 0;    // branch A
-  int64_t shard_hc = 0;  // branch A
-  int64_t hs = 0;
-
-  int64_t shard_seqlen = 0;  // branch B
-  int64_t hc = 0;            // branch B
-
-  int64_t gather_idx = 0;
-  int64_t gather_pad = 0;
-  bool use_post2 = false;
-
-  std::shared_ptr<c10_npu::NPUEvent> done_event;
-  bool is_async = false;
-};
-
-inline AllToAll4DHandle all_to_all_4D(const torch::Tensor& input_,
-                                      int scatter_idx,
-                                      int gather_idx,
-                                      bool is_sync,
-                                      ProcessGroup* pg) {
-  auto world_size = pg->world_size();
-  auto rank = pg->rank();
-
-  TORCH_CHECK(input_.dim() == 4,
-              "all_to_all_4D: input must be 4D, got dim=",
-              input_.dim());
-  auto input = input_;
-  const int P = world_size;
-  const int r = rank;
-  AllToAll4DHandle h;
-  h.gather_idx = gather_idx;
-  h.gather_pad = 0;
-
-  if (scatter_idx == 2 && gather_idx == 1) {
-    // branch A : from "sequence shard" -> "head shard"
-    // input: (bs, shard_seqlen, hc, hs)  output (bs, seqlen, hc/P, hs)
-    auto sizes = input.sizes().vec();
-    const int64_t bs = sizes[0];
-    const int64_t shard_seqlen = sizes[1];
-    const int64_t hc = sizes[2];
-    const int64_t hs = sizes[3];
-    TORCH_CHECK(hc % P == 0,
-                "all_to_all_4D(A): hc must be divisible by world_size");
-    const int64_t shard_hc = hc / P;
-
-    // prepare expected shape for All2All (P, shard_seqlen, bs, shard_hc, hs)
-    auto input_t = input.reshape({bs, shard_seqlen, P, shard_hc, hs})
-                       .transpose(0, 2)  // (P, shard_seqlen, bs, shard_hc, hs)
-                       .contiguous();
-
-    auto send_flat = input_t.reshape({P, shard_seqlen * bs * shard_hc * hs})
-                         .reshape({P * shard_seqlen * bs * shard_hc * hs});
-
-#if defined(USE_NPU)
-    std::shared_ptr<c10_npu::NPUEvent> ev;
-    auto recv_flat =
-        parallel_state::all_to_all_equal(send_flat, is_sync, pg, &ev);
-    // if (!is_sync) {
-    //   h.done_event = ev;
-    //   h.done_event->block(c10_npu::getCurrentNPUStream());
-    // }
-#endif
-    auto mid = recv_flat.reshape({P, shard_seqlen, bs, shard_hc, hs});
-    h.mid = mid;
-    h.bs = bs;
-    h.seqlen = shard_seqlen * P;
-    h.shard_hc = shard_hc;
-    h.hs = hs;
-    h.use_post2 = true;
-    h.done_event = ev;
-    h.is_async = !is_sync;
-    return h;
-
-  } else if (scatter_idx == 1 && gather_idx == 2) {
-    // branch B : from "head shard" -> "sequence shard"
-    // input: (bs, seqlen, hc/P, hs)  output (bs, seqlen/P, hc, hs)
-    auto sizes = input.sizes().vec();
-    const int64_t bs = sizes[0];
-    const int64_t seqlen = sizes[1];
-    const int64_t shard_hc = sizes[2];
-    const int64_t hs = sizes[3];
-    TORCH_CHECK(seqlen % P == 0,
-                "all_to_all_4D(B): seqlen must be divisible by world_size");
-    const int64_t shard_seqlen = seqlen / P;
-    const int64_t hc = shard_hc * P;
-
-    // prepare expected shape for All2All (P, shard_hc, shard_seqlen, bs, hs)
-    auto input_t = input.reshape({bs, P, shard_seqlen, shard_hc, hs})
-                       .transpose(0, 3)  // (shard_hc, P, shard_seqlen, bs, hs)
-                       .transpose(0, 1)  // (P, shard_hc, shard_seqlen, bs, hs)
-                       .contiguous();
-
-    auto send_flat = input_t.reshape({P * shard_hc * shard_seqlen * bs * hs});
-#if defined(USE_NPU)
-    std::shared_ptr<c10_npu::NPUEvent> ev;
-    auto recv_flat =
-        parallel_state::all_to_all_equal(send_flat, is_sync, pg, &ev);
-    //  if (!is_sync) {
-    //   h.done_event = ev;
-    //   h.done_event->block(c10_npu::getCurrentNPUStream());
-    // }
-#endif
-    auto mid = recv_flat.reshape({P,
-                                  shard_hc,
-                                  shard_seqlen,
-                                  bs,
-                                  hs});  // (P, shard_hc, shard_seqlen, bs, hs)
-    h.mid = mid;
-    h.bs = bs;
-    h.hc = hc;
-    h.shard_seqlen = shard_seqlen;
-    h.hs = hs;
-    h.use_post2 = false;
-    h.done_event = ev;
-    h.is_async = !is_sync;
-    return h;
-
-  } else {
-    TORCH_CHECK(false,
-                "all_to_all_4D: only (scatter_idx,gather_idx)=(2,1) or (1,2) "
-                "are supported");
-  }
-}
-
-// branch A post processing ： (P, shard_seqlen, bs, shard_hc, hs)
-// → (seqlen, bs, shard_hc, hs) → (bs, seqlen, shard_hc, hs)
-inline torch::Tensor all_to_all_4D_post2(const AllToAll4DHandle& h) {
-  TORCH_CHECK(h.use_post2, "all_to_all_4D_post2: handle not from (2->1) path");
-  if (h.is_async && h.done_event) {
-    h.done_event->block(c10_npu::getCurrentNPUStream());
-  }
-  auto out = h.mid.reshape({h.seqlen, h.bs, h.shard_hc, h.hs})
-                 .transpose(0, 1)  // (bs, seqlen, shard_hc, hs)
-                 .contiguous();
-  if (h.gather_pad > 0) {
-    out = out.narrow(h.gather_idx, 0, out.size(h.gather_idx) - h.gather_pad);
-  }
-  return out;
-}
-
-// branch B post processing： (P, shard_hc, shard_seqlen, bs, hs)
-// → (hc, shard_seqlen, bs, hs) → (bs, shard_seqlen, hc, hs)
-inline torch::Tensor all_to_all_4D_post(const AllToAll4DHandle& h) {
-  TORCH_CHECK(!h.use_post2, "all_to_all_4D_post: handle not from (1->2) path");
-  if (h.is_async && h.done_event) {
-    h.done_event->block(c10_npu::getCurrentNPUStream());
-  }
-  auto out = h.mid.reshape({h.hc, h.shard_seqlen, h.bs, h.hs})
-                 .transpose(0, 2)  // (bs, shard_seqlen, hc, hs)
-                 .contiguous();
-  if (h.gather_pad > 0) {
-    out = out.narrow(h.gather_idx, 0, out.size(h.gather_idx) - h.gather_pad);
-  }
-  return out;
-}
-
 inline torch::Tensor gather_sequence(const torch::Tensor& input_,
                                      int64_t dim,
                                      int64_t pad,
                                      ProcessGroup* pg) {
-  auto world_size = pg->world_size();
+  auto group_size = pg->group_size();
   auto input = input_.contiguous();
-  if (world_size == 1) {
+  if (group_size == 1) {
     return input;
   }
 
@@ -239,9 +78,13 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
                                     int64_t dim,
                                     int64_t pad,
                                     ProcessGroup* pg) {
-  auto world_size = pg->world_size();
+  auto group_size = pg->group_size();
   auto rank = pg->rank();
-  if (world_size == 1) {
+  auto start_rank = pg->rank_per_group()[0];
+  LOG(INFO) << "group_size is " << group_size;
+  LOG(INFO) << "rank is " << rank;
+  LOG(INFO) << "start rank is " << start_rank;
+  if (group_size == 1) {
     return input_;
   }
 
@@ -258,8 +101,8 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
 
   int64_t dim_size = input.size(dim);
 
-  auto tensor_list = torch::split(input, dim_size / world_size, dim);
-  auto output = tensor_list[rank].contiguous();
+  auto tensor_list = torch::split(input, dim_size / group_size, dim);
+  auto output = tensor_list[rank - start_rank].contiguous();
   return output;
 }
 
@@ -473,7 +316,6 @@ torch::Tensor apply_rotary_emb_qwen(const torch::Tensor& x,
                           .unsqueeze(-1)
                           .expand({-1, -1, -1, -1, 2})
                           .reshape({1, seqlen, 1, -1});
-
   auto x_out = at_npu::native::custom_ops::npu_rotary_mul(
       x, cos_expanded, sin_expanded, "interleave");
   return x_out.to(x.dtype());
@@ -1457,8 +1299,8 @@ TORCH_MODULE(Attention);
 class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
  public:
   QwenDoubleStreamAttnProcessor2_0Impl(Attention&& attn_module,
-                                       ProcessGroup* process_group)
-      : process_group_(process_group) {
+                                       const ParallelArgs& parallel_args)
+      : parallel_args_(parallel_args) {
     attn_ = register_module("attn", std::move(attn_module));
   }
 
@@ -1509,48 +1351,48 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     int64_t attn_heads = attn_->heads_;
     int64_t head_dim = inner_dim / attn_heads;
     if (FLAGS_dit_sp_size > 1) {
-      auto handle_q =
-          all_to_all_4D(img_query.view({batch_size, -1, attn_heads, head_dim}),
-                        2,
-                        1,
-                        true,
-                        process_group_);
-      auto handle_k =
-          all_to_all_4D(img_key.view({batch_size, -1, attn_heads, head_dim}),
-                        2,
-                        1,
-                        true,
-                        process_group_);
-      auto handle_v =
-          all_to_all_4D(img_value.view({batch_size, -1, attn_heads, head_dim}),
-                        2,
-                        1,
-                        true,
-                        process_group_);
-      auto handle_tq =
-          all_to_all_4D(txt_query.view({batch_size, -1, attn_heads, head_dim}),
-                        2,
-                        1,
-                        true,
-                        process_group_);
-      auto handle_tk =
-          all_to_all_4D(txt_key.view({batch_size, -1, attn_heads, head_dim}),
-                        2,
-                        1,
-                        true,
-                        process_group_);
-      auto handle_tv =
-          all_to_all_4D(txt_value.view({batch_size, -1, attn_heads, head_dim}),
-                        2,
-                        1,
-                        true,
-                        process_group_);
-      img_query = all_to_all_4D_post2(handle_q);
-      img_key = all_to_all_4D_post2(handle_k);
-      img_value = all_to_all_4D_post2(handle_v);
-      txt_query = all_to_all_4D_post2(handle_tq);
-      txt_key = all_to_all_4D_post2(handle_tk);
-      txt_value = all_to_all_4D_post2(handle_tv);
+      auto handle_q = parallel_state::all_to_all_4D(
+          img_query.view({batch_size, -1, attn_heads, head_dim}),
+          2,
+          1,
+          false,
+          parallel_args_.sp_group_);
+      auto handle_k = parallel_state::all_to_all_4D(
+          img_key.view({batch_size, -1, attn_heads, head_dim}),
+          2,
+          1,
+          false,
+          parallel_args_.sp_group_);
+      auto handle_v = parallel_state::all_to_all_4D(
+          img_value.view({batch_size, -1, attn_heads, head_dim}),
+          2,
+          1,
+          false,
+          parallel_args_.sp_group_);
+      auto handle_tq = parallel_state::all_to_all_4D(
+          txt_query.view({batch_size, -1, attn_heads, head_dim}),
+          2,
+          1,
+          false,
+          parallel_args_.sp_group_);
+      auto handle_tk = parallel_state::all_to_all_4D(
+          txt_key.view({batch_size, -1, attn_heads, head_dim}),
+          2,
+          1,
+          false,
+          parallel_args_.sp_group_);
+      auto handle_tv = parallel_state::all_to_all_4D(
+          txt_value.view({batch_size, -1, attn_heads, head_dim}),
+          2,
+          1,
+          false,
+          parallel_args_.sp_group_);
+      img_query = handle_q();
+      img_key = handle_k();
+      img_value = handle_v();
+      txt_query = handle_tq();
+      txt_key = handle_tk();
+      txt_value = handle_tv();
     }
     // Apply RoPE if provided
     auto img_freqs = std::get<0>(image_rotary_emb);
@@ -1592,25 +1434,25 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto txt_attn_output = chunks[0];
     auto img_attn_output = chunks[1];
 
-    AllToAll4DHandle handle_io, handle_t_o;
+    std::function<torch::Tensor()> handle_io, handle_t_o;
     if (FLAGS_dit_sp_size > 1) {
-      handle_io = all_to_all_4D(
+      handle_io = parallel_state::all_to_all_4D(
           img_attn_output.view(
               {batch_size, -1, attn_heads / FLAGS_dit_sp_size, head_dim}),
           1,
           2,
-          true,
-          process_group_);
-      img_attn_output = all_to_all_4D_post(handle_io);
+          false,
+          parallel_args_.sp_group_);
+      img_attn_output = handle_io();
       img_attn_output = img_attn_output.view({batch_size, -1, inner_dim});
-      handle_t_o = all_to_all_4D(
+      handle_t_o = parallel_state::all_to_all_4D(
           txt_attn_output.view(
               {batch_size, -1, attn_heads / FLAGS_dit_sp_size, head_dim}),
           1,
           2,
-          true,
-          process_group_);
-      txt_attn_output = all_to_all_4D_post(handle_t_o);
+          false,
+          parallel_args_.sp_group_);
+      txt_attn_output = handle_t_o();
       txt_attn_output = txt_attn_output.view({batch_size, -1, inner_dim});
     }
 
@@ -1631,7 +1473,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
  private:
   Attention attn_{nullptr};
-  ProcessGroup* process_group_;
+  const ParallelArgs parallel_args_;
 };
 TORCH_MODULE(QwenDoubleStreamAttnProcessor2_0);
 
@@ -1694,11 +1536,11 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
                                 int64_t dim,
                                 int64_t num_attention_heads,
                                 int64_t attention_head_dim,
+                                const ParallelArgs& parallel_args,
                                 bool zero_cond_t = false,
-                                ProcessGroup* process_group = nullptr,
                                 const std::string& qk_norm = "rms_norm",
                                 double eps = 1e-6)
-      : zero_cond_t_(zero_cond_t), process_group_(process_group) {
+      : zero_cond_t_(zero_cond_t), parallel_args_(parallel_args) {
     // Image processing modules
     img_mod_ =
         register_module("img_mod",
@@ -1731,7 +1573,7 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
                            /*context_pre_only=*/true);
     attn_processor_ = register_module(
         "attn_processor_",
-        QwenDoubleStreamAttnProcessor2_0(std::move(attn_), process_group_));
+        QwenDoubleStreamAttnProcessor2_0(std::move(attn_), parallel_args_));
     // Image normalization 2
     img_norm2_ = register_module("img_norm2", AdaLayerNorm(context, dim, eps));
 
@@ -1923,7 +1765,7 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
   AdaLayerNorm txt_norm2_{nullptr};
   FeedForward txt_mlp_{nullptr};
   bool zero_cond_t_;
-  ProcessGroup* process_group_;
+  const ParallelArgs parallel_args_;
 };
 
 TORCH_MODULE(QwenImageTransformerBlock);
@@ -1931,9 +1773,9 @@ TORCH_MODULE(QwenImageTransformerBlock);
 class QwenImageTransformer2DModelImpl : public torch::nn::Module {
  public:
   QwenImageTransformer2DModelImpl(const ModelContext& context,
-                                  ProcessGroup* process_group,
+                                  const ParallelArgs& parallel_args,
                                   std::shared_ptr<DiTCache> dit_cache)
-      : dit_cache_(dit_cache), process_group_(process_group) {
+      : dit_cache_(dit_cache), parallel_args_(parallel_args) {
     auto model_args = context.get_model_args();
     int64_t num_attention_heads = model_args.n_heads();
     int64_t attention_head_dim = model_args.head_dim();
@@ -1984,8 +1826,8 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
                                     inner_dim,
                                     num_attention_heads,
                                     attention_head_dim,
-                                    zero_cond_t,
-                                    process_group_));
+                                    parallel_args_,
+                                    zero_cond_t));
     }
 
     // Output layers
@@ -2079,10 +1921,11 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
 
     if (FLAGS_dit_sp_size > 1) {
       new_hidden_states =
-          split_sequence(new_hidden_states, 1, 0, process_group_);
-      new_encoder_hidden_states =
-          split_sequence(new_encoder_hidden_states, 1, 0, process_group_);
-      modulate_index = split_sequence(modulate_index, 1, 0, process_group_);
+          split_sequence(new_hidden_states, 1, 0, parallel_args_.sp_group_);
+      new_encoder_hidden_states = split_sequence(
+          new_encoder_hidden_states, 1, 0, parallel_args_.sp_group_);
+      modulate_index =
+          split_sequence(modulate_index, 1, 0, parallel_args_.sp_group_);
     }
 
     auto image_rot = std::get<0>(image_rotary_emb);
@@ -2169,7 +2012,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     new_hidden_states = proj_out_->forward(new_hidden_states);
     if (FLAGS_dit_sp_size > 1) {
       new_hidden_states =
-          gather_sequence(new_hidden_states, 1, 0, process_group_);
+          gather_sequence(new_hidden_states, 1, 0, parallel_args_.sp_group_);
     }
     return new_hidden_states;
   }
@@ -2223,7 +2066,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
   AdaLayerNormContinuous norm_out_{nullptr};
   DiTLinear proj_out_{nullptr};
 
-  ProcessGroup* process_group_;
+  const ParallelArgs parallel_args_;
 
   // Cache objects
   bool cache_cond_;

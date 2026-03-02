@@ -79,11 +79,8 @@ void WorkerService::step(ForwardInput& fwd_input,
                          torch::Tensor& out_logprobs) {
   // execute model
   auto future = worker_->step_async(fwd_input);
-  LOG(INFO) << "after step async";
-  LOG(INFO) << options_.enable_schedule_overlap();
   if (!options_.enable_schedule_overlap()) {
     auto forward_outputs = std::move(future).get();
-    LOG(INFO) << "hhh finish model infer";
     // convert ForwardOutput to proto::ForwardOutput which contain Tokens.
     if (forward_outputs) {
       DCHECK(forward_outputs.has_value()) << "Failed to execute model";

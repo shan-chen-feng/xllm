@@ -20,9 +20,7 @@ limitations under the License.
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include "core/common/global_flags.h"
-#include "dit_mapping_npu.h"
 #include "hccl/hccl.h"
-#include "npu_comm_manager.h"
 #include "process_group.h"
 
 namespace xllm {
@@ -44,17 +42,22 @@ class ProcessGroupImpl : public ProcessGroup {
                    const std::string& group_name,
                    const torch::Device& device);
 
+  ProcessGroupImpl(int32_t global_rank,
+                   int32_t local_rank,
+                   const std::vector<int32_t>& group_ranks,
+                   int32_t world_size,
+                   int32_t rank_size,
+                   int32_t port,
+                   const std::string& host,
+                   const std::string& group_name,
+                   const torch::Device& device);
   // Destructor.
   ~ProcessGroupImpl() override;
-
+  /*
   void allreduce(torch::Tensor& input) override;
 
   void allgather(const torch::Tensor& input,
                  std::vector<torch::Tensor>& outputs) override;
-
-  void init_dit_group_mapping();
-
-  std::vector<uint32_t> get_rank_per_group(const std::string& group_type);
 
   void alltoall_single(torch::Tensor send,
                        torch::Tensor recv,
@@ -67,12 +70,11 @@ class ProcessGroupImpl : public ProcessGroup {
                       torch::Tensor recv,
                       bool is_sync,
                       std::shared_ptr<c10_npu::NPUEvent>* out_done);
-
+  */
  private:
+  static int32_t group_id_;
   HcclComm comm_ = nullptr;
   c10_npu::NPUStream comm_stream_;
-  std::unique_ptr<DiTMappingNPU> dit_mapping_npu_{nullptr};
-  std::unique_ptr<NPUExternalCommManager> npu_comm_manager_{nullptr};
 };
 
 #if defined(USE_NPU)

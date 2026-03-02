@@ -88,6 +88,9 @@ void DiTMappingNPU::set_group_by_type(ParallelInfo& parallel_info,
                                       const std::string& group_type) {
   auto rank_per_group = rank_generator_->get_ranks(group_type);
   parallel_info.rank_per_group(rank_per_group);
+  auto group_size = rank_per_group[0].size();
+  parallel_info.num_group(world_size_ / group_size);
+  LOG(INFO) << group_type << " group num is : " << world_size_ / group_size;
   auto [current_group_id, local_rank] =
       get_current_group_id(rank_per_group, rank_);
   CHECK(current_group_id >= 0 && local_rank >= 0)
