@@ -488,7 +488,7 @@ DEFINE_int32(random_seed, -1, "Random seed for random number generator.");
 DEFINE_string(dit_cache_policy,
               "TaylorSeer",
               "The policy of dit cache(e.g. None, FBCache, TaylorSeer, "
-              "FBCacheTaylorSeer).");
+              "FBCacheTaylorSeer, ResidualCache).");
 
 DEFINE_int64(dit_cache_warmup_steps, 0, "The number of warmup steps.");
 
@@ -533,6 +533,10 @@ DEFINE_int64(dit_tp_size, 1, "The number of blocks to skip at the end.");
 DEFINE_int64(dit_sp_size, 1, "The number of blocks to skip at the end.");
 
 DEFINE_int64(dit_cfg_size, 1, "The number of blocks to skip at the end.");
+
+DEFINE_int64(dit_sp_communication_overlap,
+             1,
+             "Communication & Computation overlap for sequence parallel");
 
 DEFINE_bool(
     use_audio_in_video,

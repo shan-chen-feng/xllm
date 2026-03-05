@@ -18,38 +18,158 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "core/framework/state_dict/utils.h"
+#include "framework/parallel_state/parallel_state.h"
+
 namespace xllm {
 namespace F = torch::nn::functional;
+
+enum class LinearType { Default, SequenceParallel };
+
+// NOTE: The order of linear and all2all Operations depends on the
+// before_attention param if before_attention is true, order is: linear->all2all
+// if before_attention is false, order is: all2all->linear
+struct SpOptions {
+  // the num of attention heads
+  int64_t head_num = 0;
+
+  // the size of single attention head
+  int64_t head_dim = 0;
+
+  // hidden_size
+  int64_t hidden_size = 0;
+
+  // before_attention: a Bool value that indicates where to apply the all2all,
+  //  According to the classic ulysses sequence parallel, we should apply
+  //  all2all communication for q, k, v, text_q (optional), text_k (optional),
+  //  text_v (optional), before attention operation to gather full sequence
+  //  (splited_sequence * group_size) and scatter the head nums (head_nums /
+  //  group_size) , and we should apply all2all communication for attn_output,
+  //  text_attn_output (optional) after the attention operation to split the
+  //  full sequence (full_sequence / group_size) , and gather the head nums
+  //  (splited_head_num * group_size)
+  bool before_attention = false;
+
+  // the process_group for sequence parallel
+  ProcessGroup* process_group = nullptr;
+
+  SpOptions() = default;
+
+  SpOptions(int64_t head_num,
+            int64_t head_dim,
+            int64_t hidden_size,
+            bool before_attention,
+            ProcessGroup* process_group = nullptr)
+      : head_num(head_num),
+        head_dim(head_dim),
+        hidden_size(hidden_size),
+        before_attention(before_attention),
+        process_group(process_group) {}
+
+  void valid() const {
+    CHECK(head_num > 0)
+        << "head_num should be greater than 0 to initialize DiTLinear for "
+           "linear type 'sequence_parallel' "
+        << " but got " << head_num;
+    CHECK(head_dim > 0)
+        << "head_dim should be greater than 0 to initialize DiTLinear for "
+           "linear type 'sequence_parallel' "
+        << " but got " << head_dim;
+    CHECK(hidden_size > 0)
+        << "head_size should be greater than 0 to initialize DiTLinear for "
+           "linear type 'sequence_parallel' "
+        << " but got " << hidden_size;
+    CHECK(hidden_size == head_dim * head_num)
+        << "hidden_size should equal to head_dim * head_num"
+        << "got head_dim " << head_dim << ", head num" << head_num
+        << ", hidden_size " << hidden_size;
+    if (!process_group) {
+      LOG(ERROR)
+          << "DiTSpLinear expected to receive an initialized processgroup for"
+          << "all2all communication, but got nullptr";
+    }
+  }
+};
 
 class DiTLinearImpl : public torch::nn::Module {
  public:
   DiTLinearImpl(int64_t in,
                 int64_t out,
                 bool with_bias = true,
-                bool fused = true)
-      : fused_(fused) {
+                bool fused = true,
+                LinearType linear_type = LinearType::Default,
+                const SpOptions& sp_options = SpOptions())
+      : fused_(fused), sp_options_(sp_options), linear_type_(linear_type) {
     weight = register_parameter("weight", torch::empty({out, in}));
     if (with_bias) {
       bias = register_parameter("bias", torch::empty(out));
     } else {
       bias = register_parameter("bias", {}, false);
     }
+
+    if (linear_type == LinearType::SequenceParallel) {
+      sp_options_.valid();
+    }
   }
 
-  torch::Tensor forward(const torch::Tensor& x) {
+  torch::Tensor linear_forward(const torch::Tensor& input) {
     // use addmm when bias is provided
     if (bias.defined() && fused_) {
-      auto sizes = x.sizes();
+      auto sizes = input.sizes();
       if (sizes.size() == 3) {
-        torch::Tensor x_;
-        x_ = x.reshape({sizes[0] * sizes[1], sizes[2]});
-        return torch::addmm(bias, x_, weight, 1, 1)
+        torch::Tensor reshaped_input;
+        reshaped_input = input.reshape({sizes[0] * sizes[1], sizes[2]});
+        return torch::addmm(bias, reshaped_input, weight, 1, 1)
             .reshape({sizes[0], sizes[1], weight.size(1)});
       } else {
-        return torch::addmm(bias, x, weight, 1, 1);
+        return torch::addmm(bias, input, weight, 1, 1);
       }
     } else {
-      return F::linear(x, weight, bias);
+      return F::linear(input, weight, bias);
+    }
+  }
+
+  // sp_forward combines the linear operation with all2all communication,
+  // output: A torch tensor with shape {batch, seq_len, hidden_size}
+  torch::Tensor sp_forward(const torch::Tensor& input) {
+    CHECK(input.sizes().size() == 3)
+        << "Sp linear input is expected to be a tensor "
+        << "with shape {batch, seq_len, hidden_size}";
+    auto group_size = sp_options_.process_group->world_size();
+    if (sp_options_.before_attention) {
+      auto linear_output = this->linear_forward(input);
+      auto all_to_all_func = parallel_state::all_to_all_4D(
+          /*input=*/linear_output.view(
+              {input.size(0), -1, sp_options_.head_num, sp_options_.head_dim}),
+          /*scatter_dim=*/2,
+          /*gather_dim=*/1,
+          /*async_ops=*/false,
+          sp_options_.process_group);
+      auto output = all_to_all_func();
+      return output.view(
+          {input.size(0), -1, sp_options_.hidden_size / group_size});
+    } else {
+      auto all_to_all_func = parallel_state::all_to_all_4D(
+          /*input=*/input.view({input.size(0),
+                                -1,
+                                sp_options_.head_num / group_size,
+                                sp_options_.head_dim}),
+          /*scatter_dim=*/1,
+          /*gather_dim=*/2,
+          /*async_ops=*/false,
+          sp_options_.process_group);
+      auto all_to_all_output = all_to_all_func();
+      all_to_all_output =
+          all_to_all_output.view({input.size(0), -1, sp_options_.hidden_size});
+      auto output = this->linear_forward(all_to_all_output);
+      return output;
+    }
+  }
+
+  torch::Tensor forward(const torch::Tensor& input) {
+    if (linear_type_ == LinearType::Default) {
+      return this->linear_forward(input);
+    } else {
+      return this->sp_forward(input);
     }
   }
 
@@ -92,6 +212,8 @@ class DiTLinearImpl : public torch::nn::Module {
   bool weight_is_loaded_{false};
   bool bias_is_loaded_{false};
   bool fused_;
+  SpOptions sp_options_;
+  LinearType linear_type_;
 };
 
 TORCH_MODULE(DiTLinear);

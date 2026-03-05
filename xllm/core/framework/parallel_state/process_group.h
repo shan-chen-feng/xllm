@@ -45,25 +45,14 @@ class ProcessGroup {
 
   virtual ~ProcessGroup() = default;
 
-  int32_t rank() const { return rank_; }
+  int32_t rank() const {
+    CHECK(pg_ != nullptr) << "Process group is not initialized.";
+    return pg_->getRank();
+  }
 
-  int32_t world_size() const { return world_size_; }
-
-  // TODO: currently group_size and rank_per_group functions are
-  // only implemented for npu_process_group, other process group
-  // may get uninitialized value
-  int32_t group_size() {
-    if (group_size_ == 0) {
-      LOG(ERROR) << "The group size of process group must be greater than 0";
-    }
-    return group_size_;
-  };
-
-  std::vector<uint32_t>& rank_per_group() {
-    if (rank_per_group_.size() == 0) {
-      LOG(ERROR) << "the group ranks is not initialized";
-    }
-    return rank_per_group_;
+  int32_t world_size() const {
+    CHECK(pg_ != nullptr) << "Process group is not initialized.";
+    return pg_->getSize();
   }
 
   const torch::Device& device() const { return device_; }
@@ -90,7 +79,7 @@ class ProcessGroup {
       bool async_op = false,
       c10::intrusive_ptr<c10d::Work>* async_work = nullptr);
 
- protected:
+ private:
   // rank of current process.
   int32_t rank_ = 0;
 
@@ -99,12 +88,6 @@ class ProcessGroup {
 
   // device of current process.
   torch::Device device_;
-
-  // num of devices in current group
-  int32_t group_size_ = 0;
-
-  // global devices indices in current group
-  std::vector<uint32_t> rank_per_group_;
 
  protected:
 #if defined(USE_NPU) &&         \

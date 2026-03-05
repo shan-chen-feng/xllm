@@ -55,7 +55,7 @@ inline torch::Tensor gather_sequence(const torch::Tensor& input_,
                                      int64_t dim,
                                      int64_t pad,
                                      ProcessGroup* pg) {
-  auto group_size = pg->group_size();
+  auto group_size = pg->world_size();
   auto input = input_.contiguous();
   if (group_size == 1) {
     return input;
@@ -78,12 +78,9 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
                                     int64_t dim,
                                     int64_t pad,
                                     ProcessGroup* pg) {
-  auto group_size = pg->group_size();
+  auto group_size = pg->world_size();
   auto rank = pg->rank();
-  auto start_rank = pg->rank_per_group()[0];
-  LOG(INFO) << "group_size is " << group_size;
-  LOG(INFO) << "rank is " << rank;
-  LOG(INFO) << "start rank is " << start_rank;
+
   if (group_size == 1) {
     return input_;
   }
@@ -102,7 +99,7 @@ inline torch::Tensor split_sequence(const torch::Tensor& input_,
   int64_t dim_size = input.size(dim);
 
   auto tensor_list = torch::split(input, dim_size / group_size, dim);
-  auto output = tensor_list[rank - start_rank].contiguous();
+  auto output = tensor_list[rank].contiguous();
   return output;
 }
 
@@ -1102,11 +1099,13 @@ class AttentionImpl : public torch::nn::Module {
                 std::optional<bool> context_pre_only = std::nullopt,
                 bool pre_only = false,
                 bool elementwise_affine = true,
-                bool is_causal = false)
+                bool is_causal = false,
+                ProcessGroup* sp_group = nullptr)
       : heads_(heads),
         bias_(bias),
         out_bias_(out_bias),
-        added_proj_bias_(added_proj_bias) {
+        added_proj_bias_(added_proj_bias),
+        sp_group_(sp_group) {
     if (qk_norm == "layer_norm") {
       layer_norm_q_ = register_module(
           "norm_q",
@@ -1169,43 +1168,109 @@ class AttentionImpl : public torch::nn::Module {
                               : query_dim;
     out_context_dim =
         out_context_dim.has_value() ? out_context_dim.value() : query_dim;
-    to_q_ = register_module("to_q", DiTLinear(query_dim, q_dim, bias));
+
+    SpOptions q_sp_option;
+    SpOptions kv_sp_option;
+    LinearType linear_type = LinearType::Default;
+    if (FLAGS_dit_sp_size > 1) {
+      q_sp_option = SpOptions(/*head_num=*/heads,
+                              /*head_dim=*/dim_head,
+                              /*hidden_size=*/q_dim,
+                              /*before_attention=*/true,
+                              /*process_group=*/sp_group_);
+
+      kv_sp_option = SpOptions(
+          /*head_num=*/kv_heads.has_value() ? kv_heads.value() : heads,
+          /*head_dim=*/dim_head,
+          /*hidden_size=*/kv_dim,
+          /*before_attention=*/true,
+          /*process_group=*/sp_group_);
+      linear_type = LinearType::SequenceParallel;
+    }
+    to_q_ = register_module("to_q",
+                            DiTLinear(query_dim,
+                                      q_dim,
+                                      bias,
+                                      /*fused=*/true,
+                                      linear_type,
+                                      q_sp_option));
 
     // Key-Value projections (if not only cross attention)
     if (!only_cross_attention) {
-      to_k_ = register_module(
-          "to_k", DiTLinear(cross_attention_dim.value(), kv_dim, bias));
-      to_v_ = register_module(
-          "to_v", DiTLinear(cross_attention_dim.value(), kv_dim, bias));
+      to_k_ = register_module("to_k",
+                              DiTLinear(cross_attention_dim.value(),
+                                        kv_dim,
+                                        bias,
+                                        /*fused=*/true,
+                                        linear_type,
+                                        kv_sp_option));
+      to_v_ = register_module("to_v",
+                              DiTLinear(cross_attention_dim.value(),
+                                        kv_dim,
+                                        bias,
+                                        /*fused=*/true,
+                                        linear_type,
+                                        kv_sp_option));
     }
 
     if (added_kv_proj_dim.has_value()) {
-      add_k_proj_ = register_module(
-          "add_k_proj",
-          DiTLinear(added_kv_proj_dim.value(), kv_dim, added_proj_bias));
-      add_v_proj_ = register_module(
-          "add_v_proj",
-          DiTLinear(added_kv_proj_dim.value(), kv_dim, added_proj_bias));
+      add_k_proj_ = register_module("add_k_proj",
+                                    DiTLinear(added_kv_proj_dim.value(),
+                                              kv_dim,
+                                              added_proj_bias,
+                                              /*fused=*/true,
+                                              linear_type,
+                                              kv_sp_option));
+      add_v_proj_ = register_module("add_v_proj",
+                                    DiTLinear(added_kv_proj_dim.value(),
+                                              kv_dim,
+                                              added_proj_bias,
+                                              /*fused=*/true,
+                                              linear_type,
+                                              kv_sp_option));
 
       if (context_pre_only.has_value()) {
-        add_q_proj_ = register_module(
-            "add_q_proj",
-            DiTLinear(added_kv_proj_dim.value(), q_dim, added_proj_bias));
+        add_q_proj_ = register_module("add_q_proj",
+                                      DiTLinear(added_kv_proj_dim.value(),
+                                                q_dim,
+                                                added_proj_bias,
+                                                /*fused=*/true,
+                                                linear_type,
+                                                q_sp_option));
       }
+    }
+
+    SpOptions out_sp_option;
+    if (FLAGS_dit_sp_size > 1) {
+      out_sp_option = SpOptions(/*head_num=*/heads,
+                                /*head_dim=*/dim_head,
+                                /*hidden_size=*/q_dim,
+                                /*before_attention=*/false,
+                                /*process_group=*/sp_group_);
     }
 
     // Output projections
     if (!pre_only) {
       to_out_ = register_module("to_out", torch::nn::Sequential());
-      to_out_->push_back(DiTLinear(q_dim, out_dim.value(), out_bias));
+      to_out_->push_back(DiTLinear(q_dim,
+                                   out_dim.value(),
+                                   out_bias,
+                                   /*fused=*/true,
+                                   linear_type,
+                                   out_sp_option));
       to_out_->push_back(
           torch::nn::Dropout(torch::nn::DropoutOptions(dropout)));
     }
 
     // Additional output for context
     if (context_pre_only.has_value() && context_pre_only) {
-      to_add_out_ = register_module(
-          "to_add_out", DiTLinear(q_dim, out_context_dim.value(), out_bias));
+      to_add_out_ = register_module("to_add_out",
+                                    DiTLinear(q_dim,
+                                              out_context_dim.value(),
+                                              out_bias,
+                                              /*fused=*/true,
+                                              linear_type,
+                                              out_sp_option));
     }
 
     // Added QK normalization for added KV projections
@@ -1281,6 +1346,7 @@ class AttentionImpl : public torch::nn::Module {
   bool bias_;
   bool out_bias_;
   bool added_proj_bias_;
+  ProcessGroup* sp_group_;
 
   torch::nn::LayerNorm layer_norm_q_{nullptr}, layer_norm_k_{nullptr},
       norm_cross_{nullptr};
@@ -1304,7 +1370,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     attn_ = register_module("attn", std::move(attn_module));
   }
 
-  std::tuple<torch::Tensor, torch::Tensor> forward(
+  virtual std::tuple<torch::Tensor, torch::Tensor> forward(
       const torch::Tensor& hidden_states,          // Image stream
       const torch::Tensor& encoder_hidden_states,  // Text stream
       const torch::Tensor& encoder_hidden_states_mask = torch::Tensor(),
@@ -1324,7 +1390,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
 
     // Reshape for multi-head attention
     int64_t heads = attn_->heads_;
-    auto reshape_dims = std::vector<int64_t>{heads, -1};
+    auto reshape_dims = std::vector<int64_t>{heads / FLAGS_dit_sp_size, -1};
 
     img_query = img_query.unflatten(-1, reshape_dims);
     img_key = img_key.unflatten(-1, reshape_dims);
@@ -1346,54 +1412,6 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
       txt_key = attn_->norm_added_k_->forward(txt_key);
     }
 
-    int64_t batch_size = hidden_states.size(0);
-    int64_t inner_dim = attn_->to_k_->weight.size(0);
-    int64_t attn_heads = attn_->heads_;
-    int64_t head_dim = inner_dim / attn_heads;
-    if (FLAGS_dit_sp_size > 1) {
-      auto handle_q = parallel_state::all_to_all_4D(
-          img_query.view({batch_size, -1, attn_heads, head_dim}),
-          2,
-          1,
-          false,
-          parallel_args_.sp_group_);
-      auto handle_k = parallel_state::all_to_all_4D(
-          img_key.view({batch_size, -1, attn_heads, head_dim}),
-          2,
-          1,
-          false,
-          parallel_args_.sp_group_);
-      auto handle_v = parallel_state::all_to_all_4D(
-          img_value.view({batch_size, -1, attn_heads, head_dim}),
-          2,
-          1,
-          false,
-          parallel_args_.sp_group_);
-      auto handle_tq = parallel_state::all_to_all_4D(
-          txt_query.view({batch_size, -1, attn_heads, head_dim}),
-          2,
-          1,
-          false,
-          parallel_args_.sp_group_);
-      auto handle_tk = parallel_state::all_to_all_4D(
-          txt_key.view({batch_size, -1, attn_heads, head_dim}),
-          2,
-          1,
-          false,
-          parallel_args_.sp_group_);
-      auto handle_tv = parallel_state::all_to_all_4D(
-          txt_value.view({batch_size, -1, attn_heads, head_dim}),
-          2,
-          1,
-          false,
-          parallel_args_.sp_group_);
-      img_query = handle_q();
-      img_key = handle_k();
-      img_value = handle_v();
-      txt_query = handle_tq();
-      txt_key = handle_tk();
-      txt_value = handle_tv();
-    }
     // Apply RoPE if provided
     auto img_freqs = std::get<0>(image_rotary_emb);
     auto txt_freqs = std::get<1>(image_rotary_emb);
@@ -1434,28 +1452,6 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     auto txt_attn_output = chunks[0];
     auto img_attn_output = chunks[1];
 
-    std::function<torch::Tensor()> handle_io, handle_t_o;
-    if (FLAGS_dit_sp_size > 1) {
-      handle_io = parallel_state::all_to_all_4D(
-          img_attn_output.view(
-              {batch_size, -1, attn_heads / FLAGS_dit_sp_size, head_dim}),
-          1,
-          2,
-          false,
-          parallel_args_.sp_group_);
-      img_attn_output = handle_io();
-      img_attn_output = img_attn_output.view({batch_size, -1, inner_dim});
-      handle_t_o = parallel_state::all_to_all_4D(
-          txt_attn_output.view(
-              {batch_size, -1, attn_heads / FLAGS_dit_sp_size, head_dim}),
-          1,
-          2,
-          false,
-          parallel_args_.sp_group_);
-      txt_attn_output = handle_t_o();
-      txt_attn_output = txt_attn_output.view({batch_size, -1, inner_dim});
-    }
-
     // Apply output projections
     img_attn_output = attn_->to_out_->forward(img_attn_output);
 
@@ -1471,7 +1467,7 @@ class QwenDoubleStreamAttnProcessor2_0Impl : public torch::nn::Module {
     attn_->verify_loaded_weights(prefix);
   }
 
- private:
+ protected:
   Attention attn_{nullptr};
   const ParallelArgs parallel_args_;
 };
@@ -1570,7 +1566,11 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
                            /*residual_connection=*/false,
                            /*out_dim=*/dim,
                            /*out_context_dim=*/std::nullopt,
-                           /*context_pre_only=*/true);
+                           /*context_pre_only=*/true,
+                           /*pre_only=*/false,
+                           /*elementwise_affine=*/true,
+                           /*is_causal=*/false,
+                           /*sp_group=*/parallel_args_.sp_group_);
     attn_processor_ = register_module(
         "attn_processor_",
         QwenDoubleStreamAttnProcessor2_0(std::move(attn_), parallel_args_));

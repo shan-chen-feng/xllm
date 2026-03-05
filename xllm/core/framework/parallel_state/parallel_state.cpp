@@ -55,14 +55,14 @@ torch::Tensor gather(const torch::Tensor& input,
   if (!process_group) {
     return input;
   }
-  const int32_t group_size = process_group->group_size();
-  if (group_size == 1) {
+  const int32_t world_size = process_group->world_size();
+  if (world_size == 1) {
     return input;
   }
 
   const int32_t rank = process_group->rank();
-  std::vector<torch::Tensor> tensors(group_size);
-  for (int64_t i = 0; i < group_size; ++i) {
+  std::vector<torch::Tensor> tensors(world_size);
+  for (int64_t i = 0; i < world_size; ++i) {
     tensors[i] = torch::empty_like(input);
   }
   // blocking call
@@ -258,17 +258,18 @@ torch::Tensor scatter(torch::Tensor input,
 std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
                                              int scatter_idx,
                                              int gather_idx,
-                                             bool is_sync,
-                                             ProcessGroup* pg) {
-  if (!pg) {
+                                             bool async_ops,
+                                             ProcessGroup* process_group) {
+  if (!process_group) {
     return [input]() { return input; };
   }
-  const int32_t group_size = pg->group_size();
+  const int32_t group_size = process_group->world_size();
+
   if (group_size == 1) {
     return [input]() { return input; };
   }
 
-  auto rank = pg->rank();
+  auto rank = process_group->rank();
 
   TORCH_CHECK(input.dim() == 4,
               "all_to_all_4D: input must be 4D, got dim=",
@@ -302,12 +303,9 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
     std::vector<int64_t> input_split_size = {};
     std::vector<int64_t> output_split_size = {};
 
-    if (is_sync) {
-      pg->all_to_all_single(output,
-                            input_t,
-                            output_split_size,
-                            input_split_size,
-                            /*async_op=*/false);
+    if (!async_ops) {
+      process_group->all_to_all_single(
+          output, input_t, output_split_size, input_split_size, async_ops);
       output = output.reshape({seqlen, bs, shard_head_num, head_size})
                    .transpose(0, 1)
                    .contiguous()
@@ -315,12 +313,12 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
       return [output]() { return output; };
     } else {
       c10::intrusive_ptr<c10d::Work> all2all_work;
-      pg->all_to_all_single(output,
-                            input_t,
-                            output_split_size,
-                            input_split_size,
-                            /*async_op=*/true,
-                            &all2all_work);
+      process_group->all_to_all_single(output,
+                                       input_t,
+                                       output_split_size,
+                                       input_split_size,
+                                       async_ops,
+                                       &all2all_work);
       return [output,
               all2all_work,
               bs,
@@ -366,12 +364,12 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
     std::vector<int64_t> input_split_size = {};
     std::vector<int64_t> output_split_size = {};
 
-    if (is_sync) {
-      pg->all_to_all_single(output,
-                            input_t,
-                            output_split_size,
-                            input_split_size,
-                            /*async_op=*/false);
+    if (!async_ops) {
+      process_group->all_to_all_single(output,
+                                       input_t,
+                                       output_split_size,
+                                       input_split_size,
+                                       /*async_op=*/false);
       output = output.reshape({head_num, shard_seqlen, bs, head_size})
                    .transpose(0, 2)
                    .contiguous()
@@ -379,12 +377,12 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
       return [output]() { return output; };
     } else {
       c10::intrusive_ptr<c10d::Work> all2all_work;
-      pg->all_to_all_single(output,
-                            input_t,
-                            output_split_size,
-                            input_split_size,
-                            /*async_op=*/true,
-                            &all2all_work);
+      process_group->all_to_all_single(output,
+                                       input_t,
+                                       output_split_size,
+                                       input_split_size,
+                                       /*async_op=*/true,
+                                       &all2all_work);
       return [output,
               all2all_work,
               head_num,

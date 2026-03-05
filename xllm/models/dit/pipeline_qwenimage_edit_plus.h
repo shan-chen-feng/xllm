@@ -528,12 +528,10 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
       torch::Tensor pos_neg_noise_preds;
       if (FLAGS_dit_cfg_size == 2 && do_true_cfg) {
         LOG(INFO) << "begin get group";
-        auto ranks_per_group = parallel_args_.cfg_group_->rank_per_group();
         auto rank = parallel_args_.cfg_group_->rank();
-        LOG(INFO) << ranks_per_group.size();
         LOG(INFO) << "after get group";
         LOG(INFO) << "rank is" << rank;
-        if (rank == ranks_per_group[0]) {
+        if (rank == 0) {
           LOG(INFO) << "ranks as 0: " << rank;
           noise_pred = transformer_->forward(latent_model_input,
                                              prompt_embeds,

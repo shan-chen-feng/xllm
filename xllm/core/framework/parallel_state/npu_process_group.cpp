@@ -92,7 +92,6 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
   LOG(INFO) << "inside set group name";
   hccl_pg_options->group_name = group_name;
 #endif
-  group_size_ = rank_size;
   int32_t rank = global_rank;
   if (world_size != rank_size) {
     auto [local_rank, group_ranks] =
@@ -131,19 +130,20 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
   LOG(INFO) << "inside set group name";
   hccl_pg_options->group_name = group_name;
 #endif
-  group_size_ = rank_size;
-  for (auto rank : group_ranks) {
-    rank_per_group_.push_back(static_cast<uint32_t>(rank));
+  if (world_size != rank_size) {
+    std::vector<uint32_t> uint32_ranks;
+    for (auto rank : group_ranks) {
+      uint32_ranks.push_back(static_cast<uint32_t>(rank));
+    }
+    hccl_pg_options->global_ranks_in_group = uint32_ranks;
   }
   LOG(INFO) << "port is " << port;
   LOG(INFO) << "host is " << host;
   LOG(INFO) << "local_rank is " << local_rank;
   LOG(INFO) << "group name is " << group_name;
-  LOG(INFO) << rank_per_group_[0] << rank_per_group_[1];
   LOG(INFO) << "rank_size is " << rank_size;
   LOG(INFO) << "world_size is " << world_size;
   hccl_pg_options->group_id = std::to_string(group_id_++);
-  hccl_pg_options->global_ranks_in_group = rank_per_group_;
   auto store = create_tcp_store(host, port, local_rank);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, local_rank, rank_size, hccl_pg_options);
