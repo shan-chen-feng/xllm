@@ -118,7 +118,6 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
   dit_model_executor_ =
       std::make_unique<DiTExecutor>(dit_model_.get(), options_);
 
-  // DiTCacheConfig cache_config = parse_dit_cache_from_flags();
   DiTCache::get_instance().init(cache_config);
 
   return true;

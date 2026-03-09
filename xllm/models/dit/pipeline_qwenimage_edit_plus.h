@@ -49,12 +49,9 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
     prompt_template_encode_start_idx_ = 64;
     default_sample_size_ = 128;
 
-    DiTCacheConfig dit_config = context.get_dit_config();
-    dit_cache_ = std::make_shared<DiTCache>(dit_config);
-
     vae_ = AutoencoderKLQwenImage(context.get_model_context("vae"));
     transformer_ = QwenImageTransformer2DModel(
-        context.get_model_context("transformer"), parallel_args_, dit_cache_);
+        context.get_model_context("transformer"), parallel_args_);
     scheduler_ =
         FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
 
@@ -266,10 +263,8 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
     auto width = generation_params.width;
     auto true_cfg_scale = generation_params.true_cfg_scale;
     auto num_inference_steps = generation_params.num_inference_steps;
-    // DiTCache::get_instance().set_infer_steps(num_inference_steps);
-    // DiTCache::get_instance().set_num_blocks(num_layers_);
-    dit_cache_->set_infer_steps(num_inference_steps);
-    dit_cache_->set_num_blocks(num_layers_);
+    DiTCache::get_instance().set_infer_steps(num_inference_steps);
+    DiTCache::get_instance().set_num_blocks(num_layers_);
     auto max_sequence_length = generation_params.max_sequence_length;
     auto seed = generation_params.seed > 0 ? generation_params.seed : 42;
 
@@ -656,7 +651,6 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
   torch::Tensor current_timestep_;
   string prompt_template_encode_;
   const ModelArgs& vae_model_args_;
-  std::shared_ptr<DiTCache> dit_cache_{nullptr};
 };
 
 REGISTER_MODEL_ARGS(Qwen2Tokenizer, [&] {});
