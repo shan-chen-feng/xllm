@@ -8,7 +8,6 @@ cc_library(
     mapping_npu.h
     dit_mapping_npu.h
     rank_generator.h
-    npu_comm_manager.h
     parallel_args.h
     parallel_state.h
     process_group.h
@@ -23,7 +22,6 @@ cc_library(
   SRCS
     mapping_npu.cpp
     dit_mapping_npu.cpp
-    npu_comm_manager.cpp
     parallel_state.cpp
     process_group.cpp
     $<$<BOOL:${USE_NPU}>:npu_process_group.cpp>

@@ -104,12 +104,9 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
     rank = local_rank;
   }
   hccl_pg_options->group_id = std::to_string(group_id_++);
-  LOG(INFO) << "create tcp store";
   auto store = create_tcp_store(host, port, rank, world_size);
-  LOG(INFO) << "finish tcp store";
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
       store, rank, rank_size, hccl_pg_options);
-  LOG(INFO) << "finish hhh";
 }
 
 ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
@@ -137,12 +134,24 @@ ProcessGroupImpl::ProcessGroupImpl(int32_t global_rank,
     }
     hccl_pg_options->global_ranks_in_group = uint32_ranks;
   }
-  LOG(INFO) << "port is " << port;
-  LOG(INFO) << "host is " << host;
-  LOG(INFO) << "local_rank is " << local_rank;
-  LOG(INFO) << "group name is " << group_name;
-  LOG(INFO) << "rank_size is " << rank_size;
-  LOG(INFO) << "world_size is " << world_size;
+
+  if (FLAGS_dit_debug_print) {
+    std::stringstream ranks_ss;
+    ranks_ss << "Group : [" << group_ranks[0];
+    for (size_t i = 1; i < group_ranks.size(); i++) {
+      ranks_ss << ", " << group_ranks[i];
+    }
+    ranks_ss << "]" << std::endl;
+
+    LOG(INFO) << "Creating HccLProcessGroup for " << group_name
+              << " group, with global rank " << global_rank << ", local rank"
+              << local_rank << ", with port " << host << ":" << port
+              << ", rank_size is " << rank_size << ", world_size is "
+              << world_size
+              << ", the following ranks should share the same port, "
+              << ranks_ss.str();
+  }
+
   hccl_pg_options->group_id = std::to_string(group_id_++);
   auto store = create_tcp_store(host, port, local_rank);
   pg_ = std::make_unique<c10d_npu::ProcessGroupHCCL>(
@@ -166,19 +175,5 @@ ProcessGroupImpl::ProcessGroupImpl(int rank,
     : ProcessGroup(rank, world_size, device),
       comm_(comm),
       comm_stream_(c10_npu::getNPUStreamFromPool(device.index())) {}
-/*
-std::vector<uint32_t> ProcessGroupImpl::get_rank_per_group(
-    const std::string& group_type) {
-  auto cfg_parallel_info = dit_mapping_npu_->get_parallel_info(group_type);
-  auto group_id = cfg_parallel_info.current_group_id();
 
-  auto& rank_per_group_int = cfg_parallel_info.rank_per_group()[group_id];
-  std::vector<uint32_t> rank_per_group_uint(rank_per_group_int.size());
-  std::transform(rank_per_group_int.begin(),
-                 rank_per_group_int.end(),
-                 rank_per_group_uint.begin(),
-                 [](int rank) { return static_cast<uint32_t>(rank); });
-  return rank_per_group_uint;
-}
-*/
 }  // namespace xllm

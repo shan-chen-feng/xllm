@@ -265,6 +265,8 @@ DECLARE_int64(dit_cfg_size);
 
 DECLARE_int64(dit_dp_size);
 
+DECLARE_bool(dit_debug_print);
+
 // --- multi-step decode config ---
 
 DECLARE_int32(max_decode_rounds);

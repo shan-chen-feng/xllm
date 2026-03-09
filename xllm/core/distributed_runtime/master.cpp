@@ -289,7 +289,11 @@ Master::Master(const Options& options, EngineType type) : options_(options) {
         .node_rank(options_.node_rank())
         .enable_schedule_overlap(options_.enable_schedule_overlap())
         .dp_size(options_.dp_size())
-        .ep_size(options_.ep_size());
+        .ep_size(options_.ep_size())
+        .dit_dp_size(options_.dit_dp_size())
+        .dit_tp_size(options_.dit_tp_size())
+        .dit_sp_size(options_.dit_sp_size())
+        .dit_cfg_size(options_.dit_cfg_size());
 
     auto dit_engine = std::make_unique<DiTEngine>(eng_options);
     engine_ = std::move(dit_engine);

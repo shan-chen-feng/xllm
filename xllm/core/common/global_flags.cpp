@@ -538,6 +538,12 @@ DEFINE_int64(dit_sp_communication_overlap,
              1,
              "Communication & Computation overlap for sequence parallel");
 
+// --- dit debug ---
+
+DEFINE_bool(dit_debug_print,
+            false,
+            "whether print the debug info for dit models");
+
 DEFINE_bool(
     use_audio_in_video,
     false,

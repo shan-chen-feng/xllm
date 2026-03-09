@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/common/global_flags.h"
+
 class RankGenerator {
  public:
   RankGenerator(int32_t tp,
@@ -60,10 +62,10 @@ class RankGenerator {
     LOG(INFO) << "RankGenerator initialized with tp=" << tp << ", sp=" << sp
               << ", cfg=" << cfg << ", dp=" << dp << ", order=" << group_order_
               << ", world_size=" << world_size_;
-    print_ranks("cfg");
-    print_ranks("tp");
-    print_ranks("sp");
-    print_ranks("dp");
+
+    if (FLAGS_dit_debug_print) {
+      debug_print();
+    }
   }
 
   std::vector<std::vector<int32_t>> get_ranks(const std::string& group_query) {
@@ -88,6 +90,13 @@ class RankGenerator {
   int32_t get_sp() const { return sp_; }
   int32_t get_cfg() const { return cfg_; }
   int32_t get_dp() const { return dp_; }
+
+  void debug_print() {
+    print_ranks("cfg");
+    print_ranks("tp");
+    print_ranks("sp");
+    print_ranks("dp");
+  }
 
   void print_ranks(const std::string& group_query) {
     auto ranks = get_ranks(group_query);

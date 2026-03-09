@@ -143,7 +143,6 @@ std::optional<ForwardOutput> DiTWorkerImpl::step(const ForwardInput& inputs) {
   auto output = dit_model_executor_->forward(
       inputs.input_params.dit_forward_input.to(device_, dtype_));
 
-  torch::npu::synchronize();
   auto ret = device_.synchronize_default_stream();
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
   ForwardOutput forward_output;

@@ -106,8 +106,13 @@ void WorkerServer::create_server(
   const ParallelArgs* parallel_args = nullptr;
   std::unique_ptr<CollectiveCommunicatorBase> comm;
   if (worker_type == WorkerType::DIT) {
-    auto dit_comm = std::make_unique<DiTCollectiveCommunicator>(
-        worker_global_rank, world_size);
+    auto dit_comm =
+        std::make_unique<DiTCollectiveCommunicator>(worker_global_rank,
+                                                    world_size,
+                                                    options.dit_dp_size(),
+                                                    options.dit_tp_size(),
+                                                    options.dit_sp_size(),
+                                                    options.dit_cfg_size());
     comm = std::move(dit_comm);
   } else {
     auto common_comm = std::make_unique<CollectiveCommunicator>(

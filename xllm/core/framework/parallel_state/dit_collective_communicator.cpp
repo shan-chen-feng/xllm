@@ -37,24 +37,27 @@ limitations under the License.
 #include "util/net.h"
 namespace xllm {
 
-DiTCollectiveCommunicator::DiTCollectiveCommunicator(int global_rank,
-                                                     int world_size)
+DiTCollectiveCommunicator::DiTCollectiveCommunicator(int32_t global_rank,
+                                                     int32_t world_size,
+                                                     int32_t dit_dp_size,
+                                                     int32_t dit_tp_size,
+                                                     int32_t dit_sp_size,
+                                                     int32_t dit_cfg_size)
     : CollectiveCommunicatorBase(global_rank, world_size) {
 #if defined(USE_NPU)
   DiTMappingNPU::Options dit_mapping_options;
-  dit_mapping_options.tp_size(FLAGS_dit_tp_size)
-      .sp_size(FLAGS_dit_sp_size)
-      .cfg_size(FLAGS_dit_cfg_size)
-      .dp_size(FLAGS_dit_dp_size);
+  dit_mapping_options.dit_tp_size(dit_tp_size)
+      .dit_sp_size(dit_sp_size)
+      .dit_cfg_size(dit_cfg_size)
+      .dit_dp_size(dit_dp_size);
   dit_mapping_npu_ = std::make_unique<DiTMappingNPU>(
       world_size, global_rank, dit_mapping_options);
-  LOG(INFO) << "flag size: " << FLAGS_dit_cfg_size;
   parallel_args_ = std::make_unique<ParallelArgs>(global_rank,
                                                   world_size,
-                                                  FLAGS_dit_dp_size,
-                                                  FLAGS_dit_tp_size,
-                                                  FLAGS_dit_sp_size,
-                                                  FLAGS_dit_cfg_size,
+                                                  dit_dp_size,
+                                                  dit_tp_size,
+                                                  dit_sp_size,
+                                                  dit_cfg_size,
                                                   nullptr);
 #endif
 }
@@ -65,21 +68,16 @@ void DiTCollectiveCommunicator::create_process_groups(
   Device device_(device);
   device_.set_device();
   std::string host;
-  int port;
+  int32_t port;
   net::parse_host_port_from_addr(master_addr, host, port);
 
   int32_t global_rank = parallel_args_->rank();
   int32_t world_size = parallel_args_->world_size();
-  int32_t dp_size = parallel_args_->dp_size();
-  int32_t tp_size = parallel_args_->tp_size();
-  int32_t sp_size = parallel_args_->sp_size();
-  int32_t cfg_size = parallel_args_->cfg_size();
-  LOG(INFO) << "start create process_group";
-  LOG(INFO) << global_rank;
-  LOG(INFO) << world_size;
-  LOG(INFO) << device;
-  LOG(INFO) << port;
-  LOG(INFO) << "cfg_size is " << cfg_size;
+  int32_t dp_size = parallel_args_->dit_dp_size();
+  int32_t tp_size = parallel_args_->dit_tp_size();
+  int32_t sp_size = parallel_args_->dit_sp_size();
+  int32_t cfg_size = parallel_args_->dit_cfg_size();
+
   process_group_ = create_process_group(global_rank,
                                         world_size,
                                         world_size,
@@ -88,7 +86,7 @@ void DiTCollectiveCommunicator::create_process_groups(
                                         host,
                                         "world_group",
                                         device);
-  LOG(INFO) << "finish create process_group";
+
   parallel_args_->process_group_ = process_group_.get();
 
   if (tp_size > 1) {
@@ -158,15 +156,15 @@ void DiTCollectiveCommunicator::create_process_groups(
     auto local_rank = dp_parallel_info.rank();
     auto& rank_per_group = dp_parallel_info.rank_per_group()[group_id];
     int port_offset = group_id + 1;
-    cfg_group_ = create_process_group(global_rank,
-                                      local_rank,
-                                      rank_per_group,
-                                      world_size,
-                                      dp_size,
-                                      port + port_offset,
-                                      host,
-                                      "dp_group",
-                                      device);
+    dp_group_ = create_process_group(global_rank,
+                                     local_rank,
+                                     rank_per_group,
+                                     world_size,
+                                     dp_size,
+                                     port + port_offset,
+                                     host,
+                                     "dp_group",
+                                     device);
     parallel_args_->dp_group_ = dp_group_.get();
     port += num_group;
   }

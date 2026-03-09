@@ -27,13 +27,13 @@ class DiTMappingNPU final {
  public:
   struct Options {
     // cfg size
-    PROPERTY(int32_t, cfg_size) = -1;
+    PROPERTY(int32_t, dit_cfg_size) = -1;
     // tp size
-    PROPERTY(int32_t, tp_size) = -1;
+    PROPERTY(int32_t, dit_tp_size) = -1;
     // sp size
-    PROPERTY(int32_t, sp_size) = -1;
+    PROPERTY(int32_t, dit_sp_size) = -1;
     // dp size
-    PROPERTY(int32_t, dp_size) = -1;
+    PROPERTY(int32_t, dit_dp_size) = -1;
   };
 
   DiTMappingNPU(const int32_t world_size,

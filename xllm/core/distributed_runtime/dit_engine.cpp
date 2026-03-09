@@ -110,7 +110,6 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   auto dit_forward_input = batches[0].prepare_forward_input();
   RawForwardInput raw_forward_input;
   raw_forward_input.dit_forward_input = dit_forward_input;
-  dit_forward_input.debug_print();
   COUNTER_ADD(prepare_input_latency_seconds, timer.elapsed_seconds());
 
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;

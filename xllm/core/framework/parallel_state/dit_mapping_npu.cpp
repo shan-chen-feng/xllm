@@ -42,17 +42,17 @@ DiTMappingNPU::DiTMappingNPU(const int32_t world_size,
 }
 
 void DiTMappingNPU::parse_parallel_info() {
-  if (options_.tp_size() != -1) {
-    tp_.group_size(options_.tp_size());
+  if (options_.dit_tp_size() != -1) {
+    tp_.group_size(options_.dit_tp_size());
   }
-  if (options_.sp_size() != -1) {
-    sp_.group_size(options_.sp_size());
+  if (options_.dit_sp_size() != -1) {
+    sp_.group_size(options_.dit_sp_size());
   }
-  if (options_.cfg_size() != -1) {
-    cfg_.group_size(options_.cfg_size());
+  if (options_.dit_cfg_size() != -1) {
+    cfg_.group_size(options_.dit_cfg_size());
   }
-  if (options_.dp_size() != -1) {
-    dp_.group_size(options_.dp_size());
+  if (options_.dit_dp_size() != -1) {
+    dp_.group_size(options_.dit_dp_size());
   }
 }
 
@@ -90,7 +90,6 @@ void DiTMappingNPU::set_group_by_type(ParallelInfo& parallel_info,
   parallel_info.rank_per_group(rank_per_group);
   auto group_size = rank_per_group[0].size();
   parallel_info.num_group(world_size_ / group_size);
-  LOG(INFO) << group_type << " group num is : " << world_size_ / group_size;
   auto [current_group_id, local_rank] =
       get_current_group_id(rank_per_group, rank_);
   CHECK(current_group_id >= 0 && local_rank >= 0)
@@ -131,9 +130,9 @@ const ParallelInfo& DiTMappingNPU::get_parallel_info(
 nlohmann::json DiTMappingNPU::to_json() {
   nlohmann::json data;
 
-  data["SpSize"] = options_.sp_size();
-  data["TpSize"] = options_.tp_size();
-  data["CfgSize"] = options_.cfg_size();
+  data["SpSize"] = options_.dit_sp_size();
+  data["TpSize"] = options_.dit_tp_size();
+  data["CfgSize"] = options_.dit_cfg_size();
   data["worldSize"] = world_size_;
   data["rank"] = rank_;
   data["sp"] = sp_.to_json();

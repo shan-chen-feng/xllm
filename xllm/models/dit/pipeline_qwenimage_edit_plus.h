@@ -300,7 +300,11 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
     std::vector<torch::Tensor> image_list;
 
     torch::Tensor images;
-    input.debug_print();
+
+    if (FLAGS_dit_debug_print) {
+      input.debug_print();
+    }
+
     if (input.images.defined()) {
       images = input.images.to(options_.device(), dtype_);
       if (input.images.dim() == 3) {
@@ -461,8 +465,6 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
       negative_txt_seq_lens = negative_prompt_embeds_mask.sum(1);
     }
 
-    prompt_embeds.print();
-    prompt_embeds_mask.print();
     if (prompt_embeds.size(1) % FLAGS_dit_sp_size != 0) {
       int64_t pad_len =
           FLAGS_dit_sp_size - prompt_embeds.size(1) % FLAGS_dit_sp_size;
@@ -482,8 +484,6 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
       prompt_embeds = torch::pad(prompt_embeds, pad_with, "constant", 0);
       prompt_embeds_mask =
           torch::pad(prompt_embeds_mask, pad_with_mask, "constant", 0);
-      prompt_embeds.print();
-      prompt_embeds_mask.print();
     }
 
     if (negative_prompt_embeds.size(1) % FLAGS_dit_sp_size != 0) {
@@ -506,8 +506,6 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
           torch::pad(negative_prompt_embeds, pad_with, "constant", 0);
       negative_prompt_embeds_mask =
           torch::pad(negative_prompt_embeds_mask, pad_with_mask, "constant", 0);
-      negative_prompt_embeds.print();
-      negative_prompt_embeds_mask.print();
     }
 
     scheduler_->set_begin_index(0);
@@ -527,12 +525,8 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
       torch::Tensor neg_noise_pred;
       torch::Tensor pos_neg_noise_preds;
       if (FLAGS_dit_cfg_size == 2 && do_true_cfg) {
-        LOG(INFO) << "begin get group";
         auto rank = parallel_args_.cfg_group_->rank();
-        LOG(INFO) << "after get group";
-        LOG(INFO) << "rank is" << rank;
         if (rank == 0) {
-          LOG(INFO) << "ranks as 0: " << rank;
           noise_pred = transformer_->forward(latent_model_input,
                                              prompt_embeds,
                                              prompt_embeds_mask,
@@ -547,7 +541,6 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
                                            parallel_args_.cfg_group_,
                                            /*dim=*/0);
         } else {
-          LOG(INFO) << "ranks as 1: " << rank;
           neg_noise_pred = transformer_->forward(latent_model_input,
                                                  negative_prompt_embeds,
                                                  negative_prompt_embeds_mask,
@@ -580,7 +573,6 @@ class QwenImageEditPlusPipelineImpl : public QwenImagePipelineBaseImpl {
                                            /*use_cfg=*/false,
                                            /*step_index=*/i);
         noise_pred = noise_pred.slice(1, 0, final_latents.size(1));
-        LOG(INFO) << do_true_cfg;
         if (do_true_cfg) {
           neg_noise_pred = transformer_->forward(latent_model_input,
                                                  negative_prompt_embeds,

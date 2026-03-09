@@ -69,13 +69,9 @@ c10::intrusive_ptr<c10d::Store> create_tcp_store(const std::string& host,
                                                  int port,
                                                  int rank,
                                                  int world_size) {
-  LOG(INFO) << "rank is" << rank;
   c10d::TCPStoreOptions tcp_options;
   tcp_options.isServer = (rank == 0);
-  tcp_options.port = port + 3;
-  tcp_options.timeout = std::chrono::milliseconds(50000);
-  LOG(INFO) << "host " << host;
-  LOG(INFO) << "port " << port;
+  tcp_options.port = port;
   return c10::make_intrusive<c10d::TCPStore>(host, tcp_options);
 }
 
@@ -87,11 +83,9 @@ void ProcessGroup::allreduce(torch::Tensor& input) {
 
 void ProcessGroup::allgather(const torch::Tensor& input,
                              std::vector<torch::Tensor>& outputs) {
-  LOG(INFO) << "inside allgather";
   CHECK(pg_ != nullptr) << "Process group is not initialized.";
   std::vector<torch::Tensor> input_tensors = {input};
   std::vector<std::vector<torch::Tensor>> output_tensors = {outputs};
-  LOG(INFO) << "output size " << outputs.size();
   pg_->allgather(output_tensors, input_tensors)->wait();
 }
 
@@ -172,4 +166,5 @@ std::unique_ptr<ProcessGroup> create_process_group(
                                             group_name,
                                             device);
 }
+
 }  // namespace xllm

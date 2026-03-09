@@ -22,7 +22,13 @@ namespace xllm {
 
 class DiTCollectiveCommunicator : public CollectiveCommunicatorBase {
  public:
-  DiTCollectiveCommunicator(int global_rank, int world_size);
+  DiTCollectiveCommunicator(int32_t global_rank,
+                            int32_t world_size,
+                            int32_t dit_dp_size,
+                            int32_t dit_tp_size,
+                            int32_t dit_sp_size,
+                            int32_t dit_cfg_size);
+
   ~DiTCollectiveCommunicator() = default;
 
   void create_process_groups(const std::string& master_addr,
