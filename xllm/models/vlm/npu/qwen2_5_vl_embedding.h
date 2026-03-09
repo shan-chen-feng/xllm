@@ -150,7 +150,6 @@ class Qwen2_5_VLForEmbeddingImpl : public torch::nn::Module {
 
   torch::Tensor pooler(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) {
-    hidden_states.print();
     auto h = hidden_states;
     return h;
   }

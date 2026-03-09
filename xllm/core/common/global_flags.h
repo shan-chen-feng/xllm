@@ -267,6 +267,8 @@ DECLARE_int64(dit_dp_size);
 
 DECLARE_bool(dit_debug_print);
 
+DECLARE_bool(enable_return_mm_full_embeddings);
+
 // --- multi-step decode config ---
 
 DECLARE_int32(max_decode_rounds);
