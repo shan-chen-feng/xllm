@@ -151,6 +151,12 @@ std::unique_ptr<ProcessGroup> create_process_group(
       rank, world_size, rank_size, port, trans, host, group_name, device);
 }
 
+#if defined(USE_NPU)
+// TODO: This function is used by DiT models, since the DiT communication group
+// info have already been caculated by rank_generator, we only need to pass the
+// info to create the process groups. For any device that want to reuse the
+// function and dit process groups, please implement the corresponding
+// ProcessGroupImpl construct function.
 std::unique_ptr<ProcessGroup> create_process_group(
     int32_t global_rank,
     int32_t local_rank,
@@ -171,5 +177,5 @@ std::unique_ptr<ProcessGroup> create_process_group(
                                             group_name,
                                             device);
 }
-
+#endif
 }  // namespace xllm

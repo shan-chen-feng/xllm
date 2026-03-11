@@ -32,7 +32,8 @@ limitations under the License.
 #include "core/framework/model/model_input_params.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
-#include "dit_linear.h"
+#include "core/layers/common/add_matmul.h"
+#include "dit_parallel_linear.h"
 #include "framework/model_context.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "models/model_registry.h"
@@ -170,7 +171,8 @@ class AdaLayerNormContinuousImpl : public torch::nn::Module {
     silu_ = register_module("silu", torch::nn::SiLU());
     linear_ = register_module(
         "linear",
-        DiTLinear(conditioning_embedding_dim, 2 * embedding_dim, bias));
+        layer::WeightTransposeAddMatmul(
+            conditioning_embedding_dim, 2 * embedding_dim, bias, options_));
     norm_ = register_module(
         "norm",
         torch::nn::LayerNorm(torch::nn::LayerNormOptions({embedding_dim})
@@ -203,7 +205,7 @@ class AdaLayerNormContinuousImpl : public torch::nn::Module {
   }
 
  private:
-  DiTLinear linear_{nullptr};
+  layer::WeightTransposeAddMatmul linear_{nullptr};
   torch::nn::SiLU silu_{nullptr};
   torch::nn::LayerNorm norm_{nullptr};
   double eps_;
@@ -408,13 +410,18 @@ class TimestepEmbeddingImpl : public torch::nn::Module {
                         int64_t out_dim = -1,
                         const std::string& post_act_fn = "",
                         int64_t cond_proj_dim = -1,
-                        bool sample_proj_bias = true) {
+                        bool sample_proj_bias = true)
+      : options_(context.get_tensor_options()) {
     linear_1_ = register_module(
-        "linear_1", DiTLinear(in_channels, time_embed_dim, sample_proj_bias));
+        "linear_1",
+        layer::WeightTransposeAddMatmul(
+            in_channels, time_embed_dim, sample_proj_bias, options_));
 
     if (cond_proj_dim > 0) {
-      cond_proj_ = register_module(
-          "cond_proj", DiTLinear(cond_proj_dim, in_channels, false));
+      cond_proj_ =
+          register_module("cond_proj",
+                          layer::WeightTransposeAddMatmul(
+                              cond_proj_dim, in_channels, false, options_));
     }
 
     act_fn_ = register_module("act_fn", torch::nn::SiLU());
@@ -423,7 +430,8 @@ class TimestepEmbeddingImpl : public torch::nn::Module {
 
     linear_2_ = register_module(
         "linear_2",
-        DiTLinear(time_embed_dim, time_embed_dim_out, sample_proj_bias));
+        layer::WeightTransposeAddMatmul(
+            time_embed_dim, time_embed_dim_out, sample_proj_bias, options_));
   }
 
   torch::Tensor forward(const torch::Tensor& sample,
@@ -453,11 +461,11 @@ class TimestepEmbeddingImpl : public torch::nn::Module {
   }
 
  private:
+  torch::TensorOptions options_;
   torch::nn::SiLU act_fn_{nullptr};
-
-  DiTLinear linear_1_{nullptr};
-  DiTLinear linear_2_{nullptr};
-  DiTLinear cond_proj_{nullptr};
+  layer::WeightTransposeAddMatmul linear_1_{nullptr};
+  layer::WeightTransposeAddMatmul linear_2_{nullptr};
+  layer::WeightTransposeAddMatmul cond_proj_{nullptr};
 };
 TORCH_MODULE(TimestepEmbedding);
 
@@ -1101,7 +1109,8 @@ class AttentionImpl : public torch::nn::Module {
                 bool elementwise_affine = true,
                 bool is_causal = false,
                 ProcessGroup* sp_group = nullptr)
-      : heads_(heads),
+      : options_(context.get_tensor_options()),
+        heads_(heads),
         bias_(bias),
         out_bias_(out_bias),
         added_proj_bias_(added_proj_bias),
@@ -1187,56 +1196,67 @@ class AttentionImpl : public torch::nn::Module {
           /*process_group=*/sp_group_);
       linear_type = LinearType::SequenceParallel;
     }
-    to_q_ = register_module("to_q",
-                            DiTLinear(query_dim,
-                                      q_dim,
-                                      bias,
-                                      /*fused=*/true,
-                                      linear_type,
-                                      q_sp_option));
+
+    auto q_linear =
+        layer::WeightTransposeAddMatmul(query_dim, q_dim, bias, options_);
+
+    to_q_ = register_module("q_linear",
+                            DiTParallelLinear(std::move(q_linear),
+                                              /*module_name=*/"to_q",
+                                              linear_type,
+                                              q_sp_option));
 
     // Key-Value projections (if not only cross attention)
     if (!only_cross_attention) {
-      to_k_ = register_module("to_k",
-                              DiTLinear(cross_attention_dim.value(),
-                                        kv_dim,
-                                        bias,
-                                        /*fused=*/true,
-                                        linear_type,
-                                        kv_sp_option));
-      to_v_ = register_module("to_v",
-                              DiTLinear(cross_attention_dim.value(),
-                                        kv_dim,
-                                        bias,
-                                        /*fused=*/true,
-                                        linear_type,
-                                        kv_sp_option));
+      auto k_linear = layer::WeightTransposeAddMatmul(
+          cross_attention_dim.value(), kv_dim, bias, options_);
+
+      to_k_ = register_module("k_linear",
+                              DiTParallelLinear(std::move(k_linear),
+                                                /*module_name=*/"to_k",
+                                                linear_type,
+                                                kv_sp_option));
+
+      auto v_linear = layer::WeightTransposeAddMatmul(
+          cross_attention_dim.value(), kv_dim, bias, options_);
+
+      to_v_ = register_module("v_linear",
+                              DiTParallelLinear(std::move(v_linear),
+                                                /*module_name=*/"to_v",
+                                                linear_type,
+                                                kv_sp_option));
     }
 
     if (added_kv_proj_dim.has_value()) {
-      add_k_proj_ = register_module("add_k_proj",
-                                    DiTLinear(added_kv_proj_dim.value(),
-                                              kv_dim,
-                                              added_proj_bias,
-                                              /*fused=*/true,
-                                              linear_type,
-                                              kv_sp_option));
-      add_v_proj_ = register_module("add_v_proj",
-                                    DiTLinear(added_kv_proj_dim.value(),
-                                              kv_dim,
-                                              added_proj_bias,
-                                              /*fused=*/true,
-                                              linear_type,
-                                              kv_sp_option));
+      auto add_k_linear = layer::WeightTransposeAddMatmul(
+          added_kv_proj_dim.value(), kv_dim, added_proj_bias, options_);
 
+      add_k_proj_ =
+          register_module("add_k_linear",
+                          DiTParallelLinear(std::move(add_k_linear),
+                                            /*module_name=*/"add_k_proj",
+                                            linear_type,
+                                            kv_sp_option));
+
+      auto add_v_linear = layer::WeightTransposeAddMatmul(
+          added_kv_proj_dim.value(), kv_dim, added_proj_bias, options_);
+
+      add_v_proj_ =
+          register_module("add_v_linear",
+                          DiTParallelLinear(std::move(add_v_linear),
+                                            /*module_name=*/"add_v_proj",
+                                            linear_type,
+                                            kv_sp_option));
       if (context_pre_only.has_value()) {
-        add_q_proj_ = register_module("add_q_proj",
-                                      DiTLinear(added_kv_proj_dim.value(),
-                                                q_dim,
-                                                added_proj_bias,
-                                                /*fused=*/true,
-                                                linear_type,
-                                                q_sp_option));
+        auto add_q_linear = layer::WeightTransposeAddMatmul(
+            added_kv_proj_dim.value(), q_dim, added_proj_bias, options_);
+
+        add_q_proj_ =
+            register_module("add_q_linear",
+                            DiTParallelLinear(std::move(add_q_linear),
+                                              /*module_name=*/"add_q_proj",
+                                              linear_type,
+                                              q_sp_option));
       }
     }
 
@@ -1252,25 +1272,29 @@ class AttentionImpl : public torch::nn::Module {
     // Output projections
     if (!pre_only) {
       to_out_ = register_module("to_out", torch::nn::Sequential());
-      to_out_->push_back(DiTLinear(q_dim,
-                                   out_dim.value(),
-                                   out_bias,
-                                   /*fused=*/true,
-                                   linear_type,
-                                   out_sp_option));
+
+      auto to_out_linear = layer::WeightTransposeAddMatmul(
+          q_dim, out_dim.value(), out_bias, options_);
+
+      to_out_->push_back(DiTParallelLinear(std::move(to_out_linear),
+                                           /*module_name=*/"out",
+                                           linear_type,
+                                           out_sp_option));
       to_out_->push_back(
           torch::nn::Dropout(torch::nn::DropoutOptions(dropout)));
     }
 
     // Additional output for context
     if (context_pre_only.has_value() && context_pre_only) {
-      to_add_out_ = register_module("to_add_out",
-                                    DiTLinear(q_dim,
-                                              out_context_dim.value(),
-                                              out_bias,
-                                              /*fused=*/true,
-                                              linear_type,
-                                              out_sp_option));
+      auto to_add_out_linear = layer::WeightTransposeAddMatmul(
+          q_dim, out_context_dim.value(), out_bias, options_);
+
+      to_add_out_ =
+          register_module("to_add_out_linear",
+                          DiTParallelLinear(std::move(to_add_out_linear),
+                                            /*module_name=*/"to_add_out",
+                                            linear_type,
+                                            out_sp_option));
     }
 
     // Added QK normalization for added KV projections
@@ -1290,7 +1314,7 @@ class AttentionImpl : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict) {
     // to_out
-    to_out_[0]->as<DiTLinear>()->load_state_dict(
+    to_out_[0]->as<DiTParallelLinear>()->load_state_dict(
         state_dict.get_dict_with_prefix("to_out.0."));
     // to_add_out
     to_add_out_->load_state_dict(
@@ -1320,7 +1344,8 @@ class AttentionImpl : public torch::nn::Module {
 
   void verify_loaded_weights(const std::string& prefix) {
     // to_out
-    to_out_[0]->as<DiTLinear>()->verify_loaded_weights(prefix + "to_out.0.");
+    to_out_[0]->as<DiTParallelLinear>()->verify_loaded_weights(prefix +
+                                                               "to_out.0.");
     // to_add_out
     to_add_out_->verify_loaded_weights(prefix + "to_add_out.");
     // norm_q
@@ -1348,12 +1373,14 @@ class AttentionImpl : public torch::nn::Module {
   bool added_proj_bias_;
   ProcessGroup* sp_group_;
 
+  torch::TensorOptions options_;
   torch::nn::LayerNorm layer_norm_q_{nullptr}, layer_norm_k_{nullptr},
       norm_cross_{nullptr};
-  DiTLinear to_q_{nullptr}, to_k_{nullptr}, to_v_{nullptr};
-  DiTLinear add_k_proj_{nullptr}, add_v_proj_{nullptr}, add_q_proj_{nullptr};
+  DiTParallelLinear to_q_{nullptr}, to_k_{nullptr}, to_v_{nullptr};
+  DiTParallelLinear add_k_proj_{nullptr}, add_v_proj_{nullptr},
+      add_q_proj_{nullptr};
   torch::nn::Sequential to_out_{nullptr};
-  DiTLinear to_add_out_{nullptr};
+  DiTParallelLinear to_add_out_{nullptr};
 
   // Assuming you have RMSNorm implemented
   RMSNorm norm_q_{nullptr}, norm_k_{nullptr}, norm_added_q_{nullptr},
@@ -1485,7 +1512,9 @@ class FeedForwardImpl : public torch::nn::Module {
     auto inner_dim = dim * 4;
 
     // linear1
-    linear1_ = register_module("linear1", DiTLinear(dim, inner_dim, true));
+    linear1_ = register_module(
+        "linear1",
+        layer::WeightTransposeAddMatmul(dim, inner_dim, true, options_));
 
     // activation
     activation_ = register_module(
@@ -1494,7 +1523,9 @@ class FeedForwardImpl : public torch::nn::Module {
             [](const at::Tensor& x) { return torch::gelu(x, "tanh"); })));
 
     // linear2
-    linear2_ = register_module("linear2", DiTLinear(inner_dim, dim_out, true));
+    linear2_ = register_module(
+        "linear2",
+        layer::WeightTransposeAddMatmul(inner_dim, dim_out, true, options_));
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states) {
@@ -1517,8 +1548,8 @@ class FeedForwardImpl : public torch::nn::Module {
   }
 
  private:
-  DiTLinear linear1_{nullptr};
-  DiTLinear linear2_{nullptr};
+  layer::WeightTransposeAddMatmul linear1_{nullptr};
+  layer::WeightTransposeAddMatmul linear2_{nullptr};
   torch::nn::Functional activation_{nullptr};
   torch::TensorOptions options_;
 };
@@ -1536,12 +1567,15 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
                                 bool zero_cond_t = false,
                                 const std::string& qk_norm = "rms_norm",
                                 double eps = 1e-6)
-      : zero_cond_t_(zero_cond_t), parallel_args_(parallel_args) {
+      : options_(context.get_tensor_options()),
+        zero_cond_t_(zero_cond_t),
+        parallel_args_(parallel_args) {
     // Image processing modules
-    img_mod_ =
-        register_module("img_mod",
-                        torch::nn::Sequential(torch::nn::SiLU(),
-                                              DiTLinear(dim, 6 * dim, true)));
+    img_mod_ = register_module(
+        "img_mod",
+        torch::nn::Sequential(
+            torch::nn::SiLU(),
+            layer::WeightTransposeAddMatmul(dim, 6 * dim, true, options_)));
 
     // Image normalization
     img_norm1_ = register_module("img_norm1", AdaLayerNorm(context, dim, eps));
@@ -1581,10 +1615,11 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
     img_mlp_ = register_module("img_mlp", FeedForward(context, dim, dim));
 
     // Text processing modules
-    txt_mod_ =
-        register_module("txt_mod",
-                        torch::nn::Sequential(torch::nn::SiLU(),
-                                              DiTLinear(dim, 6 * dim, true)));
+    txt_mod_ = register_module(
+        "txt_mod",
+        torch::nn::Sequential(
+            torch::nn::SiLU(),
+            layer::WeightTransposeAddMatmul(dim, 6 * dim, true, options_)));
 
     // Text normalization 1
     txt_norm1_ = register_module("txt_norm1", AdaLayerNorm(context, dim, eps));
@@ -1735,24 +1770,27 @@ class QwenImageTransformerBlockImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    img_mod_[1]->as<DiTLinear>()->load_state_dict(
+    img_mod_[1]->as<layer::WeightTransposeAddMatmul>()->load_state_dict(
         state_dict.get_dict_with_prefix("img_mod.1."));
     img_mlp_->load_state_dict(state_dict.get_dict_with_prefix("img_mlp."));
-    txt_mod_[1]->as<DiTLinear>()->load_state_dict(
+    txt_mod_[1]->as<layer::WeightTransposeAddMatmul>()->load_state_dict(
         state_dict.get_dict_with_prefix("txt_mod.1."));
     txt_mlp_->load_state_dict(state_dict.get_dict_with_prefix("txt_mlp."));
     attn_processor_->load_state_dict(state_dict.get_dict_with_prefix("attn."));
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    img_mod_[1]->as<DiTLinear>()->verify_loaded_weights(prefix + "img_mod.1.");
+    img_mod_[1]->as<layer::WeightTransposeAddMatmul>()->verify_loaded_weights(
+        prefix + "img_mod.1.");
     img_mlp_->verify_loaded_weights(prefix + "img_mlp.");
-    txt_mod_[1]->as<DiTLinear>()->verify_loaded_weights(prefix + "txt_mod.1.");
+    txt_mod_[1]->as<layer::WeightTransposeAddMatmul>()->verify_loaded_weights(
+        prefix + "txt_mod.1.");
     txt_mlp_->verify_loaded_weights(prefix + "txt_mlp.");
     attn_processor_->verify_loaded_weights(prefix + "attn.");
   }
 
  private:
+  torch::TensorOptions options_;
   torch::nn::Sequential img_mod_{nullptr};
   AdaLayerNorm img_norm1_{nullptr};
   AdaLayerNorm img_norm2_{nullptr};
@@ -1774,7 +1812,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
  public:
   QwenImageTransformer2DModelImpl(const ModelContext& context,
                                   const ParallelArgs& parallel_args)
-      : parallel_args_(parallel_args) {
+      : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     auto model_args = context.get_model_args();
     int64_t num_attention_heads = model_args.n_heads();
     int64_t attention_head_dim = model_args.head_dim();
@@ -1812,10 +1850,13 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
         "txt_norm", RMSNorm(joint_attention_dim, 1e-6, true, false));
 
     // Input projections
-    img_in_ =
-        register_module("img_in", DiTLinear(in_channels, inner_dim, true));
-    txt_in_ = register_module("txt_in",
-                              DiTLinear(joint_attention_dim, inner_dim, true));
+    img_in_ = register_module("img_in",
+                              layer::WeightTransposeAddMatmul(
+                                  in_channels, inner_dim, true, options_));
+    txt_in_ =
+        register_module("txt_in",
+                        layer::WeightTransposeAddMatmul(
+                            joint_attention_dim, inner_dim, true, options_));
     // Transformer blocks
     transformer_blocks_ =
         register_module("transformer_blocks", torch::nn::ModuleList());
@@ -1835,7 +1876,8 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
         AdaLayerNormContinuous(context, inner_dim, inner_dim, false, 1e-6));
     proj_out_ = register_module(
         "proj_out",
-        DiTLinear(inner_dim, patch_size * patch_size * out_channels, true));
+        layer::WeightTransposeAddMatmul(
+            inner_dim, patch_size * patch_size * out_channels, true, options_));
 
     // Cache for conditional and unconditional
     cache_cond_ = false;
@@ -2005,8 +2047,8 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
     new_hidden_states = norm_out_->forward(new_hidden_states, temb);
     new_hidden_states = proj_out_->forward(new_hidden_states);
     if (FLAGS_dit_sp_size > 1) {
-      new_hidden_states =
-          gather_sequence(new_hidden_states, 1, 0, parallel_args_.dit_sp_group_);
+      new_hidden_states = gather_sequence(
+          new_hidden_states, 1, 0, parallel_args_.dit_sp_group_);
     }
     return new_hidden_states;
   }
@@ -2050,15 +2092,16 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module {
   }
 
  private:
+  torch::TensorOptions options_;
   QwenEmbedRope pos_embed_{nullptr};
   QwenEmbedLayer3DRope pos_embed_3d_rope_{nullptr};
   QwenTimestepProjEmbeddings time_text_embed_{nullptr};
   RMSNorm txt_norm_{nullptr};
-  DiTLinear img_in_{nullptr};
-  DiTLinear txt_in_{nullptr};
+  layer::WeightTransposeAddMatmul img_in_{nullptr};
+  layer::WeightTransposeAddMatmul txt_in_{nullptr};
   torch::nn::ModuleList transformer_blocks_{nullptr};
   AdaLayerNormContinuous norm_out_{nullptr};
-  DiTLinear proj_out_{nullptr};
+  layer::WeightTransposeAddMatmul proj_out_{nullptr};
 
   const ParallelArgs parallel_args_;
 

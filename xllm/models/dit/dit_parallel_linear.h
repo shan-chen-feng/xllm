@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "core/framework/state_dict/utils.h"
+#include "core/layers/common/add_matmul.h"
 #include "framework/parallel_state/parallel_state.h"
 
 namespace xllm {
@@ -66,18 +67,18 @@ struct SpOptions {
         process_group(process_group) {}
 
   void valid() const {
-    CHECK(head_num > 0)
-        << "head_num should be greater than 0 to initialize DiTLinear for "
-           "linear type 'sequence_parallel' "
-        << " but got " << head_num;
-    CHECK(head_dim > 0)
-        << "head_dim should be greater than 0 to initialize DiTLinear for "
-           "linear type 'sequence_parallel' "
-        << " but got " << head_dim;
-    CHECK(hidden_size > 0)
-        << "head_size should be greater than 0 to initialize DiTLinear for "
-           "linear type 'sequence_parallel' "
-        << " but got " << hidden_size;
+    CHECK(head_num > 0) << "head_num should be greater than 0 to initialize "
+                           "DiTParallelLinear for "
+                           "linear type 'sequence_parallel' "
+                        << " but got " << head_num;
+    CHECK(head_dim > 0) << "head_dim should be greater than 0 to initialize "
+                           "DiTParallelLinear for "
+                           "linear type 'sequence_parallel' "
+                        << " but got " << head_dim;
+    CHECK(hidden_size > 0) << "head_size should be greater than 0 to "
+                              "initialize DiTParallelLinear for "
+                              "linear type 'sequence_parallel' "
+                           << " but got " << hidden_size;
     CHECK(hidden_size == head_dim * head_num)
         << "hidden_size should equal to head_dim * head_num"
         << "got head_dim " << head_dim << ", head num" << head_num
@@ -90,42 +91,25 @@ struct SpOptions {
   }
 };
 
-class DiTLinearImpl : public torch::nn::Module {
+// TODO : Need to Implement a template funciton, but
+// libtorch doesn't allow to creat module holder for
+// template class.
+// template <typename Linear>
+class DiTParallelLinearImpl : public torch::nn::Module {
  public:
-  DiTLinearImpl(int64_t in,
-                int64_t out,
-                bool with_bias = true,
-                bool fused = true,
-                LinearType linear_type = LinearType::Default,
-                const SpOptions& sp_options = SpOptions())
-      : fused_(fused), sp_options_(sp_options), linear_type_(linear_type) {
-    weight = register_parameter("weight", torch::empty({out, in}));
-    if (with_bias) {
-      bias = register_parameter("bias", torch::empty(out));
-    } else {
-      bias = register_parameter("bias", {}, false);
-    }
-
+  DiTParallelLinearImpl(layer::WeightTransposeAddMatmul linear,
+                        const string& module_name,
+                        LinearType linear_type = LinearType::Default,
+                        const SpOptions& sp_options = SpOptions())
+      : sp_options_(sp_options), linear_type_(linear_type) {
+    linear_ = register_module(module_name, std::move(linear));
     if (linear_type == LinearType::SequenceParallel) {
       sp_options_.valid();
     }
   }
 
   torch::Tensor linear_forward(const torch::Tensor& input) {
-    // use addmm when bias is provided
-    if (bias.defined() && fused_) {
-      auto sizes = input.sizes();
-      if (sizes.size() == 3) {
-        torch::Tensor reshaped_input;
-        reshaped_input = input.reshape({sizes[0] * sizes[1], sizes[2]});
-        return torch::addmm(bias, reshaped_input, weight, 1, 1)
-            .reshape({sizes[0], sizes[1], weight.size(1)});
-      } else {
-        return torch::addmm(bias, input, weight, 1, 1);
-      }
-    } else {
-      return F::linear(input, weight, bias);
-    }
+    return linear_->forward(input);
   }
 
   // sp_forward combines the linear operation with all2all communication,
@@ -174,47 +158,18 @@ class DiTLinearImpl : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    // only transpoes weights when state_dict has the key
-    // or it would be transposed multiple times when having
-    // multiple state dicts
-    if (state_dict.has("weight")) {
-      weight::load_weight(state_dict, "weight", weight, weight_is_loaded_);
-      // weight need to be transposed when using addmm
-      if (bias.defined() && fused_) {
-        torch::Tensor transposed = weight.data().transpose(0, 1).contiguous();
-        weight.set_data(transposed);
-      }
-    }
-    if (bias.defined()) {
-      weight::load_weight(state_dict, "bias", bias, bias_is_loaded_);
-    }
-  }
-
-  void to(torch::TensorOptions options) {
-    weight.set_data(weight.to(options));
-    if (bias.defined()) {
-      bias.set_data(bias.to(options));
-    }
+    linear_->load_state_dict(state_dict);
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
-    CHECK(weight_is_loaded_)
-        << "weight is not loaded for " << prefix + "weight";
-    if (bias.defined()) {
-      CHECK(bias_is_loaded_) << "bias is not loaded for " << prefix + "bias";
-    }
+    linear_->verify_loaded_weights(prefix);
   }
 
-  torch::Tensor weight;
-  torch::Tensor bias;
-
  private:
-  bool weight_is_loaded_{false};
-  bool bias_is_loaded_{false};
-  bool fused_;
+  layer::WeightTransposeAddMatmul linear_{nullptr};
   SpOptions sp_options_;
   LinearType linear_type_;
 };
 
-TORCH_MODULE(DiTLinear);
+TORCH_MODULE(DiTParallelLinear);
 }  // namespace xllm
