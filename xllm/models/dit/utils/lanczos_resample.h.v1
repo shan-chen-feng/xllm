@@ -1,0 +1,133 @@
+/**
+ * Lanczos Resample - 独立 C++ 实现
+ *
+ * 从 Pillow (PIL) 库的 ImagingResample LANCZOS 功能剥离而来。
+ * 支持 8bpc (RGBA/RGB/灰度) 和 32bpc (float32) 图像的高质量 Lanczos 重采样。
+ *
+ * 原始代码版权:
+ *   Copyright (c) 1997-2005 by Secret Labs AB
+ *   Copyright (c) 1995-2005 by Fredrik Lundh
+ *   License: PIL Software License (与 MIT 兼容)
+ *
+ * 用法:
+ *   #include "lanczos_resample.h"
+ *   // 8bpc RGBA 图像缩放:
+ *   std::vector<uint8_t> output;
+ *   lanczos::resize_8bpc(inputData, srcW, srcH, channels, dstW, dstH, output);
+ *
+ *   // float32 图像缩放:
+ *   std::vector<float> output;
+ *   lanczos::resize_f32(inputData, srcW, srcH, channels, dstW, dstH, output);
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <cstdlib>
+#include <cmath>
+#include <cstring>
+#include <vector>
+#include <algorithm>
+#include <stdexcept>
+
+namespace lanczos {
+
+// ============================================================================
+// 核心滤波器
+// ============================================================================
+
+/**
+ * sinc 函数: sin(pi*x) / (pi*x)
+ */
+inline double sinc_filter(double x) {
+    if (x == 0.0) {
+        return 1.0;
+    }
+    x = x * M_PI;
+    return std::sin(x) / x;
+}
+
+/**
+ * Lanczos-3 滤波器: sinc(x) * sinc(x/3), 支持窗口 [-3, 3)
+ */
+inline double lanczos_filter(double x) {
+    if (-3.0 <= x && x < 3.0) {
+        return sinc_filter(x) * sinc_filter(x / 3.0);
+    }
+    return 0.0;
+}
+
+constexpr double LANCZOS_SUPPORT = 3.0;
+
+// ============================================================================
+// 预计算系数
+// ============================================================================
+
+/**
+ * 预计算重采样系数和边界。
+ *
+ * @param inSize    输入尺寸
+ * @param in0       输入区域起始 (通常 0)
+ * @param in1       输入区域结束 (通常 inSize)
+ * @param outSize   输出尺寸
+ * @param[out] bounds  输出边界数组 (outSize * 2), [xmin, xmax(count)] 对
+ * @param[out] kk      输出系数数组 (outSize * ksize)
+ * @return ksize    每个输出像素的最大系数数量, 0 表示失败
+ */
+int precompute_coeffs(
+    int inSize,
+    double in0,
+    double in1,
+    int outSize,
+    std::vector<int>& bounds,
+    std::vector<double>& kk
+);
+
+// ============================================================================
+// 8bpc 重采样 (uint8_t 像素)
+// ============================================================================
+
+/**
+ * 将 8bpc 图像 (1~4 通道) 使用 Lanczos-3 缩放到目标尺寸。
+ *
+ * 数据布局: 像素按 [R,G,B,A,...] 紧密排列 (interleaved), 行优先。
+ * 即 data[y * width * channels + x * channels + c]
+ *
+ * @param src       源像素数据 (大小 srcW * srcH * channels)
+ * @param srcW      源宽度
+ * @param srcH      源高度
+ * @param channels  通道数 (1, 2, 3, 或 4)
+ * @param dstW      目标宽度
+ * @param dstH      目标高度
+ * @param[out] dst  输出像素数据 (将被 resize 为 dstW * dstH * channels)
+ */
+void resize_8bpc(
+    const uint8_t* src, int srcW, int srcH, int channels,
+    int dstW, int dstH,
+    std::vector<uint8_t>& dst
+);
+
+// ============================================================================
+// float32 重采样
+// ============================================================================
+
+/**
+ * 将 float32 图像 (任意通道数) 使用 Lanczos-3 缩放到目标尺寸。
+ *
+ * 数据布局同 resize_8bpc。
+ *
+ * @param src       源像素数据 (大小 srcW * srcH * channels)
+ * @param srcW      源宽度
+ * @param srcH      源高度
+ * @param channels  通道数
+ * @param dstW      目标宽度
+ * @param dstH      目标高度
+ * @param[out] dst  输出像素数据 (将被 resize 为 dstW * dstH * channels)
+ */
+void resize_f32(
+    const float* src, int srcW, int srcH, int channels,
+    int dstW, int dstH,
+    std::vector<float>& dst
+);
+
+} // namespace lanczos

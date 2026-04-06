@@ -31,10 +31,10 @@ Qwen2VLImageProcessor::smart_resize_image(int32_t height,
   }
 
   int32_t h_bar =
-      static_cast<int32_t>(std::round(height / static_cast<double>(factor))) *
+      static_cast<int32_t>(std::rint(height / static_cast<double>(factor))) *
       factor;
   int32_t w_bar =
-      static_cast<int32_t>(std::round(width / static_cast<double>(factor))) *
+      static_cast<int32_t>(std::rint(width / static_cast<double>(factor))) *
       factor;
 
   if (h_bar * w_bar > max_pixels) {
@@ -285,7 +285,7 @@ bool Qwen2VLImageProcessor::process_image(torch::Tensor image,
 
     std::tie(resized_height, resized_width) = *size;
     image =
-        this->resize(image, {resized_height, resized_width}, resample_, false);
+        this->resize(image, {resized_height, resized_width}, resample_, true);
   }
 
   // normalize

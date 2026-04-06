@@ -13,9 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #pragma once
-
 #include <torch/torch.h>
 
+#include <opencv2/opencv.hpp>
+
+#include "lanczos_resample.h"
 #include "models/dit/flowmatch_euler_discrete_scheduler.h"
 
 namespace xllm::dit {
@@ -86,16 +88,20 @@ torch::Tensor randn_tensor(const std::vector<int64_t>& shape,
 
 class VAEImageProcessorImpl : public torch::nn::Module {
  public:
-  explicit VAEImageProcessorImpl(ModelContext context,
-                                 bool do_resize = true,
-                                 bool do_normalize = true,
-                                 bool do_binarize = false,
-                                 bool do_convert_rgb = false,
-                                 bool do_convert_grayscale = false,
-                                 int64_t latent_channels = 4) {
+  explicit VAEImageProcessorImpl(
+      ModelContext context,
+      bool do_resize = true,
+      bool do_normalize = true,
+      bool do_binarize = false,
+      bool do_convert_rgb = false,
+      bool do_convert_grayscale = false,
+      int64_t latent_channels = 4,
+      std::optional<int64_t> scale_factor = std::nullopt) {
     const auto& model_args = context.get_model_args();
     dtype_ = context.get_tensor_options().dtype().toScalarType();
-    scale_factor_ = 1 << model_args.block_out_channels().size();
+    scale_factor_ = scale_factor.has_value()
+                        ? scale_factor.value()
+                        : 1 << model_args.block_out_channels().size();
     latent_channels_ = latent_channels;
     do_resize_ = do_resize;
     do_normalize_ = do_normalize;
@@ -115,7 +121,7 @@ class VAEImageProcessorImpl : public torch::nn::Module {
       const torch::Tensor& image,
       std::optional<int64_t> height = std::nullopt,
       std::optional<int64_t> width = std::nullopt,
-      const std::string& resize_mode = "default",
+      const std::string& resize_mode = "lanczo",  // "default",
       std::optional<std::tuple<int64_t, int64_t, int64_t, int64_t>>
           crop_coords = std::nullopt) {
     torch::Tensor processed = image.clone();
@@ -150,7 +156,18 @@ class VAEImageProcessorImpl : public torch::nn::Module {
     auto [target_h, target_w] =
         get_default_height_width(processed, height, width);
     if (do_resize_) {
-      processed = resize(processed, target_h, target_w);
+      if (resize_mode == "lanczo") {
+        processed = lanczo_resize(processed, target_h, target_w);
+      } else if (resize_mode == "default") {
+        processed = resize(processed,
+                           {target_h, target_w},
+                           /*resample=*/3,  // BICUBIC (approximate LANCZOS)
+                           /*antialias=*/true);
+      } else {
+        LOG(FATAL) << "Currently only support two resize methods, 'lanczo' and "
+                      "'default'"
+                   << ", but got: " << resize_mode;
+      }
     }
 
     if (do_normalize_) {
@@ -216,13 +233,57 @@ class VAEImageProcessorImpl : public torch::nn::Module {
 
  public:
   torch::Tensor resize(const torch::Tensor& image,
-                       int64_t target_height,
-                       int64_t target_width) const {
-    return torch::nn::functional::interpolate(
-        image,
-        torch::nn::functional::InterpolateFuncOptions()
-            .size(std::vector<int64_t>{target_height, target_width})
-            .mode(torch::kNearest));
+                       const std::vector<int64_t>& size,
+                       size_t resample,
+                       bool antialias) {
+    if (image.dim() != 4) {
+      LOG(FATAL) << "Input image must be a 4D tensor (B x C x H x W).";
+    }
+    auto options = torch::nn::functional::InterpolateFuncOptions()
+                       .size(size)
+                       .align_corners(false)
+                       .antialias(antialias);
+    switch (resample) {
+      case 1:
+        options.mode(torch::kNearest);
+        break;
+      case 2:
+        options.mode(torch::kBilinear);
+        break;
+      case 3:
+        options.mode(torch::kBicubic);
+        break;
+      default:
+        LOG(FATAL) << "Invalid resample value. Must be one of 1, 2, or 3.";
+    }
+    return torch::nn::functional::interpolate(image, options);
+  }
+
+  torch::Tensor lanczo_resize(torch::Tensor image,
+                              int64_t height,
+                              int64_t width) {
+    auto options = image.options();
+
+    image = image.cpu().to(torch::kFloat32);
+
+    // 支持 BCHW 和 CHW 两种输入
+    bool has_batch = (image.dim() == 4);
+    if (has_batch) {
+      image = image.squeeze(0);  // [C, H, W]
+    }
+
+    image = image.permute({1, 2, 0}).contiguous();  // [H, W, C]
+
+    int H = image.size(0), W = image.size(1), C = image.size(2);
+
+    auto out = torch::empty({height, width, C}, torch::kFloat32);
+    lanczos::resize_f32(
+        image.data_ptr<float>(), W, H, C, width, height, out.data_ptr<float>());
+
+    out = out.permute({2, 0, 1});  // [C, dstH, dstW]
+    out = out.to(options);
+
+    return has_batch ? out.unsqueeze(0) : out;  // BCHW 或 CHW
   }
 
  private:

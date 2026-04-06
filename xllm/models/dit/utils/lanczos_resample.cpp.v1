@@ -1,0 +1,364 @@
+/**
+ * Lanczos Resample - 独立 C++ 实现
+ *
+ * 从 Pillow (PIL) 的 src/libImaging/Resample.c 移植。
+ * 采用经典的两遍分离式重采样: 先水平后垂直。
+ *
+ * 原始代码版权:
+ *   Copyright (c) 1997-2005 by Secret Labs AB
+ *   Copyright (c) 1995-2005 by Fredrik Lundh
+ */
+
+#include "lanczos_resample.h"
+
+namespace lanczos {
+
+// ============================================================================
+// 精度常量 (与 Pillow 一致: 8bpc 使用 22 位定点数)
+// ============================================================================
+static constexpr int PRECISION_BITS = 32 - 8 - 2; // = 22
+
+// ============================================================================
+// clip8: 使用查找表快速裁剪到 [0, 255]
+// ============================================================================
+static uint8_t _clip8_lut[1280];
+static uint8_t* clip8_ptr = nullptr;
+
+static void init_clip8_lut() {
+    if (clip8_ptr) return;
+    for (int i = 0; i < 1280; i++) {
+        // 索引对应 [-640, 639] 的值
+        int val = i - 640;
+        _clip8_lut[i] = static_cast<uint8_t>(val < 0 ? 0 : (val > 255 ? 255 : val));
+    }
+    clip8_ptr = &_clip8_lut[640];
+}
+
+static inline uint8_t clip8(int in) {
+    return clip8_ptr[in >> PRECISION_BITS];
+}
+
+// ============================================================================
+// precompute_coeffs: 预计算重采样系数 (与 Pillow 完全一致的逻辑)
+// ============================================================================
+int precompute_coeffs(
+    int inSize,
+    double in0,
+    double in1,
+    int outSize,
+    std::vector<int>& bounds,
+    std::vector<double>& kk
+) {
+    double scale = (in1 - in0) / outSize;
+    double filterscale = scale;
+    if (filterscale < 1.0) {
+        filterscale = 1.0;
+    }
+
+    // 确定支撑域大小 (重采样滤波器长度)
+    double support = LANCZOS_SUPPORT * filterscale;
+
+    // 每个输出像素最大系数数
+    int ksize = static_cast<int>(std::ceil(support)) * 2 + 1;
+
+    // 分配系数和边界
+    kk.resize(static_cast<size_t>(outSize) * ksize, 0.0);
+    bounds.resize(static_cast<size_t>(outSize) * 2);
+
+    for (int xx = 0; xx < outSize; xx++) {
+        double center = in0 + (xx + 0.5) * scale;
+        double ww = 0.0;
+        double ss = 1.0 / filterscale;
+
+        int xmin = static_cast<int>(center - support + 0.5);
+        if (xmin < 0) xmin = 0;
+
+        int xmax = static_cast<int>(center + support + 0.5);
+        if (xmax > inSize) xmax = inSize;
+        xmax -= xmin;
+
+        double* k = &kk[static_cast<size_t>(xx) * ksize];
+        for (int x = 0; x < xmax; x++) {
+            double w = lanczos_filter((x + xmin - center + 0.5) * ss);
+            k[x] = w;
+            ww += w;
+        }
+        // 归一化
+        for (int x = 0; x < xmax; x++) {
+            if (ww != 0.0) {
+                k[x] /= ww;
+            }
+        }
+        // 剩余系数清零
+        for (int x = xmax; x < ksize; x++) {
+            k[x] = 0.0;
+        }
+        bounds[xx * 2 + 0] = xmin;
+        bounds[xx * 2 + 1] = xmax;
+    }
+    return ksize;
+}
+
+// ============================================================================
+// 将 double 系数转为定点 int32 系数 (8bpc 专用)
+// ============================================================================
+static void normalize_coeffs_8bpc(int outSize, int ksize, std::vector<double>& prekk, std::vector<int32_t>& ikk) {
+    ikk.resize(prekk.size());
+    for (size_t x = 0; x < static_cast<size_t>(outSize) * ksize; x++) {
+        if (prekk[x] < 0) {
+            ikk[x] = static_cast<int32_t>(-0.5 + prekk[x] * (1 << PRECISION_BITS));
+        } else {
+            ikk[x] = static_cast<int32_t>(0.5 + prekk[x] * (1 << PRECISION_BITS));
+        }
+    }
+}
+
+// ============================================================================
+// 8bpc 水平重采样
+// ============================================================================
+static void resample_horizontal_8bpc(
+    uint8_t* dst, int dstW, int dstH,
+    const uint8_t* src, int srcW, int /*srcH*/, int channels,
+    int yOffset, int ksize, const int* bounds, const int32_t* kk
+) {
+    for (int yy = 0; yy < dstH; yy++) {
+        for (int xx = 0; xx < dstW; xx++) {
+            int xmin = bounds[xx * 2 + 0];
+            int xmax = bounds[xx * 2 + 1]; // count, not end
+            const int32_t* k = &kk[xx * ksize];
+
+            for (int c = 0; c < channels; c++) {
+                int ss = 1 << (PRECISION_BITS - 1); // 0.5 for rounding
+                for (int x = 0; x < xmax; x++) {
+                    ss += static_cast<int>(src[(yy + yOffset) * srcW * channels + (x + xmin) * channels + c]) * k[x];
+                }
+                dst[yy * dstW * channels + xx * channels + c] = clip8(ss);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 8bpc 垂直重采样
+// ============================================================================
+static void resample_vertical_8bpc(
+    uint8_t* dst, int dstW, int dstH,
+    const uint8_t* src, int srcW, int /*srcH*/, int channels,
+    int ksize, const int* bounds, const int32_t* kk
+) {
+    for (int yy = 0; yy < dstH; yy++) {
+        int ymin = bounds[yy * 2 + 0];
+        int ymax = bounds[yy * 2 + 1]; // count
+        const int32_t* k = &kk[yy * ksize];
+
+        for (int xx = 0; xx < dstW; xx++) {
+            for (int c = 0; c < channels; c++) {
+                int ss = 1 << (PRECISION_BITS - 1);
+                for (int y = 0; y < ymax; y++) {
+                    ss += static_cast<int>(src[(y + ymin) * srcW * channels + xx * channels + c]) * k[y];
+                }
+                dst[yy * dstW * channels + xx * channels + c] = clip8(ss);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// float32 水平重采样
+// ============================================================================
+static void resample_horizontal_f32(
+    float* dst, int dstW, int dstH,
+    const float* src, int srcW, int /*srcH*/, int channels,
+    int yOffset, int ksize, const int* bounds, const double* kk
+) {
+    for (int yy = 0; yy < dstH; yy++) {
+        for (int xx = 0; xx < dstW; xx++) {
+            int xmin = bounds[xx * 2 + 0];
+            int xmax = bounds[xx * 2 + 1];
+            const double* k = &kk[xx * ksize];
+
+            for (int c = 0; c < channels; c++) {
+                double ss = 0.0;
+                for (int x = 0; x < xmax; x++) {
+                    ss += static_cast<double>(src[(yy + yOffset) * srcW * channels + (x + xmin) * channels + c]) * k[x];
+                }
+                dst[yy * dstW * channels + xx * channels + c] = static_cast<float>(ss);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// float32 垂直重采样
+// ============================================================================
+static void resample_vertical_f32(
+    float* dst, int dstW, int dstH,
+    const float* src, int srcW, int /*srcH*/, int channels,
+    int ksize, const int* bounds, const double* kk
+) {
+    for (int yy = 0; yy < dstH; yy++) {
+        int ymin = bounds[yy * 2 + 0];
+        int ymax = bounds[yy * 2 + 1];
+        const double* k = &kk[yy * ksize];
+
+        for (int xx = 0; xx < dstW; xx++) {
+            for (int c = 0; c < channels; c++) {
+                double ss = 0.0;
+                for (int y = 0; y < ymax; y++) {
+                    ss += static_cast<double>(src[(y + ymin) * srcW * channels + xx * channels + c]) * k[y];
+                }
+                dst[yy * dstW * channels + xx * channels + c] = static_cast<float>(ss);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 公共接口: resize_8bpc
+// ============================================================================
+void resize_8bpc(
+    const uint8_t* src, int srcW, int srcH, int channels,
+    int dstW, int dstH,
+    std::vector<uint8_t>& dst
+) {
+    if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0 || channels <= 0 || channels > 4) {
+        throw std::invalid_argument("lanczos::resize_8bpc: invalid dimensions or channels");
+    }
+
+    init_clip8_lut();
+
+    // --- 预计算水平系数 ---
+    std::vector<int> bounds_h;
+    std::vector<double> kk_h;
+    int ksize_h = precompute_coeffs(srcW, 0.0, static_cast<double>(srcW), dstW, bounds_h, kk_h);
+
+    // --- 预计算垂直系数 ---
+    std::vector<int> bounds_v;
+    std::vector<double> kk_v;
+    int ksize_v = precompute_coeffs(srcH, 0.0, static_cast<double>(srcH), dstH, bounds_v, kk_v);
+
+    // 确定垂直 pass 需要的行范围
+    int ybox_first = bounds_v[0];
+    int ybox_last = bounds_v[static_cast<size_t>(dstH) * 2 - 2] + bounds_v[static_cast<size_t>(dstH) * 2 - 1];
+
+    bool need_h = (dstW != srcW);
+    bool need_v = (dstH != srcH);
+
+    // --- 转换为定点系数 ---
+    std::vector<int32_t> ikk_h, ikk_v;
+    normalize_coeffs_8bpc(dstW, ksize_h, kk_h, ikk_h);
+    normalize_coeffs_8bpc(dstH, ksize_v, kk_v, ikk_v);
+
+    if (need_h && need_v) {
+        // 两遍: 先水平, 临时缓冲区尺寸 dstW * (ybox_last - ybox_first)
+        int tempH = ybox_last - ybox_first;
+        std::vector<uint8_t> temp(static_cast<size_t>(dstW) * tempH * channels);
+
+        resample_horizontal_8bpc(
+            temp.data(), dstW, tempH,
+            src, srcW, srcH, channels,
+            ybox_first, ksize_h, bounds_h.data(), ikk_h.data()
+        );
+
+        // 调整垂直边界的偏移
+        for (int i = 0; i < dstH; i++) {
+            bounds_v[i * 2] -= ybox_first;
+        }
+
+        dst.resize(static_cast<size_t>(dstW) * dstH * channels);
+        resample_vertical_8bpc(
+            dst.data(), dstW, dstH,
+            temp.data(), dstW, tempH, channels,
+            ksize_v, bounds_v.data(), ikk_v.data()
+        );
+    } else if (need_h) {
+        dst.resize(static_cast<size_t>(dstW) * srcH * channels);
+        resample_horizontal_8bpc(
+            dst.data(), dstW, srcH,
+            src, srcW, srcH, channels,
+            0, ksize_h, bounds_h.data(), ikk_h.data()
+        );
+    } else if (need_v) {
+        dst.resize(static_cast<size_t>(srcW) * dstH * channels);
+        resample_vertical_8bpc(
+            dst.data(), srcW, dstH,
+            src, srcW, srcH, channels,
+            ksize_v, bounds_v.data(), ikk_v.data()
+        );
+    } else {
+        // 无需缩放, 直接拷贝
+        size_t total = static_cast<size_t>(srcW) * srcH * channels;
+        dst.assign(src, src + total);
+    }
+}
+
+// ============================================================================
+// 公共接口: resize_f32
+// ============================================================================
+void resize_f32(
+    const float* src, int srcW, int srcH, int channels,
+    int dstW, int dstH,
+    std::vector<float>& dst
+) {
+    if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0 || channels <= 0) {
+        throw std::invalid_argument("lanczos::resize_f32: invalid dimensions or channels");
+    }
+
+    // --- 预计算水平系数 ---
+    std::vector<int> bounds_h;
+    std::vector<double> kk_h;
+    int ksize_h = precompute_coeffs(srcW, 0.0, static_cast<double>(srcW), dstW, bounds_h, kk_h);
+
+    // --- 预计算垂直系数 ---
+    std::vector<int> bounds_v;
+    std::vector<double> kk_v;
+    int ksize_v = precompute_coeffs(srcH, 0.0, static_cast<double>(srcH), dstH, bounds_v, kk_v);
+
+    // 确定垂直 pass 需要的行范围
+    int ybox_first = bounds_v[0];
+    int ybox_last = bounds_v[static_cast<size_t>(dstH) * 2 - 2] + bounds_v[static_cast<size_t>(dstH) * 2 - 1];
+
+    bool need_h = (dstW != srcW);
+    bool need_v = (dstH != srcH);
+
+    if (need_h && need_v) {
+        int tempH = ybox_last - ybox_first;
+        std::vector<float> temp(static_cast<size_t>(dstW) * tempH * channels);
+
+        resample_horizontal_f32(
+            temp.data(), dstW, tempH,
+            src, srcW, srcH, channels,
+            ybox_first, ksize_h, bounds_h.data(), kk_h.data()
+        );
+
+        for (int i = 0; i < dstH; i++) {
+            bounds_v[i * 2] -= ybox_first;
+        }
+
+        dst.resize(static_cast<size_t>(dstW) * dstH * channels);
+        resample_vertical_f32(
+            dst.data(), dstW, dstH,
+            temp.data(), dstW, tempH, channels,
+            ksize_v, bounds_v.data(), kk_v.data()
+        );
+    } else if (need_h) {
+        dst.resize(static_cast<size_t>(dstW) * srcH * channels);
+        resample_horizontal_f32(
+            dst.data(), dstW, srcH,
+            src, srcW, srcH, channels,
+            0, ksize_h, bounds_h.data(), kk_h.data()
+        );
+    } else if (need_v) {
+        dst.resize(static_cast<size_t>(srcW) * dstH * channels);
+        resample_vertical_f32(
+            dst.data(), srcW, dstH,
+            src, srcW, srcH, channels,
+            ksize_v, bounds_v.data(), kk_v.data()
+        );
+    } else {
+        size_t total = static_cast<size_t>(srcW) * srcH * channels;
+        dst.assign(src, src + total);
+    }
+}
+
+} // namespace lanczos
