@@ -146,12 +146,14 @@ runtime::Options MTPDraftOptions(const runtime::Options& options) {
 
 MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                              const torch::Device& device,
-                             const runtime::Options& options)
+                             const runtime::Options& options,
+                             WorkerType worker_type)
     : MTPWorkerImpl(parallel_args,
                     device,
                     options,
                     MTPTargetOptions(options),
                     MTPDraftOptions(options),
+                    worker_type,
                     ::xllm::SpeculativeConfig::get_instance()
                         .enable_opt_validate_probs()) {}
 
@@ -160,8 +162,13 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                              const runtime::Options& options,
                              const runtime::Options& target_options,
                              const runtime::Options& draft_options,
+                             WorkerType worker_type,
                              bool enable_opt_validate_probs)
-    : SpeculativeWorkerImpl(parallel_args, device, options, target_options),
+    : SpeculativeWorkerImpl(parallel_args,
+                            device,
+                            options,
+                            target_options,
+                            worker_type),
       enable_opt_validate_probs_(enable_opt_validate_probs) {
   draft_impl_ =
       std::make_unique<LLMWorkerImpl>(parallel_args, device, draft_options);
@@ -172,6 +179,7 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
                                MasterStatus master_status) {
   // Load target model via base class
   bool result = true;
+  LOG(INFO) << "status is: " << impl_->get_status();
   if (impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
     result = SpeculativeWorkerImpl::init_model(
         model_weights_path, random_seed, master_status);
@@ -360,18 +368,20 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
     const ForwardInput& input) {
   Timer timer;
   // run the target model to get first token and hidden states
+  LOG(INFO) << "step 1";
   auto future = impl_->step_async(input);
+  LOG(INFO) << "step 2";
   ForwardOutput output = std::move(future).get().value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
-
+  LOG(INFO) << "step 3";
   // MTP path that depends on hidden states.
   ForwardInput prefill_input;
   prepare_prefill_inputs(input, prefill_input);
-
+  LOG(INFO) << "step 4";
   // prepare input for draft model
   auto& embeddings = output.sample_output.embeddings;
-
+  LOG(INFO) << "step 5";
   if (embeddings.defined()) {
     prefill_input.input_params.embedding.input_embedding = embeddings.clone();
   }
@@ -381,10 +391,13 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
                                     output.sample_output.next_tokens,
                                     prefill_input.token_ids.options());
   }
+  LOG(INFO) << "step 6";
   // generate kv cache for draft model
   timer.reset();
   auto draft_future = draft_impl_->step_async(prefill_input);
+  LOG(INFO) << "step 7";
   ForwardOutput draft_output = std::move(draft_future).get().value();
+  LOG(INFO) << "step 8";
   process_draft_sample_output(draft_output.sample_output);
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               timer.elapsed_seconds());
@@ -462,29 +475,33 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   CHECK_EQ(last_states.size(),
            input.input_params.embedding.embedding_ids.size())
       << "decode target state count mismatch";
+  LOG(INFO) << "step 20";
   update_decode_step_input(input, last_states);
+  LOG(INFO) << "step 21";
   prepare_draft_extend_inputs(input, last_states, current_draft_input);
+  LOG(INFO) << "step 22";
   draft_outputs.reserve(num_speculative_tokens);
+  LOG(INFO) << "step 23";
   for (int32_t draft_idx = 0; draft_idx < num_speculative_tokens; ++draft_idx) {
     auto future = draft_impl_->step_async(current_draft_input);
-
+    LOG(INFO) << "step 24";
     // Overlap next-step input preparation with async draft forward.
     if (draft_idx == num_speculative_tokens - 1) {
       prepare_validate_inputs(input, validate_input);
     } else {
       prepare_draft_inputs(input, next_step_input, draft_idx + 1);
     }
-
+    LOG(INFO) << "step 25";
     std::optional<ForwardOutput> draft_output_opt = std::move(future).get();
     CHECK(draft_output_opt.has_value())
         << "draft output is empty in speculative step";
-
+    LOG(INFO) << "step 26";
     draft_outputs.push_back(std::move(draft_output_opt.value()));
     process_draft_sample_output(draft_outputs.back().sample_output);
     if (draft_idx == num_speculative_tokens - 1) {
       continue;
     }
-
+    LOG(INFO) << "step 27";
     const SampleOutput& last_output = draft_outputs.back().sample_output;
     current_draft_input = next_step_input;
     set_token_ids_device_tensor(current_draft_input,
