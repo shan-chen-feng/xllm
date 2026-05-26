@@ -463,8 +463,9 @@ void BatchInputBuilder::process_single_sequence(
   auto* sequence = sequences_[seq_index];
   const auto token_ids = sequence->tokens();
   const uint32_t n_tokens = token_ids.size();
+  LOG(INFO) << "n_tokens are : " << n_tokens;
   const uint32_t n_kv_cache_tokens = sequence->kv_state().kv_cache_tokens_num();
-
+  LOG(INFO) << "n_kv_cache_tokens are: " << n_kv_cache_tokens;
   // Validate and calculate sequence lengths
   CHECK(allowed_max_tokens_[seq_index] > 0);
   const uint32_t q_seq_len =

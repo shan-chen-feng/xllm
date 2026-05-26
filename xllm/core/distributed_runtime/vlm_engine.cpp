@@ -371,6 +371,7 @@ ForwardOutput VLMEngine::step(std::vector<Batch>& batch) {
         // if it's not enabled, process_sample_output will append the real
         // token, if it's enabled, this false here will append the fake token in
         // process_sample_output
+        LOG(INFO) << "begin process_sample_output";
         batch[dp_rank].process_sample_output(result.value(), false);
       } else {
         batch[dp_rank].process_beam_search_output(result.value(), false);

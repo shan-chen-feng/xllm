@@ -369,6 +369,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   Timer timer;
   // run the target model to get first token and hidden states
   LOG(INFO) << "step 1";
+  LOG(INFO) << "tokens before";
+  input.token_ids.print();
+  input.token_ids_host.print();
+  input.positions_host.print();
   auto future = impl_->step_async(input);
   LOG(INFO) << "step 2";
   ForwardOutput output = std::move(future).get().value();
@@ -423,6 +427,11 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   prefill_input = input.to(device_, dtype_);
   auto& input_params = prefill_input.input_params;
+
+  LOG(INFO) << "Inside prefill inputs ";
+  input.token_ids.print();
+  input.token_ids_host.print();
+
   if (options_.cp_size() > 1) {
     CHECK(input_params.embedding.mtp_shifted_token_ids.defined());
     CHECK_EQ(input_params.embedding.mtp_shifted_token_ids.numel(),
@@ -460,6 +469,9 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
 
 std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     const ForwardInput& raw_input) {
+  LOG(INFO) << "inside decode";
+  raw_input.positions_host.print();
+  std::cout << raw_input.positions_host;
   ForwardInput input = raw_input;
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
 
@@ -651,6 +663,10 @@ void MTPWorkerImpl::update_decode_step_input(
 
   const torch::Tensor& token_ids_cpu = input.token_ids_host;
   const torch::Tensor& positions_cpu = input.positions_host;
+  input.token_ids_host.print();
+  input.positions_host.print();
+  std::cout << input.token_ids_host;
+  std::cout << input.positions_host;
   Slice<int32_t> input_token_ids = {token_ids_cpu.data_ptr<int32_t>(),
                                     static_cast<size_t>(token_ids_cpu.numel())};
   Slice<int32_t> input_positions = {positions_cpu.data_ptr<int32_t>(),
@@ -670,6 +686,7 @@ void MTPWorkerImpl::update_decode_step_input(
         enable_cache_correction && input_is_fake_token && !state.valid;
     const int32_t position_offset =
         use_cache_correction ? state.position_offset : 0;
+    std::cout << position_offset;
     const int32_t current_position = input_positions[seq_id] + position_offset;
     const int32_t current_kv_len = specBuilder::calc_kv_len(
         input.input_params.attention.host.kv_seq_lens, seq_id, position_offset);

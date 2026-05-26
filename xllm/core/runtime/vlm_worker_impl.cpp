@@ -65,6 +65,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step(const ForwardInput& input) {
 
   // TODO guojinrong, to adapt multi stream parallel later
   // call model executor forward to get hidden states
+  input.token_ids.print();
   auto model_output = model_executor_->forward(
       input.token_ids, input.positions, kv_caches_, input.input_params);
   auto& sampling_params = input.sampling_params;

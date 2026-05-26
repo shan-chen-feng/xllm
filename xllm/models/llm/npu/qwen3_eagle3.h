@@ -148,6 +148,8 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
                               torch::Tensor positions,
                               std::vector<KVCache>& kv_caches,
                               const ModelInputParams& input_params) {
+    LOG(INFO) << "inside model forward: ";
+    positions.print();
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
 
@@ -179,6 +181,40 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     auto target_cos_sin_chunks = target_cos_sin.chunk(/*chunks=*/2, /*dim=*/-1);
     auto cos_pos = target_cos_sin_chunks[0].contiguous();
     auto sin_pos = target_cos_sin_chunks[1].contiguous();
+
+    if (positions.dim() == 2) {  // mrope
+      auto apply = [this](torch::Tensor x) {
+        auto freqs_t = x[0].clone();
+        // mrop_length == freqs_length == head_dim / 2
+        int64_t mrop_length = freqs_t.size(-1) / 2;
+
+        for (int dim_idx = 1; dim_idx <= 2; ++dim_idx) {
+          int64_t offset = dim_idx;
+          int64_t section_len = mrope_section_[dim_idx];
+          int64_t length = section_len * 3;
+
+          // Since the last dim of freqs is repeated to 2*mrop_length
+          // idx_first_half: [offset, offset+3, offset+6, ... < mrop_length]
+          // idx_second_half: [mrop_length+offset, mrop_length+offset+3,
+          //     mrop_length+offset+6, ... < 2*mrop_length]
+          torch::TensorOptions options =
+              torch::TensorOptions().dtype(torch::kLong).device(x.device());
+          auto idx_first_half = torch::arange(offset, length, 3, options);
+          auto idx_second_half = torch::arange(
+              offset + mrop_length, length + mrop_length, 3, options);
+
+          auto idx_tensor = torch::cat({idx_first_half, idx_second_half}, 0);
+          // freqs_t[..., idx] = freqs[dim_idx][..., idx]
+          auto src = x[dim_idx].index_select(-1, idx_tensor);
+          freqs_t.index_copy_(-1, idx_tensor, src);
+        }
+        return freqs_t;
+      };
+      cos_pos = apply(cos_pos.reshape(
+          {positions.sizes().front(), -1, cos_pos.sizes().back()}));
+      sin_pos = apply(sin_pos.reshape(
+          {positions.sizes().front(), -1, sin_pos.sizes().back()}));
+    }
 
     // Generate attention mask
     torch::Tensor attn_mask;
@@ -275,6 +311,7 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
   int32_t dp_rank_ = 0;
   int32_t dp_size_ = 1;
   int32_t dp_local_tp_size_ = 1;
+  std::vector<int64_t> mrope_section_;
 
   torch::Tensor cos_sin_;
   layer::NpuPosEmbedding atb_pos_emb_{nullptr};
@@ -449,6 +486,12 @@ REGISTER_MODEL_ARGS(qwen3_eagle3, [&] {
     return args->hidden_size() / args->n_heads();
   });
 
+  LOAD_ARG_OR(rope_scaling_mrope_section,
+              "text_config.rope_scaling.mrope_section",
+              std::vector<int64_t>{});
+  LOAD_ARG_OR(rope_scaling_mrope_section,
+              "rope_scaling.mrope_section",
+              args->rope_scaling_mrope_section());
   SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
 });
 
