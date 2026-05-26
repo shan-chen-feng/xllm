@@ -107,22 +107,22 @@ void replace_host_token_placeholders(ForwardInput& input,
 
 void set_token_position_tensors(ForwardInput& input,
                                 const std::vector<int32_t>& token_ids,
-                                const std::vector<int32_t>& positions,
+                                const torch::Tensor& positions,
                                 const torch::TensorOptions& token_options,
                                 const torch::TensorOptions& position_options) {
   input.device_tensors_ready = false;
   input.token_ids_host = make_cpu_int_tensor(token_ids);
-  input.positions_host = make_cpu_int_tensor(positions);
+  input.positions_host = positions;
   input.token_ids = safe_to(input.token_ids_host, token_options, true);
   input.positions = safe_to(input.positions_host, position_options, true);
   input.device_tensors_ready = true;
 }
 
 void set_positions_tensor(ForwardInput& input,
-                          const std::vector<int32_t>& positions,
+                          const torch::Tensor& positions,
                           const torch::TensorOptions& device_options) {
   input.device_tensors_ready = false;
-  input.positions_host = make_cpu_int_tensor(positions);
+  input.positions_host = positions;
   input.positions = safe_to(input.positions_host, device_options, true);
   input.device_tensors_ready = true;
 }
@@ -179,8 +179,7 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
                                MasterStatus master_status) {
   // Load target model via base class
   bool result = true;
-  LOG(INFO) << "status is: " << impl_->get_status();
-  if (impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
+  if (target_impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
     result = SpeculativeWorkerImpl::init_model(
         model_weights_path, random_seed, master_status);
   } else {
@@ -194,24 +193,25 @@ bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
     // Share lm_head and word_embedding between target and draft models
 #if defined(USE_NPU)
     if (::xllm::KernelConfig::get_instance().npu_kernel_backend() != "TORCH") {
-      auto head = impl_->get_npu_lm_head();
+      auto head = target_impl_->get_npu_lm_head();
       draft_impl_->set_npu_lm_head(head);
-      auto word_embedding = impl_->get_npu_word_embedding();
+      auto word_embedding = target_impl_->get_npu_word_embedding();
       draft_impl_->set_npu_word_embedding(word_embedding);
     } else {
-      auto head = impl_->get_lm_head();
+      auto head = target_impl_->get_lm_head();
       draft_impl_->set_lm_head(head);
-      auto word_embedding = impl_->get_word_embedding();
+      auto word_embedding = target_impl_->get_word_embedding();
       draft_impl_->set_word_embedding(word_embedding);
     }
 #else
-    auto head = impl_->get_lm_head();
+    auto head = target_impl_->get_lm_head();
     draft_impl_->set_lm_head(head);
-    auto word_embedding = impl_->get_word_embedding();
+    auto word_embedding = target_impl_->get_word_embedding();
     draft_impl_->set_word_embedding(word_embedding);
 #endif
-    // Sync context_ from impl_ for WorkerImpl::prepare_work_before_execute
-    context_ = impl_->context_;
+    // Sync context_ from target_impl_ for
+    // WorkerImpl::prepare_work_before_execute.
+    context_ = target_impl_->context_;
   }
   return result;
 }
@@ -233,13 +233,13 @@ bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
           torch::zeros({size}, torch::dtype(dtype_).device(device_)));
     }
   }
-  CHECK(impl_ != nullptr);
+  CHECK(target_impl_ != nullptr);
   CHECK(draft_impl_ != nullptr);
 
   bool target_allocated = true;
-  const auto target_status = impl_->get_status();
+  const auto target_status = target_impl_->get_status();
   if (target_status == WorkerImpl::Status::LOADED) {
-    target_allocated = impl_->allocate_kv_cache(kv_cache_shape);
+    target_allocated = target_impl_->allocate_kv_cache(kv_cache_shape);
   } else {
     CHECK_EQ(target_status, WorkerImpl::Status::READY);
   }
@@ -259,7 +259,7 @@ bool MTPWorkerImpl::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
 bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
     const KVCacheShape& kv_cache_shape) {
   const int64_t num_blocks = kv_cache_shape.key_cache_shape()[0];
-  CHECK(impl_ != nullptr);
+  CHECK(target_impl_ != nullptr);
   CHECK(draft_impl_ != nullptr);
 
   if (kv_cache_transfer_ == nullptr) {
@@ -286,9 +286,9 @@ bool MTPWorkerImpl::allocate_kv_cache_with_transfer(
   }
 
   bool target_allocated = true;
-  const auto target_status = impl_->get_status();
+  const auto target_status = target_impl_->get_status();
   if (target_status == WorkerImpl::Status::LOADED) {
-    target_allocated = impl_->allocate_kv_cache_with_transfer(
+    target_allocated = target_impl_->allocate_kv_cache_with_transfer(
         kv_cache_transfer_, kv_cache_shape);
   } else {
     CHECK_EQ(target_status, WorkerImpl::Status::READY);
@@ -330,7 +330,7 @@ void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
 std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     const ForwardInput& input) {
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
-    auto output = impl_->step(input);
+    auto output = target_impl_->step(input);
     auto draft_output = draft_impl_->step(input);
     (void)draft_output;
     output->sample_output.embeddings = torch::Tensor();
@@ -357,7 +357,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
          new_input.input_params.parallel.dp_global_token_nums) {
       token_num *= options_.num_speculative_tokens() + 1;
     }
-    auto future = impl_->step_async(new_input);
+    auto future = target_impl_->step_async(new_input);
     ForwardOutput output = std::move(future).get().value();
     output.sample_output.embeddings = torch::Tensor();
     return output;
@@ -368,21 +368,17 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
     const ForwardInput& input) {
   Timer timer;
   // run the target model to get first token and hidden states
-  LOG(INFO) << "step 1";
-  auto future = impl_->step_async(input);
-  LOG(INFO) << "step 2";
+  auto future = target_impl_->step_async(input);
   ForwardOutput output = std::move(future).get().value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
-  LOG(INFO) << "step 3";
   // MTP path that depends on hidden states.
   ForwardInput prefill_input;
   prepare_prefill_inputs(input, prefill_input);
-  LOG(INFO) << "step 4";
   // prepare input for draft model
   auto& embeddings = output.sample_output.embeddings;
-  LOG(INFO) << "step 5";
   if (embeddings.defined()) {
+    check_draft_input_embedding(embeddings, "prefill");
     prefill_input.input_params.embedding.input_embedding = embeddings.clone();
   }
   if (output.sample_output.next_tokens.defined()) {
@@ -391,13 +387,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
                                     output.sample_output.next_tokens,
                                     prefill_input.token_ids.options());
   }
-  LOG(INFO) << "step 6";
   // generate kv cache for draft model
   timer.reset();
   auto draft_future = draft_impl_->step_async(prefill_input);
-  LOG(INFO) << "step 7";
   ForwardOutput draft_output = std::move(draft_future).get().value();
-  LOG(INFO) << "step 8";
   process_draft_sample_output(draft_output.sample_output);
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               timer.elapsed_seconds());
@@ -475,38 +468,31 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   CHECK_EQ(last_states.size(),
            input.input_params.embedding.embedding_ids.size())
       << "decode target state count mismatch";
-  LOG(INFO) << "step 20";
   update_decode_step_input(input, last_states);
-  LOG(INFO) << "step 21";
   prepare_draft_extend_inputs(input, last_states, current_draft_input);
-  LOG(INFO) << "step 22";
   draft_outputs.reserve(num_speculative_tokens);
-  LOG(INFO) << "step 23";
   for (int32_t draft_idx = 0; draft_idx < num_speculative_tokens; ++draft_idx) {
     auto future = draft_impl_->step_async(current_draft_input);
-    LOG(INFO) << "step 24";
     // Overlap next-step input preparation with async draft forward.
     if (draft_idx == num_speculative_tokens - 1) {
       prepare_validate_inputs(input, validate_input);
     } else {
       prepare_draft_inputs(input, next_step_input, draft_idx + 1);
     }
-    LOG(INFO) << "step 25";
     std::optional<ForwardOutput> draft_output_opt = std::move(future).get();
     CHECK(draft_output_opt.has_value())
         << "draft output is empty in speculative step";
-    LOG(INFO) << "step 26";
     draft_outputs.push_back(std::move(draft_output_opt.value()));
     process_draft_sample_output(draft_outputs.back().sample_output);
     if (draft_idx == num_speculative_tokens - 1) {
       continue;
     }
-    LOG(INFO) << "step 27";
     const SampleOutput& last_output = draft_outputs.back().sample_output;
     current_draft_input = next_step_input;
     set_token_ids_device_tensor(current_draft_input,
                                 last_output.next_tokens,
                                 current_draft_input.token_ids.options());
+    check_draft_input_embedding(last_output.embeddings, "decode");
     current_draft_input.input_params.embedding.input_embedding =
         last_output.embeddings;
   }
@@ -558,7 +544,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   // run the target model to get the verification scores
   Timer timer;
   fill_validate_input_from_draft_outputs(draft_outputs, validate_input);
-  auto future = impl_->step_async(validate_input);
+  auto future = target_impl_->step_async(validate_input);
   ForwardOutput target_output = std::move(future).get().value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               timer.elapsed_seconds());
@@ -638,11 +624,7 @@ void MTPWorkerImpl::update_decode_step_input(
       << "decode context state count mismatch";
   const bool enable_cache_correction = enable_schedule_overlap();
 
-  std::vector<int32_t> token_ids_vec;
-  std::vector<int32_t> positions_vec;
   std::vector<int32_t> kv_seq_lens_vec;
-  token_ids_vec.reserve(num_sequences);
-  positions_vec.reserve(num_sequences);
 #if defined(USE_NPU)
   kv_seq_lens_vec.reserve(num_sequences);
 #else
@@ -650,17 +632,19 @@ void MTPWorkerImpl::update_decode_step_input(
 #endif
 
   const torch::Tensor& token_ids_cpu = input.token_ids_host;
-  const torch::Tensor& positions_cpu = input.positions_host;
   Slice<int32_t> input_token_ids = {token_ids_cpu.data_ptr<int32_t>(),
                                     static_cast<size_t>(token_ids_cpu.numel())};
-  Slice<int32_t> input_positions = {positions_cpu.data_ptr<int32_t>(),
-                                    static_cast<size_t>(positions_cpu.numel())};
+  specBuilder::DecodeBuildBuffers buf;
+  buf.out_token_ids.reserve(num_sequences);
+  buf.out_positions.reserve(input.positions_host.dim() == 2
+                                ? static_cast<size_t>(num_sequences) * 3
+                                : static_cast<size_t>(num_sequences));
+  specBuilder::DecodeRowContext row_ctx =
+      specBuilder::make_decode_row_context(input);
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     CHECK_LT(static_cast<size_t>(seq_id), input_token_ids.size())
         << "decode context token seq_id out of range, seq_id=" << seq_id;
-    CHECK_LT(static_cast<size_t>(seq_id), input_positions.size())
-        << "decode context position seq_id out of range, seq_id=" << seq_id;
     const EmbeddingCache::DecodeState& state = last_states[seq_id];
     const int32_t input_token_id = input_token_ids[seq_id];
     const bool input_is_fake_token = input_token_id < 0;
@@ -670,24 +654,35 @@ void MTPWorkerImpl::update_decode_step_input(
         enable_cache_correction && input_is_fake_token && !state.valid;
     const int32_t position_offset =
         use_cache_correction ? state.position_offset : 0;
-    const int32_t current_position = input_positions[seq_id] + position_offset;
     const int32_t current_kv_len = specBuilder::calc_kv_len(
         input.input_params.attention.host.kv_seq_lens, seq_id, position_offset);
 
-    CHECK_EQ(current_position + 1, current_kv_len)
-        << "decode context position/kv_len mismatch, seq_id=" << seq_id
-        << ", current_position=" << current_position
-        << ", current_kv_len=" << current_kv_len;
+    if (input.positions_host.dim() != 2) {
+      Slice<int32_t> input_positions = {
+          input.positions_host.data_ptr<int32_t>(),
+          static_cast<size_t>(input.positions_host.numel())};
+      CHECK_LT(static_cast<size_t>(seq_id), input_positions.size())
+          << "decode context position seq_id out of range, seq_id=" << seq_id;
+      const int32_t current_position =
+          input_positions[seq_id] + position_offset;
+      CHECK_EQ(current_position + 1, current_kv_len)
+          << "decode context position/kv_len mismatch, seq_id=" << seq_id
+          << ", current_position=" << current_position
+          << ", current_kv_len=" << current_kv_len;
+    }
 
-    token_ids_vec.emplace_back((use_cache_correction || use_fake_context)
-                                   ? state.token_id
-                                   : input_token_id);
-    positions_vec.emplace_back(current_position);
+    specBuilder::RowSpec row;
+    row.seq_id = seq_id;
+    row.token_id = (use_cache_correction || use_fake_context) ? state.token_id
+                                                              : input_token_id;
+    row.position_offset = position_offset;
+    row.append_kv_len = false;
+    specBuilder::append_decode_row(row_ctx, row, options_.block_size(), buf);
     specBuilder::append_seq_len_by_layout(kv_seq_lens_vec, current_kv_len);
   }
 
-  input.token_ids_host = make_cpu_int_tensor(token_ids_vec);
-  input.positions_host = make_cpu_int_tensor(positions_vec);
+  input.token_ids_host = make_cpu_int_tensor(buf.out_token_ids);
+  input.positions_host = specBuilder::make_positions_tensor(buf);
   input.input_params.attention.host.kv_seq_lens = std::move(kv_seq_lens_vec);
   input.device_tensors_ready = false;
 }
@@ -711,13 +706,12 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   Slice<int32_t> token_ids = {
       input.token_ids_host.data_ptr<int32_t>(),
       static_cast<size_t>(input.token_ids_host.numel())};
-  Slice<int32_t> positions = {
-      input.positions_host.data_ptr<int32_t>(),
-      static_cast<size_t>(input.positions_host.numel())};
   Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(total_num_val_tokens);
-  buf.out_positions.reserve(total_num_val_tokens);
+  buf.out_positions.reserve(input.positions_host.dim() == 2
+                                ? static_cast<size_t>(total_num_val_tokens) * 3
+                                : static_cast<size_t>(total_num_val_tokens));
   buf.out_new_cache_slots.reserve(total_num_val_tokens);
   if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     buf.out_kv_seq_lens.reserve(total_num_val_tokens);
@@ -732,12 +726,17 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   std::vector<int32_t> atb_q_cu_seq_lens_vec;
   int32_t atb_kv_max_seq_len = 0;
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    const int32_t start_position = positions[seq_id];
     const int32_t kv_len =
         specBuilder::calc_kv_len(kv_seq_lens, seq_id, /*offset=*/0);
-    CHECK_EQ(start_position + 1, kv_len)
-        << "validate position/kv_len mismatch, seq_id=" << seq_id
-        << ", start_position=" << start_position << ", kv_len=" << kv_len;
+    if (input.positions_host.dim() != 2) {
+      Slice<int32_t> positions = {
+          input.positions_host.data_ptr<int32_t>(),
+          static_cast<size_t>(input.positions_host.numel())};
+      const int32_t start_position = positions[seq_id];
+      CHECK_EQ(start_position + 1, kv_len)
+          << "validate position/kv_len mismatch, seq_id=" << seq_id
+          << ", start_position=" << start_position << ", kv_len=" << kv_len;
+    }
 
     for (int32_t val_idx = 0; val_idx < num_val_tokens; ++val_idx) {
       specBuilder::RowSpec row;
@@ -764,12 +763,12 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
 
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
       << "validate kv slots/tokens mismatch";
-  CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
+  CHECK_EQ(specBuilder::position_column_count(buf), buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
 
   set_token_position_tensors(validate_input,
                              buf.out_token_ids,
-                             buf.out_positions,
+                             specBuilder::make_positions_tensor(buf),
                              token_options,
                              position_options);
   if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
@@ -833,7 +832,9 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
 
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(num_sequences * 2);
-  buf.out_positions.reserve(num_sequences * 2);
+  buf.out_positions.reserve(base_input.positions_host.dim() == 2
+                                ? static_cast<size_t>(num_sequences) * 2 * 3
+                                : static_cast<size_t>(num_sequences) * 2);
   buf.out_new_cache_slots.reserve(num_sequences * 2);
   buf.out_kv_seq_lens.reserve(num_sequences * 2);
   buf.out_q_seq_lens.reserve(num_sequences * 2);
@@ -898,18 +899,19 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     add_row(state.token_id, /*position_offset=*/0, state.embedding);
   }
 
-  CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_positions.size())
+  CHECK_EQ(buf.out_new_cache_slots.size(),
+           static_cast<size_t>(specBuilder::position_column_count(buf)))
       << "draft extend slots/positions mismatch";
-  CHECK_EQ(expanded_embeddings.size(), buf.out_positions.size())
+  CHECK_EQ(expanded_embeddings.size(),
+           static_cast<size_t>(specBuilder::position_column_count(buf)))
       << "draft extend embeddings/positions mismatch";
 
   set_token_position_tensors(extend_input,
                              buf.out_token_ids,
-                             buf.out_positions,
+                             specBuilder::make_positions_tensor(buf),
                              token_options,
                              position_options);
-  input_params.meta.num_sequences =
-      static_cast<int32_t>(buf.out_positions.size());
+  input_params.meta.num_sequences = specBuilder::position_column_count(buf);
   input_params.meta.batch_forward_type = BatchForwardType::DECODE;
   specBuilder::update_input_params(input_params,
                                    buf,
@@ -921,6 +923,8 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
                                    /*update_block_tables=*/true);
   input_params.attention.rebuild_device_buffer(device_);
   input_params.embedding.input_embedding = torch::stack(expanded_embeddings);
+  check_draft_input_embedding(input_params.embedding.input_embedding,
+                              "decode extend");
 
   if (!input_params.parallel.dp_global_token_nums.empty()) {
     if (dp_enabled) {
@@ -930,7 +934,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       }
     } else if (input_params.parallel.dp_global_token_nums.size() == 1) {
       input_params.parallel.dp_global_token_nums[0] =
-          static_cast<int32_t>(buf.out_positions.size());
+          specBuilder::position_column_count(buf);
     }
   }
 
@@ -959,7 +963,9 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
   specBuilder::DecodeBuildBuffers buf;
-  buf.out_positions.reserve(num_sequences);
+  buf.out_positions.reserve(input.positions_host.dim() == 2
+                                ? static_cast<size_t>(num_sequences) * 3
+                                : static_cast<size_t>(num_sequences));
   buf.out_kv_seq_lens.reserve(num_sequences);
   buf.out_new_cache_slots.reserve(num_sequences);
 
@@ -971,11 +977,13 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
     specBuilder::append_decode_row(row_ctx, row, block_size, buf);
   }
 
-  CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_positions.size())
+  CHECK_EQ(buf.out_new_cache_slots.size(),
+           static_cast<size_t>(specBuilder::position_column_count(buf)))
       << "draft kv slots/positions mismatch";
 
   torch::TensorOptions position_options = input.positions.options();
-  set_positions_tensor(draft_input, buf.out_positions, position_options);
+  set_positions_tensor(
+      draft_input, specBuilder::make_positions_tensor(buf), position_options);
   specBuilder::update_input_params(
       input_params,
       buf,

@@ -15,25 +15,30 @@ limitations under the License.
 
 #include "speculative_engine.h"
 
-#include <gflags/gflags_declare.h>
 #include <glog/logging.h>
 
 #include <algorithm>
 #include <memory>
+#include <type_traits>
 
-#include "common/metrics.h"
 #include "llm_engine.h"
-#include "runtime/forward_params.h"
-#include "util/timer.h"
 #include "util/utils.h"
+#include "vlm_engine.h"
 
 namespace xllm {
 
-SpeculativeEngine::SpeculativeEngine(const runtime::Options& options)
-    : SpeculativeEngine(options, /*use_draft_engine=*/true) {}
+template <typename TargetEngine>
+SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
+    const runtime::Options& options)
+    : SpeculativeEngineBase(options, /*use_draft_engine=*/true) {}
 
-SpeculativeEngine::SpeculativeEngine(const runtime::Options& options,
-                                     bool use_draft_engine)
+template <typename TargetEngine>
+SpeculativeEngineBase<TargetEngine>::~SpeculativeEngineBase() = default;
+
+template <typename TargetEngine>
+SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
+    const runtime::Options& options,
+    bool use_draft_engine)
     : options_(options), use_draft_engine_(use_draft_engine) {
   CHECK_GT(options.num_speculative_tokens(), 0)
       << "speculative tokens should not be zero";
@@ -45,15 +50,17 @@ SpeculativeEngine::SpeculativeEngine(const runtime::Options& options,
 
   runtime::Options engine_options = options_;
   engine_options.num_decoding_tokens(options.num_speculative_tokens() + 1);
-  engine_ = std::make_unique<LLMEngine>(engine_options, dist_manager_);
+  engine_ = std::make_unique<TargetEngine>(engine_options, dist_manager_);
 
   if (use_draft_engine_) {
     // draft engine
-    engine_options.model_path(options_.draft_model_path().value_or(""))
+    runtime::Options draft_options = engine_options;
+    draft_options.model_path(options_.draft_model_path().value_or(""))
         .devices(options.draft_devices())
+        .backend("llm")
         .num_decoding_tokens(1)
         .is_draft_engine(true);
-    draft_engine_ = std::make_unique<LLMEngine>(engine_options, dist_manager_);
+    draft_engine_ = std::make_unique<LLMEngine>(draft_options, dist_manager_);
 
     // Currently target and draft engines must use the same device list.
     if (options.devices() != options.draft_devices()) {
@@ -64,12 +71,21 @@ SpeculativeEngine::SpeculativeEngine(const runtime::Options& options,
   }
 }
 
+SpeculativeEngine::SpeculativeEngine(const runtime::Options& options)
+    : SpeculativeEngineBase<LLMEngine>(options) {}
+
 SuffixSpeculativeEngine::SuffixSpeculativeEngine(
     const runtime::Options& options)
-    : SpeculativeEngine(options, /*use_draft_engine=*/false) {}
+    : SpeculativeEngineBase<LLMEngine>(options, /*use_draft_engine=*/false) {}
 
-bool SpeculativeEngine::init(MasterStatus master_status) {
-  if (!init_model()) {
+template <typename TargetEngine>
+bool SpeculativeEngineBase<TargetEngine>::init() {
+  return init(MasterStatus::WAKEUP);
+}
+
+template <typename TargetEngine>
+bool SpeculativeEngineBase<TargetEngine>::init(MasterStatus master_status) {
+  if (!init_model(master_status)) {
     return false;
   }
 
@@ -80,8 +96,17 @@ bool SpeculativeEngine::init(MasterStatus master_status) {
   return true;
 }
 
-bool SpeculativeEngine::init_model() {
-  if (!engine_->init_model()) {
+template <typename TargetEngine>
+bool SpeculativeEngineBase<TargetEngine>::init_model(
+    MasterStatus master_status) {
+  bool target_initialized = false;
+  if constexpr (std::is_same_v<TargetEngine, VLMEngine>) {
+    (void)master_status;
+    target_initialized = engine_->init_model();
+  } else {
+    target_initialized = engine_->init_model(master_status);
+  }
+  if (!target_initialized) {
     return false;
   }
 
@@ -134,7 +159,8 @@ bool SpeculativeEngine::init_model() {
   return true;
 }
 
-bool SpeculativeEngine::allocate_kv_cache() {
+template <typename TargetEngine>
+bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache() {
   KVCacheCapacity target_kv_cache_cap = engine_->estimate_kv_cache_capacity();
 
   if (!use_draft_engine_) {
@@ -169,11 +195,14 @@ bool SpeculativeEngine::allocate_kv_cache() {
 }
 
 // TODO: support dp batches later
-ForwardOutput SpeculativeEngine::step(std::vector<Batch>& batches) {
+template <typename TargetEngine>
+ForwardOutput SpeculativeEngineBase<TargetEngine>::step(
+    std::vector<Batch>& batches) {
   return engine_->step(batches);
 }
 
-int64_t SpeculativeEngine::calculate_kv_cache(
+template <typename TargetEngine>
+int64_t SpeculativeEngineBase<TargetEngine>::calculate_kv_cache(
     const KVCacheCapacity& target_kv_cache_cap,
     const KVCacheCapacity& draft_kv_cache_cap) const {
   CHECK_GT(target_kv_cache_cap.cache_size_in_bytes(), 0)
@@ -236,15 +265,20 @@ int64_t SpeculativeEngine::calculate_kv_cache(
          full_attention_block_size_in_bytes;
 }
 
-void SpeculativeEngine::update_last_step_result(std::vector<Batch>& batch) {
+template <typename TargetEngine>
+void SpeculativeEngineBase<TargetEngine>::update_last_step_result(
+    std::vector<Batch>& batch) {
   engine_->update_last_step_result(batch);
 }
 
-std::vector<int64_t> SpeculativeEngine::get_active_activation_memory() const {
+template <typename TargetEngine>
+std::vector<int64_t>
+SpeculativeEngineBase<TargetEngine>::get_active_activation_memory() const {
   return engine_->get_active_activation_memory();
 }
 
-bool SpeculativeEngine::pull_kv_blocks(
+template <typename TargetEngine>
+bool SpeculativeEngineBase<TargetEngine>::pull_kv_blocks(
     const int32_t src_dp_size,
     const int32_t src_dp_rank,
     const std::vector<uint64_t>& src_cluster_ids,
@@ -265,29 +299,36 @@ bool SpeculativeEngine::pull_kv_blocks(
                                  dst_blocks);
 };
 
-void SpeculativeEngine::get_device_info(std::vector<std::string>& device_ips,
-                                        std::vector<uint16_t>& ports) {
+template <typename TargetEngine>
+void SpeculativeEngineBase<TargetEngine>::get_device_info(
+    std::vector<std::string>& device_ips,
+    std::vector<uint16_t>& ports) {
   engine_->get_device_info(device_ips, ports);
 };
 
-void SpeculativeEngine::get_cache_info(std::vector<uint64_t>& cluster_ids,
-                                       std::vector<std::string>& addrs,
-                                       std::vector<int64_t>& k_cache_ids,
-                                       std::vector<int64_t>& v_cache_ids) {
+template <typename TargetEngine>
+void SpeculativeEngineBase<TargetEngine>::get_cache_info(
+    std::vector<uint64_t>& cluster_ids,
+    std::vector<std::string>& addrs,
+    std::vector<int64_t>& k_cache_ids,
+    std::vector<int64_t>& v_cache_ids) {
   engine_->get_cache_info(cluster_ids, addrs, k_cache_ids, v_cache_ids);
 };
 
-bool SpeculativeEngine::link_cluster(const std::vector<uint64_t>& cluster_ids,
-                                     const std::vector<std::string>& addrs,
-                                     const std::vector<std::string>& device_ips,
-                                     const std::vector<uint16_t>& ports,
-                                     const int32_t src_dp_size,
-                                     const int32_t src_kv_split_size) {
+template <typename TargetEngine>
+bool SpeculativeEngineBase<TargetEngine>::link_cluster(
+    const std::vector<uint64_t>& cluster_ids,
+    const std::vector<std::string>& addrs,
+    const std::vector<std::string>& device_ips,
+    const std::vector<uint16_t>& ports,
+    const int32_t src_dp_size,
+    const int32_t src_kv_split_size) {
   return engine_->link_cluster(
       cluster_ids, addrs, device_ips, ports, src_dp_size, src_kv_split_size);
 };
 
-bool SpeculativeEngine::unlink_cluster(
+template <typename TargetEngine>
+bool SpeculativeEngineBase<TargetEngine>::unlink_cluster(
     const std::vector<uint64_t>& cluster_ids,
     const std::vector<std::string>& addrs,
     const std::vector<std::string>& device_ips,
@@ -297,4 +338,8 @@ bool SpeculativeEngine::unlink_cluster(
   return engine_->unlink_cluster(
       cluster_ids, addrs, device_ips, ports, src_dp_size, src_kv_split_size);
 };
+
+template class SpeculativeEngineBase<LLMEngine>;
+template class SpeculativeEngineBase<VLMEngine>;
+
 }  // namespace xllm
