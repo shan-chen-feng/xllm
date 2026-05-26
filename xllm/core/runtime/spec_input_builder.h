@@ -40,8 +40,6 @@ struct DecodeBuildBuffers {
   DecodeBuildMeta meta;
   std::vector<int32_t> out_token_ids;
   std::vector<int32_t> out_positions;
-  bool use_mrope_positions = false;
-  int32_t out_position_columns = 0;
   std::vector<int32_t> out_kv_seq_lens;
   std::vector<int32_t> out_q_seq_lens;
   std::vector<int32_t> out_q_cu_seq_lens;
@@ -140,15 +138,6 @@ void update_kv_seq_lens_and_max(std::vector<int32_t>& kv_seq_lens_vec,
 // Builds q_cu_seq_lens tensor from upstream-provided host values.
 torch::Tensor build_q_cu_seq_lens_tensor(const ModelInputParams& params,
                                          torch::Device device = torch::kCPU);
-
-// Returns the number of logical token-position columns represented by
-// DecodeBuildBuffers. For normal RoPE it is out_positions.size(); for mRoPE,
-// out_positions stores a flattened [3, num_columns] tensor.
-int32_t position_column_count(const DecodeBuildBuffers& buf);
-
-// Builds a CPU int tensor from DecodeBuildBuffers::out_positions. The returned
-// shape is [num_columns] for normal RoPE or [3, num_columns] for mRoPE.
-torch::Tensor make_positions_tensor(const DecodeBuildBuffers& buf);
 
 // Updates common decode-side ModelInputParams fields from built buffers.
 void update_input_params(ModelInputParams& input_params,

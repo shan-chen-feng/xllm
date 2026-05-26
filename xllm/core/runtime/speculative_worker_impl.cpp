@@ -45,12 +45,12 @@ torch::Tensor make_cpu_int_tensor(const std::vector<int32_t>& values) {
 
 void set_token_position_tensors(ForwardInput& input,
                                 const std::vector<int32_t>& token_ids,
-                                const torch::Tensor& positions,
+                                const std::vector<int32_t>& positions,
                                 const torch::TensorOptions& token_options,
                                 const torch::TensorOptions& position_options) {
   input.device_tensors_ready = false;
   input.token_ids_host = make_cpu_int_tensor(token_ids);
-  input.positions_host = positions;
+  input.positions_host = make_cpu_int_tensor(positions);
   input.token_ids = safe_to(input.token_ids_host, token_options, true);
   input.positions = safe_to(input.positions_host, position_options, true);
 }
@@ -149,9 +149,7 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
 
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(num_sequences);
-  buf.out_positions.reserve(inputs.positions_host.dim() == 2
-                                ? static_cast<size_t>(num_sequences) * 3
-                                : static_cast<size_t>(num_sequences));
+  buf.out_positions.reserve(num_sequences);
   buf.out_kv_seq_lens.reserve(num_sequences);
   buf.out_new_cache_slots.reserve(num_sequences);
   specBuilder::DecodeRowContext row_ctx =
@@ -169,12 +167,12 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
 
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
       << "step-update kv slots/tokens mismatch";
-  CHECK_EQ(specBuilder::position_column_count(buf), buf.out_token_ids.size())
+  CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
       << "step-update positions/tokens mismatch";
 
   set_token_position_tensors(new_inputs,
                              buf.out_token_ids,
-                             specBuilder::make_positions_tensor(buf),
+                             buf.out_positions,
                              inputs.token_ids.options(),
                              inputs.positions.options());
   // update the input_params
@@ -236,9 +234,7 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
   Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(total_num_val_tokens);
-  buf.out_positions.reserve(input.positions_host.dim() == 2
-                                ? static_cast<size_t>(total_num_val_tokens) * 3
-                                : static_cast<size_t>(total_num_val_tokens));
+  buf.out_positions.reserve(total_num_val_tokens);
   buf.out_new_cache_slots.reserve(total_num_val_tokens);
   if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     buf.out_kv_seq_lens.reserve(total_num_val_tokens);
@@ -292,12 +288,12 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
 
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
       << "validate kv slots/tokens mismatch";
-  CHECK_EQ(specBuilder::position_column_count(buf), buf.out_token_ids.size())
+  CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
 
   set_token_position_tensors(validate_input,
                              buf.out_token_ids,
-                             specBuilder::make_positions_tensor(buf),
+                             buf.out_positions,
                              token_options,
                              position_options);
   // update the input_params

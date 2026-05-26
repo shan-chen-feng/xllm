@@ -229,25 +229,10 @@ void append_decode_row(const DecodeRowContext& ctx,
   if (row.append_token) {
     buf.out_token_ids.emplace_back(resolve_row_token_id(ctx, row));
   }
-  if (ctx.use_mrope_positions) {
-    buf.use_mrope_positions = true;
-    // mRoPE model positions are not guaranteed to equal KV-cache positions
-    // for multimodal prompts. Keep model positions for RoPE, but use
-    // cache_position above for physical slot calculation.
-    for (int32_t dim = 0; dim < 3; ++dim) {
-      const int32_t model_position =
-          ctx.positions[dim * ctx.position_stride + row.seq_id] +
-          row.position_offset;
-      CHECK_GE(model_position, 0) << "invalid decode mRoPE position";
-      buf.out_positions.emplace_back(model_position);
-    }
-    ++buf.out_position_columns;
-  } else {
-    const int32_t model_position =
-        ctx.positions[row.seq_id] + row.position_offset;
-    CHECK_GE(model_position, 0) << "invalid decode model position";
-    buf.out_positions.emplace_back(model_position);
-  }
+  const int32_t model_position =
+      ctx.positions[row.seq_id] + row.position_offset;
+  CHECK_GE(model_position, 0) << "invalid decode model position";
+  buf.out_positions.emplace_back(model_position);
   buf.out_new_cache_slots.emplace_back(
       calc_slot_id(cache_position, block_table_slice, block_size));
 
@@ -343,34 +328,6 @@ torch::Tensor build_q_cu_seq_lens_tensor(const ModelInputParams& params,
       << "q_seq_lens and q_cu_seq_lens must be provided together";
   return torch::tensor(params.attention.host.q_cu_seq_lens,
                        torch::dtype(torch::kInt).device(device));
-}
-
-int32_t position_column_count(const DecodeBuildBuffers& buf) {
-  if (buf.use_mrope_positions) {
-    CHECK_EQ(buf.out_positions.size(),
-             static_cast<size_t>(buf.out_position_columns) * 3)
-        << "mRoPE position buffer size mismatch";
-    return buf.out_position_columns;
-  }
-  return static_cast<int32_t>(buf.out_positions.size());
-}
-
-torch::Tensor make_positions_tensor(const DecodeBuildBuffers& buf) {
-  torch::Tensor positions =
-      torch::empty({static_cast<int64_t>(buf.out_positions.size())},
-                   torch::TensorOptions()
-                       .dtype(torch::kInt)
-                       .device(torch::kCPU)
-                       .pinned_memory(true));
-  std::copy(buf.out_positions.begin(),
-            buf.out_positions.end(),
-            positions.data_ptr<int32_t>());
-  if (buf.use_mrope_positions) {
-    return positions.view({buf.out_position_columns, 3})
-        .transpose(0, 1)
-        .contiguous();
-  }
-  return positions;
 }
 
 void update_input_params(ModelInputParams& input_params,

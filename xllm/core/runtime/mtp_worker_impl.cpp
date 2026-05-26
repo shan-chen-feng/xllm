@@ -107,12 +107,12 @@ void replace_host_token_placeholders(ForwardInput& input,
 
 void set_token_position_tensors(ForwardInput& input,
                                 const std::vector<int32_t>& token_ids,
-                                const torch::Tensor& positions,
+                                const std::vector<int32_t>& positions,
                                 const torch::TensorOptions& token_options,
                                 const torch::TensorOptions& position_options) {
   input.device_tensors_ready = false;
   input.token_ids_host = make_cpu_int_tensor(token_ids);
-  input.positions_host = positions;
+  input.positions_host = make_cpu_int_tensor(positions);
   input.token_ids = safe_to(input.token_ids_host, token_options, true);
   input.positions = safe_to(input.positions_host, position_options, true);
   input.device_tensors_ready = true;
@@ -636,9 +636,7 @@ void MTPWorkerImpl::update_decode_step_input(
                                     static_cast<size_t>(token_ids_cpu.numel())};
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(num_sequences);
-  buf.out_positions.reserve(input.positions_host.dim() == 2
-                                ? static_cast<size_t>(num_sequences) * 3
-                                : static_cast<size_t>(num_sequences));
+  buf.out_positions.reserve(num_sequences);
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
 
@@ -682,7 +680,7 @@ void MTPWorkerImpl::update_decode_step_input(
   }
 
   input.token_ids_host = make_cpu_int_tensor(buf.out_token_ids);
-  input.positions_host = specBuilder::make_positions_tensor(buf);
+  input.positions_host = make_cpu_int_tensor(buf.out_positions);
   input.input_params.attention.host.kv_seq_lens = std::move(kv_seq_lens_vec);
   input.device_tensors_ready = false;
 }
@@ -709,9 +707,7 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
   Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(total_num_val_tokens);
-  buf.out_positions.reserve(input.positions_host.dim() == 2
-                                ? static_cast<size_t>(total_num_val_tokens) * 3
-                                : static_cast<size_t>(total_num_val_tokens));
+  buf.out_positions.reserve(total_num_val_tokens);
   buf.out_new_cache_slots.reserve(total_num_val_tokens);
   if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     buf.out_kv_seq_lens.reserve(total_num_val_tokens);
@@ -763,12 +759,12 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
 
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
       << "validate kv slots/tokens mismatch";
-  CHECK_EQ(specBuilder::position_column_count(buf), buf.out_token_ids.size())
+  CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
 
   set_token_position_tensors(validate_input,
                              buf.out_token_ids,
-                             specBuilder::make_positions_tensor(buf),
+                             buf.out_positions,
                              token_options,
                              position_options);
   if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
@@ -832,9 +828,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
 
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(num_sequences * 2);
-  buf.out_positions.reserve(base_input.positions_host.dim() == 2
-                                ? static_cast<size_t>(num_sequences) * 2 * 3
-                                : static_cast<size_t>(num_sequences) * 2);
+  buf.out_positions.reserve(num_sequences * 2);
   buf.out_new_cache_slots.reserve(num_sequences * 2);
   buf.out_kv_seq_lens.reserve(num_sequences * 2);
   buf.out_q_seq_lens.reserve(num_sequences * 2);
@@ -899,19 +893,18 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     add_row(state.token_id, /*position_offset=*/0, state.embedding);
   }
 
-  CHECK_EQ(buf.out_new_cache_slots.size(),
-           static_cast<size_t>(specBuilder::position_column_count(buf)))
+  CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_positions.size())
       << "draft extend slots/positions mismatch";
-  CHECK_EQ(expanded_embeddings.size(),
-           static_cast<size_t>(specBuilder::position_column_count(buf)))
+  CHECK_EQ(expanded_embeddings.size(), buf.out_positions.size())
       << "draft extend embeddings/positions mismatch";
 
   set_token_position_tensors(extend_input,
                              buf.out_token_ids,
-                             specBuilder::make_positions_tensor(buf),
+                             buf.out_positions,
                              token_options,
                              position_options);
-  input_params.meta.num_sequences = specBuilder::position_column_count(buf);
+  input_params.meta.num_sequences =
+      static_cast<int32_t>(buf.out_positions.size());
   input_params.meta.batch_forward_type = BatchForwardType::DECODE;
   specBuilder::update_input_params(input_params,
                                    buf,
@@ -934,7 +927,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
       }
     } else if (input_params.parallel.dp_global_token_nums.size() == 1) {
       input_params.parallel.dp_global_token_nums[0] =
-          specBuilder::position_column_count(buf);
+          static_cast<int32_t>(buf.out_positions.size());
     }
   }
 
@@ -963,9 +956,7 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
   specBuilder::DecodeBuildBuffers buf;
-  buf.out_positions.reserve(input.positions_host.dim() == 2
-                                ? static_cast<size_t>(num_sequences) * 3
-                                : static_cast<size_t>(num_sequences));
+  buf.out_positions.reserve(num_sequences);
   buf.out_kv_seq_lens.reserve(num_sequences);
   buf.out_new_cache_slots.reserve(num_sequences);
 
@@ -977,13 +968,12 @@ void MTPWorkerImpl::prepare_draft_inputs(const ForwardInput& input,
     specBuilder::append_decode_row(row_ctx, row, block_size, buf);
   }
 
-  CHECK_EQ(buf.out_new_cache_slots.size(),
-           static_cast<size_t>(specBuilder::position_column_count(buf)))
+  CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_positions.size())
       << "draft kv slots/positions mismatch";
 
   torch::TensorOptions position_options = input.positions.options();
   set_positions_tensor(
-      draft_input, specBuilder::make_positions_tensor(buf), position_options);
+      draft_input, make_cpu_int_tensor(buf.out_positions), position_options);
   specBuilder::update_input_params(
       input_params,
       buf,
