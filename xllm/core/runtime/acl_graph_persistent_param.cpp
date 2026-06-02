@@ -174,6 +174,13 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
         {3, max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
     use_mrope_ = true;
   }
+  LOG(INFO) << "GraphPersistentParam initialized, model_type="
+            << args_.model_type() << ", use_mrope=" << use_mrope_
+            << ", rope_scaling_mrope_section_size="
+            << args_.rope_scaling_mrope_section().size()
+            << ", persistent_positions_shape="
+            << persistent_positions_.sizes() << ", device_index="
+            << static_cast<int32_t>(device.index());
   persistent_new_cache_slots_ = torch::zeros(
       {max_tokens_per_batch}, torch::dtype(torch::kInt).device(device));
   persistent_new_cache_slots_default_ = torch::zeros(
@@ -587,6 +594,15 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   CHECK(params.meta.batch_forward_type.is_decode())
       << "ACL graph persistent param only supports decode";
   const bool is_decode = params.meta.batch_forward_type.is_decode();
+  LOG(INFO) << "GraphPersistentParam update, model_type="
+            << args_.model_type() << ", use_mrope=" << use_mrope_
+            << ", tokens_shape=" << tokens.sizes()
+            << ", positions_shape=" << positions.sizes()
+            << ", persistent_positions_shape="
+            << persistent_positions_.sizes()
+            << ", actual_num_tokens=" << actual_num_tokens
+            << ", padded_num_tokens=" << padded_num_tokens
+            << ", return_capture_params=" << return_capture_params;
   const int64_t decode_tokens =
       is_decode ? std::max<int64_t>(options_.num_decoding_tokens(), 1) : 1;
   int64_t actual_batch_size = infer_actual_batch_size(params);
