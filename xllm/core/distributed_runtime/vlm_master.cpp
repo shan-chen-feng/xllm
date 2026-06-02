@@ -53,8 +53,8 @@ bool should_use_ssm_engine(const Options& options) {
 VLMMaster::VLMMaster(const Options& options)
     : Master(
           options,
-          should_use_ssm_engine(options) ? EngineType::SSM : EngineType::VLM) {
-  set_engine_type(EngineType::VLM);
+          should_use_ssm_engine(options) ? EngineType::VLMSSM
+                                         : EngineType::VLM) {
   CHECK(engine_->init());
 
   model_args_ = engine_->model_args();
