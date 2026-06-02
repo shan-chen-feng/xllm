@@ -633,6 +633,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                      actual_num_tokens,
                      static_cast<int64_t>(padded_num_tokens));
   }
+  LOG(INFO) << "GraphPersistentParam update copied tokens, model_type="
+            << args_.model_type();
   // mRoPE positions have shape [3, num_tokens], slice on dim 1
   if (actual_num_tokens > 0) {
     if (use_mrope_) {
@@ -651,6 +653,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                      static_cast<int64_t>(padded_num_tokens),
                      use_mrope_ ? 1 : 0);
   }
+  LOG(INFO) << "GraphPersistentParam update copied positions, model_type="
+            << args_.model_type() << ", use_mrope=" << use_mrope_;
   if (q_seq_lens_default_.defined() &&
       q_seq_lens_default_.sizes() == q_seq_lens_.sizes()) {
     q_seq_lens_.copy_(q_seq_lens_default_, /*non_blocking=*/true);
@@ -698,6 +702,10 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                /*end=*/padded_batch_size)
         .fill_(1);
   }
+  LOG(INFO) << "GraphPersistentParam update copied q/kv seq lens, model_type="
+            << args_.model_type() << ", actual_batch_size="
+            << actual_batch_size << ", padded_batch_size="
+            << padded_batch_size;
 
   if (persistent_new_cache_slots_default_.defined() &&
       persistent_new_cache_slots_default_.sizes() ==
@@ -725,6 +733,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                      actual_num_tokens,
                      static_cast<int64_t>(padded_num_tokens));
   }
+  LOG(INFO) << "GraphPersistentParam update copied cache slots, model_type="
+            << args_.model_type();
   if (!params.embedding.linear_state_ids.empty()) {
     const int64_t linear_copy_len = std::min<int64_t>(
         actual_batch_size,
@@ -796,6 +806,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     zero_tensor_tail(
         persistent_block_tables_, actual_num_tokens, padded_batch_size);
   }
+  LOG(INFO) << "GraphPersistentParam update copied block tables, model_type="
+            << args_.model_type();
 
   // Update persistent embedding from input_embedding if available
   const auto& embedding = params.embedding.input_embedding;
@@ -817,6 +829,9 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
         .slice(/*dim=*/0, /*start=*/0, /*end=*/embedding_tokens)
         .copy_(embedding, /*non_blocking=*/true);
   }
+  LOG(INFO) << "GraphPersistentParam update copied embedding, model_type="
+            << args_.model_type()
+            << ", embedding_defined=" << embedding.defined();
   if (q_cu_seq_lens_default_.defined() &&
       q_cu_seq_lens_default_.sizes() == q_cu_seq_lens_.sizes()) {
     q_cu_seq_lens_.copy_(q_cu_seq_lens_default_, /*non_blocking=*/true);
@@ -908,12 +923,18 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
     expanded_kv_seq_lens_vec = update_expanded_spec_decode_attention(
         params, actual_num_tokens, padded_num_tokens, actual_batch_size);
   }
+  LOG(INFO) << "GraphPersistentParam update prepared host seq lens, model_type="
+            << args_.model_type()
+            << ", use_expanded_spec_decode_attention="
+            << use_expanded_spec_decode_attention;
 
   if (uses_paged_attention_tiling()) {
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
     if (k_cache.defined() && v_cache.defined() && k_cache.numel() > 0 &&
         v_cache.numel() > 0) {
+      LOG(INFO) << "GraphPersistentParam update planning paged attention, "
+                << "model_type=" << args_.model_type();
       ModelInputParams plan_params = params;
       torch::Tensor plan_block_tables;
       if (use_expanded_spec_decode_attention) {
@@ -949,6 +970,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                                   plan_block_tables,
                                   plan_params,
                                   stream);
+      LOG(INFO) << "GraphPersistentParam update planned paged attention, "
+                << "model_type=" << args_.model_type();
     }
   }
 
@@ -959,6 +982,8 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
                                   padded_num_tokens);
   update_persistent_cp_ep_padding(params.parallel.cp_ep_padding_data,
                                   padded_num_tokens);
+  LOG(INFO) << "GraphPersistentParam update copied dp/cp padding, model_type="
+            << args_.model_type();
 
   // Return ModelInputParams with persistent buffer references if requested
   if (return_capture_params) {
@@ -1051,8 +1076,12 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
         params.parallel.cp_ep_padding_data,
         params_for_capture->parallel.cp_ep_padding_data);
 
+    LOG(INFO) << "GraphPersistentParam update returning capture params, "
+              << "model_type=" << args_.model_type();
     return params_for_capture;
   }
+  LOG(INFO) << "GraphPersistentParam update done without capture params, "
+            << "model_type=" << args_.model_type();
   return std::nullopt;
 }
 
@@ -1296,7 +1325,6 @@ void parse_pa_host_tiling_buffer(const uint8_t* host_tiling_buffer,
       }
     }
   }
-
   VLOG(kGraphExecutorLogVerboseLevel) << "\n=== End of Tiling Buffer Parse ===";
 }
 }  // namespace
