@@ -28,15 +28,20 @@ DEFINE_string(npu_kernel_backend,
               "AUTO",
               "NPU kernel backend. Supported options: AUTO, ATB, TORCH.");
 
+DEFINE_bool(enable_layer_optimization,
+            false,
+            "enable common NPU ATB layer optimizations.");
+
 DEFINE_bool(enable_intralayer_addnorm,
             false,
             "enable fused intralayer addnorm ops.");
 
 DEFINE_int32(enable_fused_mc2,
              -1,
-             "Fused MC2 mode for NPU EP MoE. -1 uses auto default, 0 "
-             "disables fused MC2, 1 uses DispatchFFNCombine, 2 uses "
-             "DispatchGmmCombineDecode.");
+             "Fused MC2 mode for NPU. -1 uses auto default, 0 disables fused "
+             "MC2, positive values enable dense matmul-allreduce, 1 uses "
+             "DispatchFFNCombine for MoE, 2 uses DispatchGmmCombineDecode for "
+             "MoE.");
 DEFINE_bool(enable_interlayer_addnorm,
             false,
             "enable fused interlayer addnorm ops.");
@@ -45,13 +50,13 @@ DEFINE_bool(enable_split_rmsnorm_rope,
             false,
             "enable fused split rmsnorm rope ops.");
 
-DEFINE_bool(enable_qwen3_dense_aclnn_matmul,
+DEFINE_bool(enable_aclnn_matmul,
             false,
-            "enable ACLNN matmul backend for Qwen3 dense ATB layers.");
+            "enable ACLNN matmul backend for supported NPU ATB layers.");
 
-DEFINE_bool(enable_qwen3_dense_aclnn_swiglu,
+DEFINE_bool(enable_aclnn_swiglu,
             false,
-            "enable ACLNN SwiGLU backend for Qwen3 dense ATB layers.");
+            "enable ACLNN SwiGLU backend for supported NPU ATB layers.");
 #endif
 
 namespace xllm {
@@ -78,12 +83,13 @@ void KernelConfig::from_flags() {
 #if defined(USE_NPU)
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_customize_mla_kernel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(npu_kernel_backend);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_layer_optimization);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_intralayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_fused_mc2);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_interlayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_split_rmsnorm_rope);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_qwen3_dense_aclnn_matmul);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_qwen3_dense_aclnn_swiglu);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_matmul);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_aclnn_swiglu);
 #endif
 }
 
@@ -91,12 +97,13 @@ void KernelConfig::from_json(const JsonReader& json) {
 #if defined(USE_NPU)
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_customize_mla_kernel);
   XLLM_CONFIG_ASSIGN_FROM_JSON(npu_kernel_backend);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_layer_optimization);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_intralayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_fused_mc2);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_interlayer_addnorm);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_split_rmsnorm_rope);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_qwen3_dense_aclnn_matmul);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_qwen3_dense_aclnn_swiglu);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_matmul);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_aclnn_swiglu);
 #endif
 }
 
@@ -109,6 +116,8 @@ void KernelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, npu_kernel_backend);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_layer_optimization);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_intralayer_addnorm);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_fused_mc2);
@@ -117,9 +126,9 @@ void KernelConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_split_rmsnorm_rope);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_qwen3_dense_aclnn_matmul);
+      config_json, default_config, enable_aclnn_matmul);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_qwen3_dense_aclnn_swiglu);
+      config_json, default_config, enable_aclnn_swiglu);
 #endif
 }
 
@@ -135,6 +144,11 @@ void KernelConfig::initialize() {
   }
 #if defined(USE_NPU)
   enable_fused_mc2(resolve_fused_mc2_mode(enable_fused_mc2()));
+  if (enable_layer_optimization()) {
+    enable_interlayer_addnorm(true);
+    enable_aclnn_swiglu(true);
+    enable_split_rmsnorm_rope(true);
+  }
 #endif
 }
 
