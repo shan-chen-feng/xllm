@@ -51,10 +51,9 @@ bool should_use_ssm_engine(const Options& options) {
 }
 
 VLMMaster::VLMMaster(const Options& options)
-    : Master(
-          options,
-          should_use_ssm_engine(options) ? EngineType::VLMSSM
-                                         : EngineType::VLM) {
+    : Master(options,
+             should_use_ssm_engine(options) ? EngineType::VLMSSM
+                                            : EngineType::VLM) {
   CHECK(engine_->init());
 
   model_args_ = engine_->model_args();
@@ -522,9 +521,10 @@ bool VLMMaster::build_mm_data_from_image_urls(
 }
 
 volatile bool VLMAssistantMaster::running_ = false;
-
 VLMAssistantMaster::VLMAssistantMaster(const Options& options)
-    : Master(options, EngineType::VLM) {
+    : Master(options,
+             should_use_ssm_engine(options) ? EngineType::VLMSSM
+                                            : EngineType::VLM) {
   auto master_node_addr = options_.master_node_addr().value_or("");
   if (master_node_addr.empty()) {
     LOG(FATAL)
