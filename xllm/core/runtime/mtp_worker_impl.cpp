@@ -333,6 +333,7 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
                             options,
                             target_options,
                             worker_type),
+      target_worker_type_(worker_type),
       enable_opt_validate_probs_(enable_opt_validate_probs) {
   draft_impl_ =
       std::make_unique<LLMWorkerImpl>(parallel_args, device, draft_options);
@@ -609,7 +610,15 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   auto& embeddings = output.sample_output.embeddings;
   if (embeddings.defined()) {
     check_draft_input_embedding(embeddings, "prefill");
-    prefill_input.input_params.embedding.input_embedding = embeddings.clone();
+    if (target_worker_type_ == WorkerType::VLM) {
+      prefill_input.input_params.embedding.aux_input_embedding =
+          embeddings.clone();
+    } else {
+      prefill_input.input_params.embedding.input_embedding = embeddings.clone();
+    }
+  }
+  if (target_worker_type_ == WorkerType::VLM && output.embedding.defined()) {
+    prepare_prefill_input_embeddings(input, prefill_input, output.embedding);
   }
   if (output.sample_output.next_tokens.defined()) {
     const auto& extra_token_ids =
@@ -705,6 +714,38 @@ void MTPWorkerImpl::prepare_prefill_inputs(const ForwardInput& input,
   prefill_input.token_ids = safe_to(
       prefill_input.token_ids_host, prefill_input.positions.options(), true);
   prefill_input.device_tensors_ready = true;
+  prepare_stream_->synchronize();
+}
+
+void MTPWorkerImpl::prepare_prefill_input_embeddings(
+    const ForwardInput& input,
+    ForwardInput& prefill_input,
+    const torch::Tensor& input_embedding) {
+  c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
+  CHECK(input_embedding.defined());
+  CHECK_EQ(input_embedding.dim(), 2);
+
+  const auto& input_params = prefill_input.input_params;
+  CHECK_EQ(input_embedding.size(0), input.token_ids_host.numel());
+
+  std::vector<torch::Tensor> shifted_embeddings;
+  shifted_embeddings.reserve(input_params.meta.num_sequences);
+
+  int64_t start_idx = 0;
+  for (int32_t i = 0; i < input_params.meta.num_sequences; ++i) {
+    const int64_t q_len = input_params.get_q_seq_len(i);
+    CHECK_GE(q_len, 1);
+    shifted_embeddings.emplace_back(
+        input_embedding.slice(/*dim=*/0, start_idx + 1, start_idx + q_len));
+    start_idx += q_len;
+  }
+  CHECK_EQ(start_idx, input_embedding.size(0));
+
+  // Eagle3 appends the extra-token embedding from the resolved token ids.
+  if (!shifted_embeddings.empty()) {
+    prefill_input.input_params.embedding.input_embedding =
+        torch::cat(shifted_embeddings, /*dim=*/0).contiguous();
+  }
   prepare_stream_->synchronize();
 }
 

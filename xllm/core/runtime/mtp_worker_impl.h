@@ -111,6 +111,9 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const ForwardInput& inputs,
                               ForwardInput& prefill_inputs);
+  void prepare_prefill_input_embeddings(const ForwardInput& inputs,
+                                        ForwardInput& prefill_inputs,
+                                        const torch::Tensor& input_embedding);
   bool use_qwen3_5_spec_verify_path() const;
 
   // Prepare target validate input from cached target context.
@@ -141,6 +144,8 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
 
   // Embedding cache for speculative decoding
   std::shared_ptr<EmbeddingCache> embedding_cache_;
+
+  WorkerType target_worker_type_{WorkerType::INVALID};
 
   // Whether validation directly uses selected-only draft_probs [B, S].
   // If false, selected-only cache values are restored to dense [B, S, V].

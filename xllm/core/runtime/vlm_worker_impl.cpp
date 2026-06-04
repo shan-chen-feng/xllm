@@ -83,6 +83,10 @@ std::optional<ForwardOutput> VLMWorkerImpl::step(const ForwardInput& input) {
   }
 
   ForwardOutput output;
+  if (options_.enable_speculative_decode() &&
+      input.input_params.embedding.input_embedding.defined()) {
+    output.embedding = input.input_params.embedding.input_embedding;
+  }
   if (sampling_params.selected_token_idxes.defined()) {
     auto sample_output = sampler_->forward(logits, sampling_params);
     output.logits = logits;

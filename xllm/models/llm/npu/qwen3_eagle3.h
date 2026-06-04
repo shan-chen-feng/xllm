@@ -158,15 +158,47 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
       positions = torch::tensor({0}).to(torch::kInt32).to(tokens.device());
     }
 
-    torch::Tensor hidden_states = embed_tokens_(tokens, 0);
-    // Get hidden_states_extra from input_params.embedding.input_embedding
+    torch::Tensor token_hidden_states = embed_tokens_(tokens, 0);
+    torch::Tensor hidden_states = token_hidden_states;
+
+    bool is_vlm_prefill = input_params.embedding.input_embedding.defined() &&
+        input_params.embedding.input_embedding.size(0) > 0;
+    if (is_vlm_prefill) {
+      hidden_states = input_params.embedding.input_embedding;
+      const int64_t num_sequences = input_params.meta.num_sequences;
+      const auto& extra_token_ids = input_params.embedding.extra_token_ids;
+      const int64_t num_extra_tokens =
+          extra_token_ids.empty() ? num_sequences
+                                  : static_cast<int64_t>(extra_token_ids.size());
+      CHECK_EQ(num_extra_tokens, num_sequences)
+          << "QWen3Eagle3Model input_embedding extra token count mismatch.";
+
+      std::vector<torch::Tensor> aligned_hidden_states;
+      aligned_hidden_states.reserve(num_sequences * 2);
+      int64_t token_offset = 0;
+      int64_t embedding_offset = 0;
+      for (int32_t i = 0; i < num_sequences; ++i) {
+        const int64_t q_len = input_params.get_q_seq_len(i);
+        CHECK_GE(q_len, 1);
+        const int64_t shifted_len = q_len - 1;
+        if (shifted_len > 0) {
+          aligned_hidden_states.emplace_back(hidden_states.slice(
+              /*dim=*/0, embedding_offset, embedding_offset + shifted_len));
+        }
+        // The last token row is the resolved extra_token_id for this sequence.
+        aligned_hidden_states.emplace_back(token_hidden_states.slice(
+            /*dim=*/0, token_offset + q_len - 1, token_offset + q_len));
+        embedding_offset += shifted_len;
+        token_offset += q_len;
+      }
+      hidden_states = torch::cat(aligned_hidden_states, /*dim=*/0).contiguous();
+    }
+
+    // Get hidden_states_extra from input_params.embedding.aux_input_embedding
     // In EAGLE-3, hidden_states_extra comes from verifier layers
     // (3 layers concatenated)
-    torch::Tensor hidden_states_extra = input_params.embedding.input_embedding;
-    if (!hidden_states_extra.defined() || hidden_states_extra.size(0) == 0) {
-      LOG(WARNING) << "hidden_states_extra use embedding from tokens.";
-      hidden_states_extra = hidden_states;
-    }
+    torch::Tensor hidden_states_extra =
+        input_params.embedding.aux_input_embedding;
 
     // Apply fusion if hidden_states_extra dimension doesn't match hidden_states
     // hidden_states_extra shape: [B*L, 3*target_hidden_size] or [B*L,
