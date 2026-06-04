@@ -616,8 +616,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
         embeddings.clone();
     embeddings.print();
   }
-  if (target_worker_type_ == WorkerType::VLM && output.embedding.defined()) {
-    prepare_prefill_input_embeddings(input, prefill_input, output.embedding);
+  if (target_worker_type_ == WorkerType::VLM &&
+      output.vlm_input_embedding.defined()) {
+    prepare_prefill_input_embeddings(
+        input, prefill_input, output.vlm_input_embedding);
   }
   if (output.sample_output.next_tokens.defined()) {
     const auto& extra_token_ids =
@@ -790,7 +792,8 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
                                 last_output.next_tokens,
                                 current_draft_input.token_ids.options());
     check_draft_input_embedding(last_output.embeddings, "decode");
-    current_draft_input.input_params.embedding.input_embedding =
+    current_draft_input.input_params.embedding.input_embedding = torch::Tensor();
+    current_draft_input.input_params.embedding.aux_input_embedding =
         last_output.embeddings;
   }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
@@ -1298,8 +1301,9 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
     }
   }
   input_params.attention.rebuild_device_buffer(device_);
-  input_params.embedding.input_embedding = torch::stack(expanded_embeddings);
-  check_draft_input_embedding(input_params.embedding.input_embedding,
+  input_params.embedding.input_embedding = torch::Tensor();
+  input_params.embedding.aux_input_embedding = torch::stack(expanded_embeddings);
+  check_draft_input_embedding(input_params.embedding.aux_input_embedding,
                               "decode extend");
 
   if (!input_params.parallel.dp_global_token_nums.empty()) {

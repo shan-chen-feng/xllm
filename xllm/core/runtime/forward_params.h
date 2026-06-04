@@ -901,6 +901,7 @@ struct ForwardOutput {
   SampleOutput sample_output;
   torch::Tensor logits;
   torch::Tensor embedding;
+  torch::Tensor vlm_input_embedding;
 
   // for eplb, collect the tokens load of experts on each worker.
   torch::Tensor expert_load_data;
