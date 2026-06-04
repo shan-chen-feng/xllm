@@ -675,15 +675,19 @@ class Qwen3_VLForConditionalGenerationImpl : public torch::nn::Module {
   MMDict get_multimodal_embeddings(const ModelInputParams& input_params) {
     std::optional<Qwen3_VLImageInputs> image_input;
     std::optional<Qwen3_VLVideoInputs> video_input;
+    LOG(INFO) << "here1";
     prepare_encoder_input(input_params, image_input, video_input);
-
+    LOG(INFO) << "here2";
     MMDict multimodal_embeds;
     if (image_input) {
       torch::Tensor image_pixels = image_input->pixel_values.to(options_);
+      LOG(INFO) << "here3";
       torch::Tensor image_grid =
           image_input->image_grid_thw.to(options_.device());
+      LOG(INFO) << "here4";
       std::vector<int32_t> image_token_nums =
           get_mm_token_nums(input_params.multimodal.mm_data, MMType::IMAGE);
+      LOG(INFO) << "here5";
       if (!use_encoder_dp_) {
         auto image_embeds = visual_(image_pixels, image_grid);
         multimodal_embeds["image|embedding"] =

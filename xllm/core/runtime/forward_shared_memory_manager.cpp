@@ -2177,6 +2177,7 @@ inline void deserialize_forward_input_payload(
   read_tensor(
       context, input_params.attention.device.kv_cache_start_offsets, stream);
   read_tensor(context, input_params.embedding.input_embedding, stream);
+  read_tensor(context, input_params.embedding.aux_input_embedding, stream);
   read_vector(context, input_params.parallel.dp_global_token_nums);
   read_vector(context, input_params.parallel.dp_is_decode);
   read_vector(context, input_params.embedding.embedding_ids);
@@ -2506,6 +2507,7 @@ inline void serialize_forward_input_sections(
   write_tensor(context, input_params.attention.device.new_cache_slot_offsets);
   write_tensor(context, input_params.attention.device.kv_cache_start_offsets);
   write_tensor(context, input_params.embedding.input_embedding);
+  write_tensor(context, input_params.embedding.aux_input_embedding);
   write_vector(context.descriptor, input_params.parallel.dp_global_token_nums);
   write_vector(context.descriptor, input_params.parallel.dp_is_decode);
   write_vector(context.descriptor, input_params.embedding.embedding_ids);

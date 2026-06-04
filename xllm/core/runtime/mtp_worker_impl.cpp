@@ -608,14 +608,13 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   prepare_prefill_inputs(input, prefill_input);
   // prepare input for draft model
   auto& embeddings = output.sample_output.embeddings;
+  LOG(INFO) << "hhh";
+  LOG(INFO) << (target_worker_type_ == WorkerType::VLM ? "true" : "false");
   if (embeddings.defined()) {
     check_draft_input_embedding(embeddings, "prefill");
-    if (target_worker_type_ == WorkerType::VLM) {
-      prefill_input.input_params.embedding.aux_input_embedding =
-          embeddings.clone();
-    } else {
-      prefill_input.input_params.embedding.input_embedding = embeddings.clone();
-    }
+    prefill_input.input_params.embedding.aux_input_embedding =
+        embeddings.clone();
+    embeddings.print();
   }
   if (target_worker_type_ == WorkerType::VLM && output.embedding.defined()) {
     prepare_prefill_input_embeddings(input, prefill_input, output.embedding);

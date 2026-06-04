@@ -162,14 +162,17 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     torch::Tensor hidden_states = token_hidden_states;
 
     bool is_vlm_prefill = input_params.embedding.input_embedding.defined() &&
-        input_params.embedding.input_embedding.size(0) > 0;
+                          input_params.embedding.input_embedding.size(0) > 0;
+    LOG(INFO) << input_params.embedding.input_embedding.defined();
+    LOG(INFO) << input_params.embedding.input_embedding.size(0);
     if (is_vlm_prefill) {
       hidden_states = input_params.embedding.input_embedding;
       const int64_t num_sequences = input_params.meta.num_sequences;
       const auto& extra_token_ids = input_params.embedding.extra_token_ids;
       const int64_t num_extra_tokens =
-          extra_token_ids.empty() ? num_sequences
-                                  : static_cast<int64_t>(extra_token_ids.size());
+          extra_token_ids.empty()
+              ? num_sequences
+              : static_cast<int64_t>(extra_token_ids.size());
       CHECK_EQ(num_extra_tokens, num_sequences)
           << "QWen3Eagle3Model input_embedding extra token count mismatch.";
 
@@ -192,6 +195,7 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
         token_offset += q_len;
       }
       hidden_states = torch::cat(aligned_hidden_states, /*dim=*/0).contiguous();
+      hidden_states.print();
     }
 
     // Get hidden_states_extra from input_params.embedding.aux_input_embedding
@@ -199,7 +203,11 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     // (3 layers concatenated)
     torch::Tensor hidden_states_extra =
         input_params.embedding.aux_input_embedding;
-
+    if (!hidden_states_extra.defined() || hidden_states_extra.size(0) == 0) {
+      LOG(WARNING) << "hidden_states_extra use embedding from tokens.";
+      hidden_states_extra = hidden_states;
+    }
+    hidden_states_extra.print();
     // Apply fusion if hidden_states_extra dimension doesn't match hidden_states
     // hidden_states_extra shape: [B*L, 3*target_hidden_size] or [B*L,
     // hidden_size]
