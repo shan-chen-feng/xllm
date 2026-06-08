@@ -180,6 +180,10 @@ AclGraph::~AclGraph() {
   } else if (capture_stream_.has_value()) {
     aclrtSynchronizeStream(capture_stream_.value().stream());
   }
+  if (replay_ready_event_ != nullptr) {
+    aclrtDestroyEvent(replay_ready_event_);
+    replay_ready_event_ = nullptr;
+  }
   if (replay_done_event_ != nullptr) {
     aclrtDestroyEvent(replay_done_event_);
     replay_done_event_ = nullptr;
@@ -193,12 +197,29 @@ void AclGraph::initialize_capture_stream(c10::DeviceIndex device_index) {
   // torch_npu/csrc/core/npu/NPUGraph.cpp:159).
   capture_stream_ = c10_npu::getStreamFromPool(true, device_index);
   device_index_ = device_index;
+  CHECK_EQ(aclrtCreateEventWithFlag(&replay_ready_event_, ACL_EVENT_SYNC),
+           ACL_SUCCESS)
+      << "Failed to create ACL graph replay ready event";
   CHECK_EQ(aclrtCreateEventWithFlag(&replay_done_event_, ACL_EVENT_SYNC),
            ACL_SUCCESS)
       << "Failed to create ACL graph replay completion event";
   LOG(INFO) << "Initialized capture_stream: " << capture_stream_.value()
             << ", id: " << capture_stream_.value().id()
             << ", device_index: " << device_index;
+}
+
+void AclGraph::make_graph_wait_for_current_stream(aclrtStream current_stream) {
+  CHECK_NE(graph_stream_, nullptr) << "graph_stream is not initialized";
+  CHECK_NE(replay_ready_event_, nullptr)
+      << "replay_ready_event is not initialized";
+  if (current_stream == graph_stream_) {
+    return;
+  }
+  CHECK_EQ(aclrtRecordEvent(replay_ready_event_, current_stream), ACL_SUCCESS)
+      << "aclrtRecordEvent(replay_ready_event) failed";
+  CHECK_EQ(aclrtStreamWaitEvent(graph_stream_, replay_ready_event_),
+           ACL_SUCCESS)
+      << "aclrtStreamWaitEvent(graph_stream, replay_ready_event) failed";
 }
 
 void AclGraph::make_current_stream_wait_for_graph(aclrtStream current_stream) {
@@ -269,6 +290,10 @@ ModelOutput AclGraph::replay(CausalLM* model,
   // Replay captured graph - NPUGraph mempool reuses temporary tensors
   // Get current NPU stream from libtorch NPU API
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+  if (params.embedding.input_embedding.defined()) {
+    make_graph_wait_for_current_stream(stream);
+  }
 
   graph_.replay();
 

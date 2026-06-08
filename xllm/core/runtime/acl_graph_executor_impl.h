@@ -86,6 +86,7 @@ class AclGraph {
 
   // Initialize capture stream if not already initialized
   void initialize_capture_stream(c10::DeviceIndex device_index);
+  void make_graph_wait_for_current_stream(aclrtStream current_stream);
   void make_current_stream_wait_for_graph(aclrtStream current_stream);
   void prepare_model_graph_metadata(CausalLM* model,
                                     const torch::Tensor& positions,
@@ -103,6 +104,7 @@ class AclGraph {
   // Fallback non-default stream for capture when callers are on default stream.
   std::optional<c10_npu::NPUStream> capture_stream_;
   aclrtStream graph_stream_ = nullptr;
+  aclrtEvent replay_ready_event_ = nullptr;
   aclrtEvent replay_done_event_ = nullptr;
   c10::DeviceIndex device_index_;
 };
