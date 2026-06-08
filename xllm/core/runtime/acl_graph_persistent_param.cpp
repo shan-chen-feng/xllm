@@ -595,12 +595,9 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   int64_t actual_batch_size = infer_actual_batch_size(params);
   if (is_chunked_prefill && params.meta.num_sequences > 0) {
     actual_batch_size = params.meta.num_sequences;
-  } else if (is_decode) {
-    if (params.meta.num_sequences == 0) {
-      actual_batch_size = 0;
-    } else {
-      actual_batch_size = actual_num_tokens / decode_tokens;
-    }
+  } else if (is_decode && actual_batch_size <= 0) {
+    actual_batch_size = decode_tokens > 0 ? actual_num_tokens / decode_tokens
+                                          : actual_num_tokens;
   }
   const int32_t q_max_seq_len = std::max<int32_t>(params.meta.q_max_seq_len, 1);
   const int64_t padded_batch_size =
