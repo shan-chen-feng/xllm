@@ -891,13 +891,27 @@ void MTPWorkerImpl::update_decode_step_input(
   const torch::Tensor& token_ids_cpu = input.token_ids_host;
   Slice<int32_t> input_token_ids = {token_ids_cpu.data_ptr<int32_t>(),
                                     static_cast<size_t>(token_ids_cpu.numel())};
+  CHECK(input.positions_host.defined())
+      << "positions_host must be defined for decode context update";
+  Slice<int32_t> input_positions = {
+      input.positions_host.data_ptr<int32_t>(),
+      static_cast<size_t>(input.positions_host.numel())};
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(num_sequences);
-  buf.out_positions.reserve(input.positions_host.dim() == 2
-                                ? static_cast<size_t>(num_sequences) * 3
-                                : static_cast<size_t>(num_sequences));
-  specBuilder::DecodeRowContext row_ctx =
-      specBuilder::make_decode_row_context(input);
+  const bool use_mrope_positions = input.positions_host.dim() == 2;
+  if (use_mrope_positions) {
+    CHECK_EQ(input.positions_host.size(0), 3)
+        << "mRoPE decode positions should be [3, num_sequences], got "
+        << input.positions_host.sizes();
+    CHECK_LE(num_sequences, input.positions_host.size(1))
+        << "mRoPE decode position width is smaller than num_sequences, width="
+        << input.positions_host.size(1)
+        << ", num_sequences=" << num_sequences;
+    buf.use_mrope_positions = true;
+    buf.out_positions.reserve(static_cast<size_t>(num_sequences) * 3);
+  } else {
+    buf.out_positions.reserve(static_cast<size_t>(num_sequences));
+  }
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     CHECK_LT(static_cast<size_t>(seq_id), input_token_ids.size())
@@ -914,27 +928,31 @@ void MTPWorkerImpl::update_decode_step_input(
     const int32_t current_kv_len = specBuilder::calc_kv_len(
         input.input_params.attention.host.kv_seq_lens, seq_id, position_offset);
 
-    if (input.positions_host.dim() != 2) {
-      Slice<int32_t> input_positions = {
-          input.positions_host.data_ptr<int32_t>(),
-          static_cast<size_t>(input.positions_host.numel())};
-      CHECK_LT(static_cast<size_t>(seq_id), input_positions.size())
-          << "decode context position seq_id out of range, seq_id=" << seq_id;
-      const int32_t current_position =
-          input_positions[seq_id] + position_offset;
+    CHECK_LT(static_cast<size_t>(seq_id), input_positions.size())
+        << "decode context position seq_id out of range, seq_id=" << seq_id;
+    const int32_t current_position =
+        input_positions[seq_id] + position_offset;
+    CHECK_GE(current_position, 0)
+        << "invalid decode context position, seq_id=" << seq_id
+        << ", current_position=" << current_position;
+    if (!use_mrope_positions) {
       CHECK_EQ(current_position + 1, current_kv_len)
           << "decode context position/kv_len mismatch, seq_id=" << seq_id
           << ", current_position=" << current_position
           << ", current_kv_len=" << current_kv_len;
     }
 
-    specBuilder::RowSpec row;
-    row.seq_id = seq_id;
-    row.token_id = (use_cache_correction || use_fake_context) ? state.token_id
-                                                              : input_token_id;
-    row.position_offset = position_offset;
-    row.append_kv_len = false;
-    specBuilder::append_decode_row(row_ctx, row, options_.block_size(), buf);
+    buf.out_token_ids.emplace_back((use_cache_correction || use_fake_context)
+                                       ? state.token_id
+                                       : input_token_id);
+    if (use_mrope_positions) {
+      for (int32_t dim = 0; dim < 3; ++dim) {
+        buf.out_positions.emplace_back(current_position);
+      }
+      ++buf.out_position_columns;
+    } else {
+      buf.out_positions.emplace_back(current_position);
+    }
     specBuilder::append_seq_len_by_layout(kv_seq_lens_vec, current_kv_len);
   }
 
