@@ -1233,6 +1233,14 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
                              specBuilder::make_positions_tensor(buf),
                              token_options,
                              position_options);
+  const int32_t draft_extend_rows = specBuilder::position_column_count(buf);
+  LOG_FIRST_N(INFO, 20)
+      << "MTP draft extend input, use_mrope_positions="
+      << buf.use_mrope_positions << ", base_num_sequences=" << num_sequences
+      << ", token_rows=" << buf.out_token_ids.size()
+      << ", position_rows=" << draft_extend_rows
+      << ", flattened_position_values=" << buf.out_positions.size()
+      << ", use_chunked_prefill=" << use_chunked_prefill;
   if (use_chunked_prefill) {
     input_params.meta.num_sequences = num_sequences;
     input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
@@ -1252,8 +1260,7 @@ void MTPWorkerImpl::prepare_draft_extend_inputs(
                                      std::move(buf.out_kv_seq_lens),
                                      /*update_block_tables=*/false);
   } else {
-    input_params.meta.num_sequences =
-        static_cast<int32_t>(buf.out_positions.size());
+    input_params.meta.num_sequences = draft_extend_rows;
     input_params.meta.batch_forward_type = BatchForwardType::DECODE;
     specBuilder::update_input_params(input_params,
                                      buf,

@@ -316,6 +316,24 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
            << " in_spec_verify_phase: " << in_spec_verify_phase
            << " q_max_seq_len: " << params_single.meta.q_max_seq_len
            << " n_layers: " << args_.n_layers();
+  LOG_FIRST_N(INFO, 40)
+      << "ACL graph run candidate, model_type=" << args_.model_type()
+      << ", is_decode=" << in_decoding_phase
+      << ", is_spec_verify_phase=" << in_spec_verify_phase
+      << ", is_spec_verify=" << params_single.is_spec_verify
+      << ", tokens_shape=" << tokens_tensor.sizes()
+      << ", positions_shape=" << positions_tensor.sizes()
+      << ", num_sequences=" << params_single.meta.num_sequences
+      << ", q_max_seq_len=" << params_single.meta.q_max_seq_len
+      << ", kv_max_seq_len=" << params_single.meta.kv_max_seq_len
+      << ", input_embedding_defined="
+      << params_single.embedding.input_embedding.defined();
+  if (params_single.embedding.input_embedding.defined()) {
+    LOG_FIRST_N(INFO, 40)
+        << "ACL graph input_embedding shape, model_type="
+        << args_.model_type()
+        << ", shape=" << params_single.embedding.input_embedding.sizes();
+  }
   if ((!in_decoding_phase && !in_spec_verify_phase) || args_.n_layers() == 1) {
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in eager mode";
