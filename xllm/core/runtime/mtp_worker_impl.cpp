@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
@@ -114,6 +115,24 @@ torch::Tensor to_cpu_int_tensor_for_read(const torch::Tensor& values) {
                  torch::TensorOptions().dtype(torch::kInt).device(torch::kCPU),
                  false)
       .contiguous();
+}
+
+std::string summarize_ints(const std::vector<int32_t>& values,
+                           size_t limit = 12) {
+  std::ostringstream oss;
+  oss << "[";
+  const size_t n = std::min(values.size(), limit);
+  for (size_t i = 0; i < n; ++i) {
+    if (i > 0) {
+      oss << ",";
+    }
+    oss << values[i];
+  }
+  if (values.size() > limit) {
+    oss << ",...";
+  }
+  oss << "]";
+  return oss.str();
 }
 
 bool has_mtp_prefill_placeholder_extra_token(
@@ -1040,6 +1059,22 @@ void MTPWorkerImpl::prepare_validate_inputs(const ForwardInput& input,
       << "validate kv slots/tokens mismatch";
   CHECK_EQ(specBuilder::position_column_count(buf), buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
+  LOG_FIRST_N(INFO, 20)
+      << "MTP validate input, use_mrope_positions="
+      << buf.use_mrope_positions << ", num_sequences=" << num_sequences
+      << ", num_val_tokens=" << num_val_tokens
+      << ", token_rows=" << buf.out_token_ids.size()
+      << ", position_rows=" << specBuilder::position_column_count(buf)
+      << ", flattened_position_values=" << buf.out_positions.size()
+      << ", use_atb_spec_kernel=" << use_atb_spec_kernel
+      << ", tokens=" << summarize_ints(buf.out_token_ids)
+      << ", positions=" << summarize_ints(buf.out_positions)
+      << ", slots=" << summarize_ints(buf.out_new_cache_slots)
+      << ", q_lens=" << summarize_ints(buf.out_q_seq_lens)
+      << ", kv_lens=" << summarize_ints(buf.out_kv_seq_lens)
+      << ", block_tables=" << summarize_ints(buf.out_block_tables)
+      << ", input_embedding_defined="
+      << input_params.embedding.input_embedding.defined();
 
   set_token_position_tensors(validate_input,
                              buf.out_token_ids,

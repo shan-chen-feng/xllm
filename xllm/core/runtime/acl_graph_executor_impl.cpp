@@ -41,6 +41,7 @@ namespace xllm::npu {
 
 namespace {
 constexpr uint64_t kSpecVerifyGraphKeyMask = 1ull << 63;
+constexpr uint64_t kInputEmbeddingGraphKeyMask = 1ull << 62;
 constexpr uint64_t kSpecVerifyQMaxSeqLenShift = 32;
 
 std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
@@ -437,6 +438,12 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   }
 
   const uint64_t graph_key = get_graph_key(bucket_num_tokens, params_single);
+  LOG_FIRST_N(INFO, 40)
+      << "ACL graph key selected, model_type=" << args_.model_type()
+      << ", graph_key=" << graph_key
+      << ", bucket_num_tokens=" << bucket_num_tokens
+      << ", input_embedding_defined="
+      << params_single.embedding.input_embedding.defined();
 
   // Check if captured graph exists for this bucket num_tokens
   auto it = graphs_.find(graph_key);
@@ -549,14 +556,18 @@ uint32_t AclGraphExecutorImpl::get_bucket_num_tokens(
 uint64_t AclGraphExecutorImpl::get_graph_key(
     uint32_t bucket_num_tokens,
     const ModelInputParams& params) const {
+  uint64_t graph_key = static_cast<uint64_t>(bucket_num_tokens);
+  if (params.embedding.input_embedding.defined()) {
+    graph_key |= kInputEmbeddingGraphKeyMask;
+  }
   if (params.is_spec_verify &&
       params.meta.batch_forward_type.is_chunked_prefill()) {
     const uint64_t q_max_seq_len =
         static_cast<uint64_t>(std::max<int32_t>(params.meta.q_max_seq_len, 1));
-    return static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
-           (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
+    graph_key |=
+        kSpecVerifyGraphKeyMask | (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
   }
-  return static_cast<uint64_t>(bucket_num_tokens);
+  return graph_key;
 }
 
 }  // namespace xllm::npu
