@@ -277,26 +277,25 @@ void append_decode_row(const DecodeRowContext& ctx,
     buf.out_token_ids.emplace_back(resolve_row_token_id(ctx, row));
   }
   if (ctx.use_mrope_positions) {
-    buf.use_mrope_positions = true;
+    buf.position_helper.use_mrope_positions = true;
     // Decode emits text tokens only. Preserve the mRoPE [3, N] layout for
     // downstream graph stability, but use the text position from dim 0 for all
     // three axes instead of extending image h/w axes.
     const int32_t text_position =
         ctx.positions[row.seq_id] + row.position_offset;
     CHECK_GE(text_position, 0) << "invalid decode mRoPE text position";
-    VLOG(3) << "Build decode mRoPE text position, seq_id=" << row.seq_id
-            << ", base_text_position=" << ctx.positions[row.seq_id]
-            << ", position_offset=" << row.position_offset
-            << ", text_position=" << text_position;
-    for (int32_t dim = 0; dim < 3; ++dim) {
-      buf.out_positions.emplace_back(text_position);
+    if (VLOG_IS_ON(50)) {
+      VLOG(50) << "Build decode mRoPE text position, seq_id=" << row.seq_id
+              << ", base_text_position=" << ctx.positions[row.seq_id]
+              << ", position_offset=" << row.position_offset
+              << ", text_position=" << text_position;
     }
-    ++buf.out_position_columns;
+    buf.position_helper.append_out_position_id(text_position);
   } else {
     const int32_t model_position =
         ctx.positions[row.seq_id] + row.position_offset;
     CHECK_GE(model_position, 0) << "invalid decode model position";
-    buf.out_positions.emplace_back(model_position);
+    buf.position_helper.append_out_position_id(model_position);
   }
 
   if (ctx.model_managed_multiblock) {
@@ -425,34 +424,6 @@ torch::Tensor build_q_cu_seq_lens_tensor(const ModelInputParams& params,
   }
   return torch::tensor(q_cu_seq_lens_vec,
                        torch::dtype(torch::kInt).device(device));
-}
-
-int32_t position_column_count(const DecodeBuildBuffers& buf) {
-  if (buf.use_mrope_positions) {
-    CHECK_EQ(buf.out_positions.size(),
-             static_cast<size_t>(buf.out_position_columns) * 3)
-        << "mRoPE position buffer size mismatch";
-    return buf.out_position_columns;
-  }
-  return static_cast<int32_t>(buf.out_positions.size());
-}
-
-torch::Tensor make_positions_tensor(const DecodeBuildBuffers& buf) {
-  torch::Tensor positions =
-      torch::empty({static_cast<int64_t>(buf.out_positions.size())},
-                   torch::TensorOptions()
-                       .dtype(torch::kInt)
-                       .device(torch::kCPU)
-                       .pinned_memory(true));
-  std::copy(buf.out_positions.begin(),
-            buf.out_positions.end(),
-            positions.data_ptr<int32_t>());
-  if (buf.use_mrope_positions) {
-    return positions.view({buf.out_position_columns, 3})
-        .transpose(0, 1)
-        .contiguous();
-  }
-  return positions;
 }
 
 void update_input_params(ModelInputParams& input_params,

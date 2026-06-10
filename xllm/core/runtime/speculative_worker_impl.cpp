@@ -153,9 +153,9 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
   // Preserve the mRoPE [3, N] position layout when the incoming decode input
   // uses it. Decode tokens are text-only, but keeping the shape stable avoids
   // switching RoPE paths and is friendlier to future graph capture/replay.
-  buf.out_positions.reserve(inputs.positions_host.dim() == 2
-                                ? static_cast<size_t>(num_sequences) * 3
-                                : static_cast<size_t>(num_sequences));
+  buf.position_helper.use_mrope_positions = inputs.positions_host.dim() == 2 &&
+                             inputs.positions_host.size(0) == 3;
+  buf.position_helper.reserve_out_position_id(num_sequences);
   buf.out_kv_seq_lens.reserve(num_sequences);
   buf.out_new_cache_slots.reserve(num_sequences);
   specBuilder::DecodeRowContext row_ctx =
@@ -173,12 +173,12 @@ ForwardInput SpeculativeWorkerImpl::update_input_by_last_step_output(
 
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
       << "step-update kv slots/tokens mismatch";
-  CHECK_EQ(specBuilder::position_column_count(buf), buf.out_token_ids.size())
+  CHECK_EQ(buf.position_helper.out_position_columns, buf.out_token_ids.size())
       << "step-update positions/tokens mismatch";
 
   set_token_position_tensors(new_inputs,
                              buf.out_token_ids,
-                             specBuilder::make_positions_tensor(buf),
+                             buf.position_helper.make_cpu_position_tensor(),
                              inputs.token_ids.options(),
                              inputs.positions.options());
   // update the input_params
@@ -237,15 +237,16 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
       specBuilder::make_decode_row_context(input);
 
   Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
+  Slice<int32_t> positions = tensor_slice(input.positions_host);
   Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
   specBuilder::DecodeBuildBuffers buf;
   buf.out_token_ids.reserve(total_num_val_tokens);
   // Preserve the mRoPE [3, N] position layout when the incoming decode input
   // uses it. Decode tokens are text-only, but keeping the shape stable avoids
   // switching RoPE paths and is friendlier to future graph capture/replay.
-  buf.out_positions.reserve(input.positions_host.dim() == 2
-                                ? static_cast<size_t>(total_num_val_tokens) * 3
-                                : static_cast<size_t>(total_num_val_tokens));
+  buf.position_helper.use_mrope_positions = input.positions_host.dim() == 2 &&
+                             input.positions_host.size(0) == 3;
+  buf.position_helper.reserve_out_position_id(total_num_val_tokens);
   buf.out_new_cache_slots.reserve(total_num_val_tokens);
   if (!::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
     buf.out_kv_seq_lens.reserve(total_num_val_tokens);
@@ -263,7 +264,6 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
     int32_t kv_len =
         specBuilder::calc_kv_len(kv_seq_lens, seq_id, /*offset=*/0);
     if (input.positions_host.dim() != 2) {
-      Slice<int32_t> positions = tensor_slice(input.positions_host);
       int32_t start_position = positions[seq_id];
       CHECK_EQ(start_position + 1, kv_len)
           << "validate position/kv_len mismatch, seq_id=" << seq_id
@@ -299,12 +299,12 @@ void SpeculativeWorkerImpl::prepare_validate_inputs(
 
   CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
       << "validate kv slots/tokens mismatch";
-  CHECK_EQ(specBuilder::position_column_count(buf), buf.out_token_ids.size())
+  CHECK_EQ(buf.position_helper.out_position_columns, buf.out_token_ids.size())
       << "validate positions/tokens mismatch";
 
   set_token_position_tensors(validate_input,
                              buf.out_token_ids,
-                             specBuilder::make_positions_tensor(buf),
+                             buf.position_helper.make_cpu_position_tensor(),
                              token_options,
                              position_options);
   // update the input_params

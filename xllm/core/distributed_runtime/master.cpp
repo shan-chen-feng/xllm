@@ -50,7 +50,6 @@ limitations under the License.
 #include "rec_engine.h"
 #include "rec_master.h"
 #include "speculative_engine.h"
-#include "util/device_name_utils.h"
 #include "util/model_config_utils.h"
 #include "util/scope_guard.h"
 #include "util/timer.h"
@@ -349,7 +348,7 @@ Master::Master(const Options& options, EngineType type)
         engine_ =
             std::make_unique<SpeculativeEngineBase<VLMEngine>>(spec_options);
       } else {
-        engine_ = std::make_unique<SpeculativeEngine>(spec_options);
+        engine_ = std::make_unique<SpeculativeEngineBase<LLMEngine>>(spec_options);
       }
     }
   } else if (type == EngineType::LLM) {
