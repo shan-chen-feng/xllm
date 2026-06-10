@@ -136,10 +136,10 @@ void clear_ready_events(ForwardInput& input) {
   input.metadata_ready_event.reset();
 }
 
-std::optional<ForwardOutput> run_llm_no_sync_impl(LLMWorkerImpl& worker,
-                                                  const ForwardInput& input,
-                                                  Stream& prepare_stream,
-                                                  Stream& compute_stream) {
+std::optional<ForwardOutput> run_worker_no_sync_impl(WorkerImpl& worker,
+                                                     const ForwardInput& input,
+                                                     Stream& prepare_stream,
+                                                     Stream& compute_stream) {
   ForwardInput processed_input;
   worker.prepare_work_before_execute_on_stream(
       input, processed_input, prepare_stream);
@@ -662,9 +662,9 @@ void MTPWorkerImpl::prepare_work_before_execute(const ForwardInput& input,
 std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
     const ForwardInput& input) {
   if (!input.input_params.meta.batch_forward_type.is_decode()) {
-    auto output = run_llm_no_sync_impl(
+    auto output = run_worker_no_sync_impl(
         *target_impl_, input, *prepare_stream_, *compute_stream_);
-    auto draft_output = run_llm_no_sync_impl(
+    auto draft_output = run_worker_no_sync_impl(
         *draft_impl_, input, *prepare_stream_, *compute_stream_);
     (void)draft_output;
     clear_all_output_embeddings(*output);
@@ -676,14 +676,14 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
       token_num *= 2;
     }
     ForwardOutput draft_extend_output =
-        run_llm_no_sync_impl(
+        run_worker_no_sync_impl(
             *draft_impl_, new_input, *prepare_stream_, *compute_stream_)
             .value();
     (void)draft_extend_output;
 
     for (int32_t i = 1; i < options_.num_speculative_tokens(); ++i) {
       ForwardOutput draft_output =
-          run_llm_no_sync_impl(
+          run_worker_no_sync_impl(
               *draft_impl_, input, *prepare_stream_, *compute_stream_)
               .value();
       (void)draft_output;
@@ -695,7 +695,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
       token_num *= options_.num_speculative_tokens() + 1;
     }
     ForwardOutput output =
-        run_llm_no_sync_impl(
+        run_worker_no_sync_impl(
             *target_impl_, new_input, *prepare_stream_, *compute_stream_)
             .value();
     clear_all_output_embeddings(output);
@@ -708,7 +708,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   Timer timer;
   // run the target model to get first token and hidden states
   ForwardOutput output =
-      run_llm_no_sync_impl(
+      run_worker_no_sync_impl(
           *target_impl_, input, *prepare_stream_, *compute_stream_)
           .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
@@ -745,7 +745,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   // generate kv cache for draft model
   timer.reset();
   ForwardOutput draft_output =
-      run_llm_no_sync_impl(
+      run_worker_no_sync_impl(
           *draft_impl_, prefill_input, *prepare_stream_, *compute_stream_)
           .value();
   process_draft_sample_output(draft_output.sample_output);
@@ -907,7 +907,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
   prepare_draft_extend_inputs(input, last_states, current_draft_input);
   draft_outputs.reserve(num_speculative_tokens);
   for (int32_t draft_idx = 0; draft_idx < num_speculative_tokens; ++draft_idx) {
-    std::optional<ForwardOutput> draft_output_opt = run_llm_no_sync_impl(
+    std::optional<ForwardOutput> draft_output_opt = run_worker_no_sync_impl(
         *draft_impl_, current_draft_input, *prepare_stream_, *compute_stream_);
     // Overlap next-step input preparation with async draft forward.
     if (draft_idx == num_speculative_tokens - 1) {
@@ -989,7 +989,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   fill_validate_input_from_draft_outputs(
       draft_outputs, validate_input, *compute_stream_);
   ForwardOutput target_output =
-      run_llm_no_sync_impl(
+      run_worker_no_sync_impl(
           *target_impl_, validate_input, *prepare_stream_, *compute_stream_)
           .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
