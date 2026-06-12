@@ -87,6 +87,11 @@ class AclGraph {
   // Initialize capture stream if not already initialized
   void initialize_capture_stream(c10::DeviceIndex device_index);
   void make_current_stream_wait_for_graph(aclrtStream current_stream);
+  void make_stream_wait_stream(aclrtStream wait_stream,
+                               aclrtStream record_stream,
+                               aclrtEvent event) const;
+  void begin_side_stream_capture(aclrtStream side_stream) const;
+  void end_side_stream_capture(aclrtStream side_stream) const;
   void prepare_model_graph_metadata(CausalLM* model,
                                     const torch::Tensor& positions,
                                     ModelInputParams& params);
@@ -104,6 +109,8 @@ class AclGraph {
   std::optional<c10_npu::NPUStream> capture_stream_;
   aclrtStream graph_stream_ = nullptr;
   aclrtEvent replay_done_event_ = nullptr;
+  aclrtEvent side_stream_begin_event_ = nullptr;
+  aclrtEvent side_stream_end_event_ = nullptr;
   c10::DeviceIndex device_index_;
 };
 

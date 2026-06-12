@@ -17,11 +17,13 @@ limitations under the License.
 
 #if defined(USE_NPU)
 #include <acl/acl.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include "layers/npu/buffer/atb_workspace.h"
 #endif
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "core/framework/model/model_args.h"
@@ -111,6 +113,7 @@ class ModelContext {
 #if defined(USE_NPU)
   // used for npu atb
   atb::Context* context_ = nullptr;
+  std::optional<c10_npu::NPUStream> prefetch_weight_npu_stream_;
   aclrtStream prefetch_weight_stream_ = nullptr;
   std::shared_ptr<AtbWorkspace> atb_workspace_;
 #endif

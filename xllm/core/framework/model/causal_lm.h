@@ -17,6 +17,8 @@ limitations under the License.
 #pragma once
 // clang-format off
 #if defined(USE_NPU)
+#include <acl/acl.h>
+
 #include "graph/types.h"
 #include "layers/npu/npu_lm_head_impl.h"
 #include "layers/npu/npu_word_embedding_impl.h"
@@ -138,6 +140,8 @@ class CausalLM : public torch::nn::Module {
     NOT_IMPLEMENTED();
     return false;
   }
+
+  virtual aclrtStream get_prefetch_weight_stream() { return nullptr; }
 #endif
 
   virtual layer::LmHead get_lm_head() {
@@ -320,6 +324,13 @@ class CausalLMImpl : public CausalLM {
                                                      num_cached_slots,
                                                      requested_rolling_slots,
                                                      model_id);
+  }
+
+  aclrtStream get_prefetch_weight_stream() override {
+    if constexpr (detail::has_get_prefetch_weight_stream<Model>::value) {
+      return model_->get_prefetch_weight_stream();
+    }
+    return CausalLM::get_prefetch_weight_stream();
   }
 #endif
 

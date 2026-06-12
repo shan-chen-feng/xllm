@@ -406,6 +406,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
  public:
   LlmForCausalLMImplBase(const ModelContext& context) {
     tie_word_embeddings = context.get_model_args().tie_word_embeddings();
+    prefetch_weight_stream_ = context.get_prefetch_weight_stream();
     // register submodules
     model_ = register_module("model", LlmModelType(context));
 
@@ -578,6 +579,10 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     model_->set_rolling_load_manager(mgr);
   }
 
+  virtual aclrtStream get_prefetch_weight_stream() {
+    return prefetch_weight_stream_;
+  }
+
   virtual bool init_or_refresh_rolling_runtime(Stream* load_stream,
                                                Stream* compute_stream,
                                                int32_t num_cached_slots,
@@ -637,6 +642,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   bool keep_host_weights{false};
   std::shared_ptr<layer::RollingWeightBuffer> rolling_weight_buffer_{nullptr};
   std::unique_ptr<RollingLoadManager> rolling_load_manager_{nullptr};
+  aclrtStream prefetch_weight_stream_ = nullptr;
   // test
   layer::NpuLmHead npu_lm_head_{nullptr};
 };

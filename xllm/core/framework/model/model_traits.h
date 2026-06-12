@@ -208,6 +208,15 @@ struct has_init_or_refresh_rolling_runtime<
         std::declval<int32_t>(),
         std::declval<const std::string&>()))>> : std::true_type {};
 
+template <typename T, typename = void>
+struct has_get_prefetch_weight_stream : std::false_type {};
+
+template <typename T>
+struct has_get_prefetch_weight_stream<
+    T,
+    std::void_t<decltype(std::declval<T>()->get_prefetch_weight_stream())>>
+    : std::true_type {};
+
 #endif
 }  // namespace detail
 }  // namespace xllm
