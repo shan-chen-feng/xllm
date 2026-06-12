@@ -18,6 +18,7 @@ limitations under the License.
 // clang-format off
 #if defined(USE_NPU)
 #include <acl/acl.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include "graph/types.h"
 #include "layers/npu/npu_lm_head_impl.h"
@@ -30,6 +31,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -142,6 +144,9 @@ class CausalLM : public torch::nn::Module {
   }
 
   virtual aclrtStream get_prefetch_weight_stream() { return nullptr; }
+  virtual std::optional<c10_npu::NPUStream> get_prefetch_weight_npu_stream() {
+    return std::nullopt;
+  }
 #endif
 
   virtual layer::LmHead get_lm_head() {
@@ -331,6 +336,13 @@ class CausalLMImpl : public CausalLM {
       return model_->get_prefetch_weight_stream();
     }
     return CausalLM::get_prefetch_weight_stream();
+  }
+
+  std::optional<c10_npu::NPUStream> get_prefetch_weight_npu_stream() override {
+    if constexpr (detail::has_get_prefetch_weight_npu_stream<Model>::value) {
+      return model_->get_prefetch_weight_npu_stream();
+    }
+    return CausalLM::get_prefetch_weight_npu_stream();
   }
 #endif
 

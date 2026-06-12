@@ -143,7 +143,8 @@ bool AclGraph::capture(CausalLM* model,
     // other threads to execute synchronous operations
     graph_.capture_begin(
         {0, 0}, aclmdlRICaptureMode::ACL_MODEL_RI_CAPTURE_MODE_THREAD_LOCAL);
-    aclrtStream side_stream = model->get_prefetch_weight_stream();
+    std::optional<c10_npu::NPUStream> side_stream =
+        model->get_prefetch_weight_npu_stream();
     begin_side_stream_capture(side_stream);
     // Execute forward pass - NPUGraph mempool manages temporary tensors
     auto forward_result =
@@ -186,14 +187,6 @@ AclGraph::~AclGraph() {
     aclrtDestroyEvent(replay_done_event_);
     replay_done_event_ = nullptr;
   }
-  if (side_stream_begin_event_ != nullptr) {
-    aclrtDestroyEvent(side_stream_begin_event_);
-    side_stream_begin_event_ = nullptr;
-  }
-  if (side_stream_end_event_ != nullptr) {
-    aclrtDestroyEvent(side_stream_end_event_);
-    side_stream_end_event_ = nullptr;
-  }
 }
 
 void AclGraph::initialize_capture_stream(c10::DeviceIndex device_index) {
@@ -206,12 +199,6 @@ void AclGraph::initialize_capture_stream(c10::DeviceIndex device_index) {
   CHECK_EQ(aclrtCreateEventWithFlag(&replay_done_event_, ACL_EVENT_SYNC),
            ACL_SUCCESS)
       << "Failed to create ACL graph replay completion event";
-  CHECK_EQ(aclrtCreateEventWithFlag(&side_stream_begin_event_, ACL_EVENT_SYNC),
-           ACL_SUCCESS)
-      << "Failed to create ACL graph side stream begin event";
-  CHECK_EQ(aclrtCreateEventWithFlag(&side_stream_end_event_, ACL_EVENT_SYNC),
-           ACL_SUCCESS)
-      << "Failed to create ACL graph side stream end event";
   LOG(INFO) << "Initialized capture_stream"
             << ", id: " << capture_stream_.value().id()
             << ", device_index: " << device_index;
@@ -230,35 +217,32 @@ void AclGraph::make_current_stream_wait_for_graph(aclrtStream current_stream) {
   }
 }
 
-void AclGraph::make_stream_wait_stream(aclrtStream wait_stream,
-                                       aclrtStream record_stream,
-                                       aclrtEvent event) const {
-  CHECK_NE(wait_stream, nullptr) << "wait_stream is null";
-  CHECK_NE(record_stream, nullptr) << "record_stream is null";
-  CHECK_NE(event, nullptr) << "stream dependency event is null";
+void AclGraph::make_stream_wait_stream(
+    const c10_npu::NPUStream& wait_stream,
+    const c10_npu::NPUStream& record_stream) const {
   if (wait_stream == record_stream) {
     return;
   }
 
-  CHECK_EQ(aclrtRecordEvent(event, record_stream), ACL_SUCCESS)
-      << "aclrtRecordEvent(stream dependency) failed";
-  CHECK_EQ(aclrtStreamWaitEvent(wait_stream, event), ACL_SUCCESS)
-      << "aclrtStreamWaitEvent(stream dependency) failed";
+  c10_npu::NPUEvent event;
+  event.record(record_stream);
+  event.block(wait_stream);
 }
 
-void AclGraph::begin_side_stream_capture(aclrtStream side_stream) const {
-  if (side_stream == nullptr) {
+void AclGraph::begin_side_stream_capture(
+    const std::optional<c10_npu::NPUStream>& side_stream) const {
+  if (!side_stream.has_value()) {
     return;
   }
-  make_stream_wait_stream(
-      side_stream, graph_stream_, side_stream_begin_event_);
+  make_stream_wait_stream(side_stream.value(), c10_npu::getCurrentNPUStream());
 }
 
-void AclGraph::end_side_stream_capture(aclrtStream side_stream) const {
-  if (side_stream == nullptr) {
+void AclGraph::end_side_stream_capture(
+    const std::optional<c10_npu::NPUStream>& side_stream) const {
+  if (!side_stream.has_value()) {
     return;
   }
-  make_stream_wait_stream(graph_stream_, side_stream, side_stream_end_event_);
+  make_stream_wait_stream(c10_npu::getCurrentNPUStream(), side_stream.value());
 }
 
 void AclGraph::prepare_model_graph_metadata(CausalLM* model,

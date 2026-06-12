@@ -21,6 +21,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <typeinfo>
 #include <vector>
@@ -407,6 +408,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   LlmForCausalLMImplBase(const ModelContext& context) {
     tie_word_embeddings = context.get_model_args().tie_word_embeddings();
     prefetch_weight_stream_ = context.get_prefetch_weight_stream();
+    prefetch_weight_npu_stream_ = context.get_prefetch_weight_npu_stream();
     // register submodules
     model_ = register_module("model", LlmModelType(context));
 
@@ -583,6 +585,10 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     return prefetch_weight_stream_;
   }
 
+  virtual std::optional<c10_npu::NPUStream> get_prefetch_weight_npu_stream() {
+    return prefetch_weight_npu_stream_;
+  }
+
   virtual bool init_or_refresh_rolling_runtime(Stream* load_stream,
                                                Stream* compute_stream,
                                                int32_t num_cached_slots,
@@ -643,6 +649,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   std::shared_ptr<layer::RollingWeightBuffer> rolling_weight_buffer_{nullptr};
   std::unique_ptr<RollingLoadManager> rolling_load_manager_{nullptr};
   aclrtStream prefetch_weight_stream_ = nullptr;
+  std::optional<c10_npu::NPUStream> prefetch_weight_npu_stream_;
   // test
   layer::NpuLmHead npu_lm_head_{nullptr};
 };

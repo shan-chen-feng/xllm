@@ -85,6 +85,9 @@ class ModelContext {
   aclrtStream get_prefetch_weight_stream() const {
     return prefetch_weight_stream_;
   }
+  std::optional<c10_npu::NPUStream> get_prefetch_weight_npu_stream() const {
+    return prefetch_weight_npu_stream_;
+  }
   void set_atb_execute_stream(void* stream) const;
   std::shared_ptr<AtbWorkspace> get_atb_workspace() const {
     return atb_workspace_;
