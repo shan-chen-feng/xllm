@@ -116,9 +116,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
     if (!enable_schedule_overlap() && options_.backend() == "llm") {
       aclrtStream current_acl_stream =
           c10_npu::getCurrentNPUStream(device_.index()).stream();
-      atb::Context* atb_context =
-          const_cast<atb::Context*>(context_.get_atb_context());
-      atb_context->SetExecuteStream(current_acl_stream);
+      context_.set_atb_execute_stream(current_acl_stream);
       wait_input_ready_events(input, compute_stream);
       return step_internal(input, sync_policy);
     } else {
@@ -141,9 +139,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const ForwardInput& input) {
     if (!enable_schedule_overlap() && options_.backend() == "llm") {
       aclrtStream current_stream =
           c10_npu::getCurrentNPUStream(device_.index()).stream();
-      atb::Context* atb_context =
-          const_cast<atb::Context*>(context_.get_atb_context());
-      atb_context->SetExecuteStream(current_stream);
+      context_.set_atb_execute_stream(current_stream);
       std::unique_ptr<Stream> stream = device_.current_stream();
       wait_input_ready_events(input, *stream);
       return step_internal(input, ForwardSyncPolicy::LEGACY);

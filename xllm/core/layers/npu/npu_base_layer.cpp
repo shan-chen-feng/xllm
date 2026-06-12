@@ -55,6 +55,7 @@ BaseLayer::BaseLayer(const ModelContext& context)
   };
 
   context_ = const_cast<atb::Context*>(context.get_atb_context());
+  prefetch_weight_stream_ = context.get_prefetch_weight_stream();
   work_space_ = context.get_atb_workspace();
 }
 
@@ -83,7 +84,12 @@ atb::Status BaseLayer::execute_node(atb_speed::Model::Node& node,
   //   execution stream
   if (::xllm::ExecutionConfig::get_instance().enable_graph()) {
     void* stream = c10_npu::getCurrentNPUStream(device_.index()).stream();
-    context_->SetExecuteStream(stream);
+    if (prefetch_weight_stream_ != nullptr) {
+      context_->SetExecuteStreams(
+          {reinterpret_cast<aclrtStream>(stream), prefetch_weight_stream_});
+    } else {
+      context_->SetExecuteStream(reinterpret_cast<aclrtStream>(stream));
+    }
   }
   // if (::xllm::ExecutionConfig::get_instance().enable_graph() &&
   // !graph_captured_) {

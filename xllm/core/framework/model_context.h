@@ -80,6 +80,10 @@ class ModelContext {
 
 #if defined(USE_NPU)
   const atb::Context* get_atb_context() const { return context_; }
+  aclrtStream get_prefetch_weight_stream() const {
+    return prefetch_weight_stream_;
+  }
+  void set_atb_execute_stream(void* stream) const;
   std::shared_ptr<AtbWorkspace> get_atb_workspace() const {
     return atb_workspace_;
   }
@@ -106,7 +110,8 @@ class ModelContext {
 
 #if defined(USE_NPU)
   // used for npu atb
-  atb::Context* context_;
+  atb::Context* context_ = nullptr;
+  aclrtStream prefetch_weight_stream_ = nullptr;
   std::shared_ptr<AtbWorkspace> atb_workspace_;
 #endif
 };

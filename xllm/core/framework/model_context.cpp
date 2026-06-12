@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/load_config.h"
 #include "platform/device.h"
 #include "util/env_var.h"
 #if defined(USE_NPU)
@@ -61,7 +62,11 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
   aclError ret = aclrtSetDevice(device_id);
   atb::CreateContext(&context_);
   void* stream = c10_npu::getCurrentNPUStream(device_id).stream();
-  context_->SetExecuteStream(stream);
+  if (::xllm::LoadConfig::get_instance().enable_prefetch_weight()) {
+    ret = aclrtCreateStream(&prefetch_weight_stream_);
+    CHECK_EQ(ret, ACL_SUCCESS) << "Failed to create prefetch weight stream";
+  }
+  set_atb_execute_stream(stream);
   if (should_enable_async_tiling_copy_stream()) {
     context_->SetAsyncTilingCopyStatus(true);
   }
@@ -81,6 +86,15 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
       quant_args_(quant_args),
       tensor_options_(tensor_options),
       context_(context) {}
+
+void ModelContext::set_atb_execute_stream(void* stream) const {
+  if (prefetch_weight_stream_ != nullptr) {
+    context_->SetExecuteStreams(
+        {reinterpret_cast<aclrtStream>(stream), prefetch_weight_stream_});
+  } else {
+    context_->SetExecuteStream(reinterpret_cast<aclrtStream>(stream));
+  }
+}
 #endif
 
 ModelContext ModelContext::with_parallel_args(
@@ -88,6 +102,7 @@ ModelContext ModelContext::with_parallel_args(
 #if defined(USE_NPU)
   ModelContext derived(
       parallel_args, model_args_, quant_args_, tensor_options_, context_);
+  derived.prefetch_weight_stream_ = prefetch_weight_stream_;
   derived.atb_workspace_ = atb_workspace_;
 #else
   ModelContext derived(

@@ -229,6 +229,7 @@ class BaseLayer : public torch::nn::Module {
   int32_t dp_local_tp_rank_;
   int32_t cp_size_;
   atb::Context* context_;
+  aclrtStream prefetch_weight_stream_ = nullptr;
   std::shared_ptr<AtbWorkspace> work_space_ = nullptr;
   std::vector<atb::Tensor> atb_weight_tensors_;
   bool graph_captured_{false};

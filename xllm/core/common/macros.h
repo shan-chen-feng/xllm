@@ -135,9 +135,7 @@ namespace xllm {
   do {                                                                    \
     aclrtStream __current_stream =                                        \
         c10_npu::getCurrentNPUStream((device).index()).stream();          \
-    auto __atb_context =                                                  \
-        const_cast<atb::Context*>((context).get_atb_context());           \
-    __atb_context->SetExecuteStream(__current_stream);                    \
+    (context).set_atb_execute_stream(__current_stream);                   \
   } while (0)
 
 }  // namespace xllm
