@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "core/framework/model_context.h"
 
+#include <glog/logging.h>
 #include <torch/torch.h>
 
 #include "common/global_flags.h"
@@ -60,11 +61,12 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
 #if defined(USE_NPU)
   int32_t device_id = tensor_options.device().index();
   aclError ret = aclrtSetDevice(device_id);
+  CHECK_EQ(ret, ACL_SUCCESS) << "Failed to set NPU device";
   atb::CreateContext(&context_);
   void* stream = c10_npu::getCurrentNPUStream(device_id).stream();
   if (::xllm::LoadConfig::get_instance().enable_prefetch_weight()) {
-    ret = aclrtCreateStream(&prefetch_weight_stream_);
-    CHECK_EQ(ret, ACL_SUCCESS) << "Failed to create prefetch weight stream";
+    prefetch_weight_npu_stream_ = c10_npu::getStreamFromPool(false, device_id);
+    prefetch_weight_stream_ = prefetch_weight_npu_stream_->stream();
   }
   set_atb_execute_stream(stream);
   if (should_enable_async_tiling_copy_stream()) {
@@ -103,6 +105,7 @@ ModelContext ModelContext::with_parallel_args(
   ModelContext derived(
       parallel_args, model_args_, quant_args_, tensor_options_, context_);
   derived.prefetch_weight_stream_ = prefetch_weight_stream_;
+  derived.prefetch_weight_npu_stream_ = prefetch_weight_npu_stream_;
   derived.atb_workspace_ = atb_workspace_;
 #else
   ModelContext derived(

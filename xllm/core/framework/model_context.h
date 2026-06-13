@@ -17,11 +17,13 @@ limitations under the License.
 
 #if defined(USE_NPU)
 #include <acl/acl.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include "layers/npu/buffer/atb_workspace.h"
 #endif
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "core/framework/model/model_args.h"
@@ -83,6 +85,10 @@ class ModelContext {
   aclrtStream get_prefetch_weight_stream() const {
     return prefetch_weight_stream_;
   }
+  const std::optional<c10_npu::NPUStream>& get_prefetch_weight_npu_stream()
+      const {
+    return prefetch_weight_npu_stream_;
+  }
   void set_atb_execute_stream(void* stream) const;
   std::shared_ptr<AtbWorkspace> get_atb_workspace() const {
     return atb_workspace_;
@@ -112,6 +118,7 @@ class ModelContext {
   // used for npu atb
   atb::Context* context_ = nullptr;
   aclrtStream prefetch_weight_stream_ = nullptr;
+  std::optional<c10_npu::NPUStream> prefetch_weight_npu_stream_;
   std::shared_ptr<AtbWorkspace> atb_workspace_;
 #endif
 };

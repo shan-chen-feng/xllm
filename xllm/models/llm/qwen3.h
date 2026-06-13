@@ -15,8 +15,16 @@ limitations under the License.
 
 #pragma once
 
+#include <c10/core/Event.h>
 #include <torch/nn/functional/normalization.h>
 
+#include <optional>
+#if defined(USE_NPU)
+#include <torch_npu/csrc/core/npu/NPUGraphsUtils.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+#endif
+
+#include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_output.h"
 #include "core/util/rec_model_utils.h"
 #if defined(USE_NPU)
@@ -31,7 +39,13 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
  public:
   QWen3ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::Qwen3DecoderLayer>("qwen3",
-                                                   context.get_model_args()) {
+                                                   context.get_model_args())
+#if defined(USE_NPU)
+        ,
+        prefetch_weight_stream_(context.get_prefetch_weight_npu_stream()),
+        device_index_(context.get_tensor_options().device().index())
+#endif
+  {
     // register submodules
     auto model_args = context.get_model_args();
     auto options = context.get_tensor_options();
@@ -101,6 +115,9 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
                               torch::Tensor positions,
                               std::vector<KVCache>& kv_caches,
                               const ModelInputParams& input_params) {
+#if defined(USE_NPU)
+    capture_qwen3_multistream_graph_probe_start(input_params);
+#endif
     bool use_deepstack = input_params.multimodal.deep_stacks.size() > 0;
     ModelInputParams& input_params_new =
         const_cast<ModelInputParams&>(input_params);
@@ -165,6 +182,9 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
                 input_params_new);
       if (!input_params_new.record_layer(static_cast<uint32_t>(i),
                                          h.device())) {
+#if defined(USE_NPU)
+        capture_qwen3_multistream_graph_probe_end(input_params);
+#endif
         return ModelOutput();
       }
 
@@ -175,6 +195,9 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
       }
     }
     auto [hidden_states, residual_out] = norm_(h, residual);
+#if defined(USE_NPU)
+    capture_qwen3_multistream_graph_probe_end(input_params);
+#endif
     return ModelOutput(hidden_states, residual_out);
   }
 
@@ -225,6 +248,49 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
   }
 
  private:
+#if defined(USE_NPU)
+  bool should_capture_qwen3_multistream_graph_probe(
+      const ModelInputParams& input_params) const {
+    if (!::xllm::ExecutionConfig::get_instance().enable_graph() ||
+        !input_params.enable_graph || !prefetch_weight_stream_.has_value()) {
+      return false;
+    }
+    const auto capture_status =
+        static_cast<int>(c10_npu::currentStreamCaptureStatusMayInitCtx());
+    return capture_status != 0;
+  }
+
+  void capture_qwen3_multistream_graph_probe_start(
+      const ModelInputParams& input_params) const {
+    if (!should_capture_qwen3_multistream_graph_probe(input_params)) {
+      return;
+    }
+
+    auto main_stream = c10_npu::getCurrentNPUStream(device_index_).unwrap();
+    auto side_stream = prefetch_weight_stream_.value().unwrap();
+
+    c10::Event main_ready(main_stream.device_type());
+    main_ready.record(main_stream);
+    main_ready.block(side_stream);
+  }
+
+  void capture_qwen3_multistream_graph_probe_end(
+      const ModelInputParams& input_params) const {
+    if (!should_capture_qwen3_multistream_graph_probe(input_params)) {
+      return;
+    }
+
+    auto main_stream = c10_npu::getCurrentNPUStream(device_index_).unwrap();
+    auto side_stream = prefetch_weight_stream_.value().unwrap();
+
+    c10::Event side_ready(side_stream.device_type());
+    side_ready.record(side_stream);
+    side_ready.block(main_stream);
+  }
+
+  std::optional<c10_npu::NPUStream> prefetch_weight_stream_;
+  c10::DeviceIndex device_index_;
+#endif
 #if defined(USE_NPU)
   layer::AttentionMask attn_mask_;
   layer::AttentionMask dense_attn_mask_;
