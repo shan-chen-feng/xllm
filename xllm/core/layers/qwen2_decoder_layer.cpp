@@ -131,14 +131,14 @@ torch::Tensor Qwen2DecoderLayerImpl::forward(
       !attn_metadata.is_chunked_prefill;
   prefetch_mlp_weight = [this, enable_prefetch_this_forward]() {
     if (enable_prefetch_this_forward) {
-      prefetch_weight(mlp_->gate_up_weight(), get_prefetch_coefficient(0.4));
+      prefetch_weight(mlp_->gate_up_weight(), get_prefetch_coefficient(0.2));
     }
   };
   prefetch_next_qkv_weight =
       [this, enable_prefetch_this_forward, &next_qkv_weight]() {
         if (enable_prefetch_this_forward && next_qkv_weight.has_value()) {
           prefetch_weight(next_qkv_weight.value(),
-                          get_prefetch_coefficient(1.0));
+                          get_prefetch_coefficient(0.2));
         }
       };
 #else
