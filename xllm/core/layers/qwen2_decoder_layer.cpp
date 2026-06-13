@@ -15,8 +15,29 @@ limitations under the License.
 
 #include "qwen2_decoder_layer.h"
 
+#if defined(USE_NPU)
+#include <acl/acl.h>
+#include <c10/core/Event.h>
+#include <glog/logging.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+#endif
+
+#include <cstdlib>
+#include <functional>
+
 namespace xllm {
 namespace layer {
+
+#if defined(USE_NPU)
+namespace {
+
+double get_prefetch_coefficient(double default_coefficient) {
+  const char* coefficient = std::getenv("PREFETCH_COEFFOCIENT");
+  return coefficient ? std::atof(coefficient) : default_coefficient;
+}
+
+}  // namespace
+#endif
 
 Qwen2DecoderLayerImpl::Qwen2DecoderLayerImpl(const ModelContext& context,
                                              int32_t layer_id)
@@ -26,6 +47,12 @@ Qwen2DecoderLayerImpl::Qwen2DecoderLayerImpl(const ModelContext& context,
   const auto& options = context.get_tensor_options();
   const std::string mlp_module_prefix =
       layer_id >= 0 ? "model.layers." + std::to_string(layer_id) + ".mlp" : "";
+#if defined(USE_NPU)
+  prefetch_weight_stream_ = context.get_prefetch_weight_npu_stream();
+  device_index_ = options.device().index();
+  enable_libtorch_weight_prefetch_ =
+      model_args.model_type() == "qwen3" && prefetch_weight_stream_.has_value();
+#endif
 
   // Initialize attention layers
   attention_ = register_module("self_attn", Qwen2Attention(context));
@@ -90,24 +117,78 @@ torch::Tensor Qwen2DecoderLayerImpl::forward(
     torch::Tensor& positions,
     const AttentionMetadata& attn_metadata,
     KVCache& kv_cache,
-    const ModelInputParams& input_params) {
+    const ModelInputParams& input_params,
+    const std::optional<torch::Tensor>& next_qkv_weight) {
   auto pre_fp8_scale = attention_->get_fp8_input_scale();
   auto post_fp8_scale = mlp_->get_fp8_input_scale();
+  (void)input_params;
+
+  std::function<void()> prefetch_mlp_weight;
+  std::function<void()> prefetch_next_qkv_weight;
+#if defined(USE_NPU)
+  const bool enable_prefetch_this_forward =
+      enable_libtorch_weight_prefetch_ && !attn_metadata.is_prefill &&
+      !attn_metadata.is_chunked_prefill;
+  prefetch_mlp_weight = [this, enable_prefetch_this_forward]() {
+    if (enable_prefetch_this_forward) {
+      prefetch_weight(mlp_->gate_up_weight(), get_prefetch_coefficient(0.4));
+    }
+  };
+  prefetch_next_qkv_weight =
+      [this, enable_prefetch_this_forward, &next_qkv_weight]() {
+        if (enable_prefetch_this_forward && next_qkv_weight.has_value()) {
+          prefetch_weight(next_qkv_weight.value(),
+                          get_prefetch_coefficient(1.0));
+        }
+      };
+#else
+  (void)next_qkv_weight;
+#endif
 
   // Pre-attention norm
   std::tie(x, residual) = apply_norm(input_norm_, x, residual, pre_fp8_scale);
 
   // Attention
-  x = attention_->forward(positions, x, attn_metadata, kv_cache);
+  x = attention_->forward(
+      positions, x, attn_metadata, kv_cache, prefetch_mlp_weight);
 
   // Post-attention norm
   std::tie(x, residual) = apply_norm(post_norm_, x, residual, post_fp8_scale);
 
   // MLP
-  x = mlp_->forward(x);
+  x = mlp_->forward(x, prefetch_next_qkv_weight);
 
   return x;
 }
+
+#if defined(USE_NPU)
+void Qwen2DecoderLayerImpl::prefetch_weight(const torch::Tensor& weight,
+                                            double coefficient) const {
+  if (!enable_libtorch_weight_prefetch_ || !weight.defined() ||
+      coefficient <= 0.0) {
+    return;
+  }
+
+  const auto prefetch_size =
+      static_cast<size_t>(static_cast<double>(weight.nbytes()) * coefficient);
+  if (prefetch_size == 0) {
+    return;
+  }
+
+  auto main_stream = c10_npu::getCurrentNPUStream(device_index_).unwrap();
+  auto side_stream = prefetch_weight_stream_.value().unwrap();
+
+  c10::Event main_ready(main_stream.device_type());
+  main_ready.record(main_stream);
+  main_ready.block(side_stream);
+
+  const aclError ret = aclrtCmoAsync(weight.data_ptr(),
+                                    prefetch_size,
+                                    ACL_RT_CMO_TYPE_PREFETCH,
+                                    prefetch_weight_stream_.value().stream());
+  CHECK_EQ(ret, ACL_SUCCESS) << "aclrtCmoAsync failed, ret=" << ret;
+}
+#endif
 
 }  // namespace layer
 }  // namespace xllm

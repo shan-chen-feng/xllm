@@ -133,7 +133,8 @@ torch::Tensor Qwen2AttentionImpl::forward(
     const torch::Tensor& positions,
     const torch::Tensor& hidden_states,
     const AttentionMetadata& attn_metadata,
-    KVCache& kv_cache) {
+    KVCache& kv_cache,
+    const std::function<void()>& before_o_proj_reduction) {
   // 1. qkv projection
   auto qkv = qkv_proj_->forward(hidden_states);
 
@@ -189,7 +190,7 @@ torch::Tensor Qwen2AttentionImpl::forward(
   auto out = std::get<0>(attn_->forward(attn_metadata, q, k, v, kv_cache));
 
   // 6. output projection
-  return o_proj_->forward(out);
+  return o_proj_->forward(out, before_o_proj_reduction);
 }
 
 void Qwen2AttentionImpl::load_state_dict(const StateDict& state_dict) {

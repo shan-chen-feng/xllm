@@ -15,6 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#if defined(USE_NPU)
+#include <torch_npu/csrc/core/npu/NPUStream.h>
+#endif
+
 #include <torch/torch.h>
 
 #include <optional>
@@ -45,7 +49,11 @@ class Qwen2DecoderLayerImpl : public torch::nn::Module {
                         torch::Tensor& positions,
                         const AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
-                        const ModelInputParams& input_params);
+                        const ModelInputParams& input_params,
+                        const std::optional<torch::Tensor>& next_qkv_weight =
+                            std::nullopt);
+
+  torch::Tensor qkv_weight() const { return attention_->qkv_weight(); }
 
  private:
   Qwen2Attention attention_{nullptr};
@@ -54,12 +62,21 @@ class Qwen2DecoderLayerImpl : public torch::nn::Module {
   RMSNorm post_norm_{nullptr};
 
   ParallelArgs parallel_args_;
+#if defined(USE_NPU)
+  std::optional<c10_npu::NPUStream> prefetch_weight_stream_;
+  c10::DeviceIndex device_index_ = 0;
+  bool enable_libtorch_weight_prefetch_ = false;
+#endif
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>> apply_norm(
       RMSNorm& norm,
       torch::Tensor& input,
       std::optional<torch::Tensor>& residual,
       const std::optional<torch::Tensor>& fp8_scale);
+
+#if defined(USE_NPU)
+  void prefetch_weight(const torch::Tensor& weight, double coefficient) const;
+#endif
 };
 TORCH_MODULE(Qwen2DecoderLayer);
 

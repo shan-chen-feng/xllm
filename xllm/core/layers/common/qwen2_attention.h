@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <functional>
+
 #include "attention.h"
 #include "framework/kv_cache/kv_cache.h"
 #include "framework/model/model_args.h"
@@ -38,12 +40,16 @@ class Qwen2AttentionImpl : public torch::nn::Module {
   torch::Tensor forward(const torch::Tensor& positions,
                         const torch::Tensor& hidden_states,
                         const AttentionMetadata& attn_metadata,
-                        KVCache& kv_cache);
+                        KVCache& kv_cache,
+                        const std::function<void()>& before_o_proj_reduction =
+                            nullptr);
 
   void load_state_dict(const StateDict& state_dict);
 
   // Get FP8 input scale from qkv_proj for fused RMSNorm+FP8 quantization
   std::optional<torch::Tensor> get_fp8_input_scale() const;
+
+  torch::Tensor qkv_weight() const { return qkv_proj_->weight(); }
 
  private:
   int64_t num_heads_;

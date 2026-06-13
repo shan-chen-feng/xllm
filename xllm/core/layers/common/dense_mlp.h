@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <functional>
+
 #include "activation.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -42,7 +44,9 @@ class DenseMLPImpl : public torch::nn::Module {
                const std::string& module_prefix = "",
                double swiglu_limit = 0.0);
 
-  torch::Tensor forward(const torch::Tensor& hidden_states);
+  torch::Tensor forward(
+      const torch::Tensor& hidden_states,
+      const std::function<void()>& before_down_proj_reduction = nullptr);
 
   void load_state_dict(const StateDict& state_dict);
   void load_state_dict(const StateDict& state_dict,
@@ -51,6 +55,8 @@ class DenseMLPImpl : public torch::nn::Module {
 
   // Get FP8 input scale from gate_up_proj for fused RMSNorm+FP8 quantization
   std::optional<torch::Tensor> get_fp8_input_scale() const;
+
+  torch::Tensor gate_up_weight() const { return gate_up_proj_->weight(); }
 
  private:
   bool is_gated_;

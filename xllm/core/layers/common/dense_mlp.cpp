@@ -93,13 +93,15 @@ DenseMLPImpl::DenseMLPImpl(int64_t hidden_size,
                                                  down_proj_extra_args));
 }
 
-torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
+torch::Tensor DenseMLPImpl::forward(
+    const torch::Tensor& hidden_states,
+    const std::function<void()>& before_down_proj_reduction) {
   // input shape: [num_tokens, hidden_size]
   auto gate_up = gate_up_proj_->forward(hidden_states);
 
   if (is_smoothquant_) {
     // For w8a8 quantization, the active operation is fused with the down_proj
-    return down_proj_->forward(gate_up);
+    return down_proj_->forward(gate_up, before_down_proj_reduction);
   } else {
     torch::Tensor output;
     if (Device::type_str() != "npu") {
@@ -110,7 +112,7 @@ torch::Tensor DenseMLPImpl::forward(const torch::Tensor& hidden_states) {
     }
 
     act_->forward(gate_up, output);
-    return down_proj_->forward(output);
+    return down_proj_->forward(output, before_down_proj_reduction);
   }
 }
 

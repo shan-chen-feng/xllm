@@ -1394,7 +1394,9 @@ RowParallelLinearImpl::RowParallelLinearImpl(
   }
 }
 
-torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
+torch::Tensor RowParallelLinearImpl::forward(
+    torch::Tensor input,
+    const std::function<void()>& before_result_reduction) {
   auto bias = bias_.defined() && rank_ == 0
                   ? std::optional<torch::Tensor>(bias_)
                   : std::nullopt;
@@ -1508,6 +1510,9 @@ torch::Tensor RowParallelLinearImpl::forward(torch::Tensor input) {
     output = xllm::kernel::matmul(matmul_params);
   }
   if (enable_result_reduction_ && world_size_ > 1) {
+    if (before_result_reduction) {
+      before_result_reduction();
+    }
     output = xllm::parallel_state::reduce(output, process_group_);
   }
   return output;

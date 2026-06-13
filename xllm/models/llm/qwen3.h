@@ -174,12 +174,19 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
       }
 #endif
       auto& layer = layers_[i];
+      std::optional<torch::Tensor> next_qkv_weight = std::nullopt;
+#if defined(USE_NPU)
+      if (i + 1 < layers_.size()) {
+        next_qkv_weight = layers_[i + 1]->qkv_weight();
+      }
+#endif
       h = layer(h,
                 residual,
                 positions,
                 attn_metadata,
                 kv_caches[i],
-                input_params_new);
+                input_params_new,
+                next_qkv_weight);
       if (!input_params_new.record_layer(static_cast<uint32_t>(i),
                                          h.device())) {
 #if defined(USE_NPU)
