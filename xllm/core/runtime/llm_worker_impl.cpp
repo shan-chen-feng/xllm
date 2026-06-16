@@ -299,7 +299,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
       return std::nullopt;
     }
-    auto ret = device_.synchronize_default_stream();
+    int ret = device_.synchronize_default_stream();
     // in p-d disaggregation scene, all micro batches should be in same
     // prefill/decode stage, so, to judge transfer_kv_infos.empty,
     if (options_.kv_cache_transfer_mode() == "PUSH" &&
@@ -393,7 +393,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     return output;
   }
   if (should_sync_default_stream) {
-    auto ret = device_.synchronize_default_stream();
+    int ret = device_.synchronize_default_stream();
     CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
   }
 
