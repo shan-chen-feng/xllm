@@ -284,12 +284,7 @@ void append_decode_row(const DecodeRowContext& ctx,
     const int32_t text_position =
         ctx.positions[row.seq_id] + row.position_offset;
     CHECK_GE(text_position, 0) << "invalid decode mRoPE text position";
-    if (VLOG_IS_ON(50)) {
-      VLOG(50) << "Build decode mRoPE text position, seq_id=" << row.seq_id
-              << ", base_text_position=" << ctx.positions[row.seq_id]
-              << ", position_offset=" << row.position_offset
-              << ", text_position=" << text_position;
-    }
+
     buf.position_helper.append_out_position_id(text_position);
   } else {
     const int32_t model_position =
