@@ -113,7 +113,7 @@ void Eagle3WorkerImpl::process_draft_sample_output(
 void Eagle3WorkerImpl::check_draft_input_embedding(
     const torch::Tensor& embedding,
     const std::string& phase) const {
-  if (VLOG_IS_ON(50)) {
+
     if (!embedding.defined()) {
       return;
     }
@@ -141,7 +141,7 @@ void Eagle3WorkerImpl::check_draft_input_embedding(
         << expected_hidden_size << ", got " << embedding.size(-1)
         << ". Check that target model captures three aux hidden-state layers "
            "for Eagle3.";
-  }
-  }
+  
+}
 
 }  // namespace xllm
