@@ -363,18 +363,37 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     }
   }
 
-  // Only use acl graph in decode phase for performance optimization
-  // For DP, decode graph bucket should be based on global max tokens across dp
-  // groups; local shard can be empty on some ranks.
-  uint32_t graph_num_tokens = tokens_tensor.size(/*dim=*/0);
-  if (params_single.parallel.dp_global_token_nums.size() > 1) {
-    graph_num_tokens = util::max(params_single.parallel.dp_global_token_nums);
-  }
   // Keep actual n_tokens for replay output slicing.
   const uint32_t n_tokens = tokens_tensor.size(/*dim=*/0);
-  const uint32_t local_batch_size = n_tokens / options_.num_decoding_tokens();
-  const uint32_t global_batch_size =
-      graph_num_tokens / options_.num_decoding_tokens();
+  uint32_t local_batch_size = n_tokens / options_.num_decoding_tokens();
+  uint32_t global_batch_size = local_batch_size;
+  uint32_t bucket_num_tokens = 0;
+  if (in_spec_verify_phase) {
+    const uint32_t q_max_seq_len =
+        static_cast<uint32_t>(std::max<int32_t>(
+            params_single.meta.q_max_seq_len, 1));
+    local_batch_size =
+        static_cast<uint32_t>(std::max<int32_t>(
+            params_single.meta.num_sequences, 0));
+    global_batch_size = local_batch_size;
+    if (params_single.parallel.dp_global_token_nums.size() > 1) {
+      const uint32_t global_num_tokens =
+          util::max(params_single.parallel.dp_global_token_nums);
+      global_batch_size =
+          (global_num_tokens + q_max_seq_len - 1) / q_max_seq_len;
+    }
+    // Spec-verify graph capture needs token buffers padded to full validation
+    // rows. Bucket by sequence count first, then expand back to token count.
+    const uint32_t bucket_batch_size = get_bucket_num_tokens(global_batch_size);
+    bucket_num_tokens = bucket_batch_size * q_max_seq_len;
+  } else {
+    uint32_t graph_num_tokens = n_tokens;
+    if (params_single.parallel.dp_global_token_nums.size() > 1) {
+      graph_num_tokens = util::max(params_single.parallel.dp_global_token_nums);
+    }
+    global_batch_size = graph_num_tokens / options_.num_decoding_tokens();
+    bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
+  }
 
   // Large decode batches create too many/too large ACL graphs and may OOM.
   // Fall back to eager mode when batch size exceeds the safety threshold.
@@ -395,8 +414,6 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     COUNTER_INC(num_model_execution_total_eager);
     return model_->forward(tokens, positions, kv_caches, params);
   }
-
-  const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
 
   // Check if conditions are suitable for graph execution (replay or capture)
   const auto max_seq_len = args_.max_position_embeddings();

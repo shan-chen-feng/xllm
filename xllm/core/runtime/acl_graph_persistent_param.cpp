@@ -45,16 +45,20 @@ namespace xllm::npu {
 
 namespace {
 
-int64_t get_decode_graph_capacity(const runtime::Options& options) {
+int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
   CHECK_GT(options.num_decoding_tokens(), 0)
       << "num_decoding_tokens must be > 0 for graph capacity";
-  if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
-    return options.max_seqs_per_batch();
-  }
   if (options.enable_speculative_decode() && !options.is_draft_engine()) {
     return options.max_seqs_per_batch() * options.num_decoding_tokens();
   }
   return options.max_seqs_per_batch();
+}
+
+int64_t get_decode_graph_row_capacity(const runtime::Options& options) {
+  if (::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel()) {
+    return options.max_seqs_per_batch();
+  }
+  return get_decode_graph_token_capacity(options);
 }
 
 float get_dp_ep_all2all_buffer_factor(int64_t length) {
@@ -78,7 +82,7 @@ float get_dp_ep_all2all_buffer_factor(int64_t length) {
 int64_t get_dp_ep_padding_buffer_capacity(const ModelArgs& args,
                                           const runtime::Options& options) {
   const int64_t dp_size = std::max<int64_t>(options.dp_size(), 1);
-  const int64_t graph_capacity = get_decode_graph_capacity(options);
+  const int64_t graph_capacity = get_decode_graph_token_capacity(options);
   const int64_t topk = std::max<int64_t>(args.num_experts_per_tok(), 1);
   const int64_t base_length = graph_capacity * topk;
   const int64_t global_length = base_length * dp_size;
@@ -158,8 +162,8 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
   // Graph-mode token capacity is narrower than max_tokens_per_batch: ACL graph
   // only serves decode / spec-verify batches, so the relevant row upper bound
   // comes from decode graph capacity instead.
-  const int64_t max_graph_tokens = get_decode_graph_capacity(options);
-  const int64_t max_seqs_per_batch = get_decode_graph_capacity(options);
+  const int64_t max_graph_tokens = get_decode_graph_token_capacity(options);
+  const int64_t max_seqs_per_batch = get_decode_graph_row_capacity(options);
 
   const int64_t max_seq_len = args_.max_position_embeddings();
 
