@@ -499,8 +499,9 @@ ForwardInput WorkerImpl::prepare_inputs(Batch& batch) {
 bool WorkerImpl::can_prepare_npu_graph_decode_input(
     const ModelInputParams& input_params) const {
 #if defined(USE_NPU)
-  return FLAGS_enable_graph && enable_schedule_overlap() &&
-         options_.backend() == "llm" &&
+  return model_executor_ != nullptr && FLAGS_enable_graph &&
+         enable_schedule_overlap() &&
+         (options_.backend() == "llm" || options_.backend() == "vlm") &&
          input_params.meta.batch_forward_type.has_decode();
 #else
   (void)input_params;
