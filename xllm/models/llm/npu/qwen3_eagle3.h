@@ -170,8 +170,6 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     }
 
     torch::Tensor hidden_states = embed_tokens_(tokens, 0);
-    hidden_states =
-        restore_quarot_hidden(hidden_states, hidden_states.size(-1));
     // Get hidden_states_extra from input_params.embedding.input_embedding
     // In EAGLE-3, hidden_states_extra comes from verifier layers
     // (3 layers concatenated)
@@ -321,25 +319,6 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
   }
 
  protected:
-  torch::Tensor restore_quarot_hidden(torch::Tensor hidden_states,
-                                      int64_t hidden_size) {
-    if (!quarot_global_rotation_t_.defined() ||
-        quarot_global_rotation_t_.numel() == 0) {
-      return hidden_states;
-    }
-
-    CHECK_EQ(quarot_global_rotation_t_.dim(), 2)
-        << "QuaRot global_rotation must be a 2D tensor";
-    CHECK_EQ(quarot_global_rotation_t_.size(0), hidden_size)
-        << "QuaRot global_rotation hidden size mismatch, expected "
-        << hidden_size << ", got " << quarot_global_rotation_t_.size(0);
-    CHECK_EQ(quarot_global_rotation_t_.size(1), hidden_size)
-        << "QuaRot global_rotation hidden size mismatch, expected "
-        << hidden_size << ", got " << quarot_global_rotation_t_.size(1);
-
-    return torch::matmul(hidden_states, quarot_global_rotation_t_);
-  }
-
   std::string model_type_;
   torch::TensorOptions options_;
 

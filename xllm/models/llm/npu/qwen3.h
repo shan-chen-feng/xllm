@@ -60,8 +60,8 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     norm_ = register_module("norm", layer::NpuRMSNorm(context));
     npu_embed_tokens_ =
         register_module("npu_embed_tokens", layer::NpuWordEmbedding(context));
-    restored_embed_tokens_ = register_module(
-        "restored_embed_tokens", layer::NpuWordEmbedding(context));
+    restored_embed_tokens_ = register_module("restored_embed_tokens",
+                                             layer::NpuWordEmbedding(context));
     atb_pos_emb_ = layer::NpuPosEmbedding(context);
     cos_sin_ = layer::rotary::get_concat_rotary_embedding(
         128,
@@ -131,38 +131,38 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
   }
 
   void load_restored_embed_tokens(const StateDict& state_dict,
-                                  torch::Tensor global_rotation,
                                   const torch::Device& device) {
+    if (!quarot_global_rotation_t_.defined()) {
+      return;
+    }
+
     auto embed_weight = state_dict.get_tensor("embed_tokens.weight");
     if (!embed_weight.defined()) {
       return;
     }
 
     CHECK_EQ(embed_weight.dim(), 2) << "Embedding weight must be a 2D tensor";
-    CHECK_EQ(global_rotation.dim(), 2)
+    CHECK_EQ(quarot_global_rotation_t_.dim(), 2)
         << "QuaRot global_rotation must be a 2D tensor";
-    CHECK_EQ(global_rotation.size(0), global_rotation.size(1))
+    CHECK_EQ(quarot_global_rotation_t_.size(0),
+             quarot_global_rotation_t_.size(1))
         << "QuaRot global_rotation must be square";
-    CHECK_EQ(embed_weight.size(1), global_rotation.size(0))
+    CHECK_EQ(embed_weight.size(1), quarot_global_rotation_t_.size(0))
         << "QuaRot global_rotation hidden size mismatch, expected "
-        << embed_weight.size(1) << ", got " << global_rotation.size(0);
-
+        << embed_weight.size(1) << ", got "
+        << quarot_global_rotation_t_.size(0);
     torch::Tensor restored;
     {
       torch::DeviceGuard device_guard(device);
-      auto npu_options =
-          torch::TensorOptions().dtype(torch::kFloat32).device(device);
-      auto cpu_options =
-          torch::TensorOptions().dtype(embed_weight.scalar_type()).device(
-              torch::kCPU);
-      auto embed_weight_npu =
-          embed_weight.to(npu_options, /*non_blocking=*/false, /*copy=*/true)
-              .contiguous();
-      auto rotation_t_npu =
-          global_rotation.to(npu_options, /*non_blocking=*/false, /*copy=*/true)
-              .transpose(0, 1)
-              .contiguous();
-      restored = torch::matmul(embed_weight_npu, rotation_t_npu)
+      auto cpu_options = torch::TensorOptions()
+                             .dtype(embed_weight.scalar_type())
+                             .device(torch::kCPU);
+      auto embed_weight_npu = embed_weight
+                                  .to(quarot_global_rotation_t_.options(),
+                                      /*non_blocking=*/false,
+                                      /*copy=*/true)
+                                  .contiguous();
+      restored = torch::matmul(embed_weight_npu, quarot_global_rotation_t_)
                      .to(cpu_options, /*non_blocking=*/false, /*copy=*/true)
                      .contiguous();
     }
@@ -368,16 +368,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
   }
 
  private:
-  torch::Tensor restore_quarot_hidden(torch::Tensor aux_h,
-                                      int64_t hidden_size) {
-    if (!quarot_global_rotation_t_.defined() ||
-        quarot_global_rotation_t_.numel() == 0) {
-      return aux_h;
-    }
-
-    return torch::matmul(aux_h, quarot_global_rotation_t_);
-  }
-
   torch::Tensor viusal_pos_mask_;
   std::unordered_set<int32_t> layers_to_capture_set_;
   bool capture_aux_hidden_states_ = false;
@@ -411,8 +401,8 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
-    torch::Tensor global_rotation =
-        load_optional_quarot_rotation(loader->model_weights_path());
+    const std::filesystem::path model_path(loader->model_weights_path());
+    load_optional_quarot_rotation(model_path);
     for (const auto& state_dict : loader->get_state_dicts()) {
       auto model_state_dict = state_dict->get_dict_with_prefix(
           std::vector<std::string>{"model.language_model.",
@@ -421,10 +411,8 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
                                    "model.",
                                    ""});
       model_->load_state_dict(model_state_dict);
-      if (global_rotation.defined()) {
-        model_->load_restored_embed_tokens(
-            model_state_dict, global_rotation, device_);
-      }
+      model_->load_restored_embed_tokens(model_state_dict, device_);
+
       if (!embedding_mode_) {
         if (tie_word_embeddings) {
           npu_lm_head_->load_state_dict(
@@ -460,8 +448,8 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
       LOG(INFO) << "Model weights are already kept on host.";
       return;
     }
-    torch::Tensor global_rotation =
-        load_optional_quarot_rotation(loader->model_weights_path());
+    const std::filesystem::path model_path(loader->model_weights_path());
+    load_optional_quarot_rotation(model_path);
     for (const auto& state_dict : loader->get_state_dicts()) {
       auto model_state_dict = state_dict->get_dict_with_prefix(
           std::vector<std::string>{"model.language_model.",
@@ -470,10 +458,8 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
                                    "model.",
                                    ""});
       model_->load_state_dict(model_state_dict);
-      if (global_rotation.defined()) {
-        model_->load_restored_embed_tokens(
-            model_state_dict, global_rotation, device_);
-      }
+      model_->load_restored_embed_tokens(model_state_dict, device_);
+
       if (!embedding_mode_) {
         if (tie_word_embeddings) {
           npu_lm_head_->load_state_dict(
@@ -505,12 +491,11 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
   }
 
  private:
-  torch::Tensor load_optional_quarot_rotation(
-      const std::filesystem::path& model_path) {
+  void load_optional_quarot_rotation(const std::filesystem::path& model_path) {
     const std::filesystem::path quarot_path =
         model_path / "optional" / "quarot.safetensors";
     if (!std::filesystem::exists(quarot_path)) {
-      return torch::Tensor();
+      return;
     }
 
     auto state_dict = StateDictFromSafeTensor::load(quarot_path.string());
@@ -519,32 +504,22 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
       LOG(WARNING) << "Optional QuaRot file exists but global_rotation is "
                       "missing: "
                    << quarot_path.string();
-      return torch::Tensor();
+      return;
     }
     CHECK_EQ(global_rotation.dim(), 2)
         << "QuaRot global_rotation must be a 2D tensor";
     CHECK_EQ(global_rotation.size(0), global_rotation.size(1))
         << "QuaRot global_rotation must be square";
 
-    auto global_rotation_cpu =
+    global_rotation =
         global_rotation
-            .to(torch::TensorOptions().dtype(torch::kFloat32).device(
-                    torch::kCPU),
-                /*non_blocking=*/false,
-                /*copy=*/true)
-            .contiguous();
-    torch::DeviceGuard device_guard(device_);
-    auto global_rotation_device =
-        global_rotation_cpu
             .to(torch::TensorOptions().dtype(dtype_).device(device_),
                 /*non_blocking=*/false,
                 /*copy=*/true)
             .contiguous();
-    model_->set_quarot_global_rotation(global_rotation_device);
+    model_->set_quarot_global_rotation(global_rotation);
     LOG(INFO) << "Loaded optional QuaRot global_rotation from "
-              << quarot_path.string()
-              << ", shape=" << global_rotation_cpu.sizes();
-    return global_rotation_cpu;
+              << quarot_path.string() << ", shape=" << global_rotation.sizes();
   }
 
   torch::Device device_;
