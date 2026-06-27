@@ -203,10 +203,6 @@ class WorkerImpl {
     return model_->get_npu_word_embedding();
   }
 
-  virtual bool has_restored_npu_word_embedding() {
-    return model_->has_restored_npu_word_embedding();
-  }
-
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     model_->set_npu_word_embedding(embedding);
   }

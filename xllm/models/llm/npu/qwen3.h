@@ -23,8 +23,8 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
-#include "core/common/global_flags.h"
 #include "core/framework/config/kernel_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_output.h"
@@ -169,13 +169,10 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     StateDict embed_state_dict({{"weight", restored}});
     restored_embed_tokens_->load_state_dict(embed_state_dict);
     has_restored_embed_tokens_ = true;
+    ::xllm::ModelConfig::get_instance().has_restored_npu_word_embedding(true);
   }
 
   bool has_restored_embed_tokens() const { return has_restored_embed_tokens_; }
-
-  bool has_restored_npu_word_embedding() const {
-    return has_restored_embed_tokens_;
-  }
 
   void verify_restored_embed_tokens(const std::string& prefix) const {
     if (has_restored_embed_tokens_) {
@@ -393,10 +390,6 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
     }
     return torch::nn::functional::normalize(
         h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
-  }
-
-  bool has_restored_npu_word_embedding() const {
-    return model_->has_restored_npu_word_embedding();
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader,

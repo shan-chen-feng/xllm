@@ -128,7 +128,6 @@ class CausalLM : public torch::nn::Module {
     NOT_IMPLEMENTED();
     return nullptr;
   }
-  virtual bool has_restored_npu_word_embedding() { return false; }
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     NOT_IMPLEMENTED();
   }
@@ -307,14 +306,6 @@ class CausalLMImpl : public CausalLM {
       return model_->get_npu_word_embedding();
     } else {
       return CausalLM::get_npu_word_embedding();
-    }
-  }
-
-  bool has_restored_npu_word_embedding() override {
-    if constexpr (detail::has_restored_npu_word_embedding<Model>::value) {
-      return model_->has_restored_npu_word_embedding();
-    } else {
-      return CausalLM::has_restored_npu_word_embedding();
     }
   }
 
