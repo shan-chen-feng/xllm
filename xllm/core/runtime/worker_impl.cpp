@@ -499,7 +499,9 @@ ForwardInput WorkerImpl::prepare_inputs(Batch& batch) {
 bool WorkerImpl::can_prepare_npu_graph_decode_input(
     const ModelInputParams& input_params) const {
 #if defined(USE_NPU)
-  return FLAGS_enable_graph && FLAGS_enable_graph_double_buffer &&
+  return ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+         ::xllm::ExecutionConfig::get_instance()
+             .enable_graph_double_buffer() &&
          enable_schedule_overlap() &&
          (options_.backend() == "llm" || options_.backend() == "vlm") &&
          input_params.meta.batch_forward_type.has_decode();
@@ -944,10 +946,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     }
 
     if (can_prepare_npu_graph_decode_input(input_params)) {
-      model_executor_->prepare_graph_input(processed_input.token_ids,
-                                           processed_input.positions,
-                                           kv_caches_,
-                                           processed_input.input_params);
+      prepare_npu_graph_decode_input(processed_input);
     }
 
 #endif
@@ -960,6 +959,20 @@ void WorkerImpl::prepare_work_before_execute_on_stream(
     prepare_stream.synchronize();
   }
   processed_input.metadata_ready_event = event;
+}
+
+void WorkerImpl::prepare_npu_graph_decode_input(const ForwardInput& input) {
+#if defined(USE_NPU)
+  if (model_executor_ == nullptr) {
+    return;
+  }
+  model_executor_->prepare_graph_input(input.token_ids,
+                                       input.positions,
+                                       kv_caches_,
+                                       input.input_params);
+#else
+  (void)input;
+#endif
 }
 
 void WorkerImpl::apply_kv_block_swaps(const ModelInputParams& input_params) {
