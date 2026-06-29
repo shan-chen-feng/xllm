@@ -22,6 +22,7 @@ limitations under the License.
 #include <map>
 
 #include "common/global_flags.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/scheduler_config.h"
 
@@ -82,6 +83,8 @@ void NpuEagle3DecoderLayerImpl::param_from_args(
   param.rank = parallel_args.rank();
   param.backend = "lccl";
   param.enableLogN = false;
+  param.enableAclGraphPagedAttention =
+      ::xllm::ExecutionConfig::get_instance().enable_graph() && !isPrefill;
 }
 
 NpuEagle3DecoderLayerImpl::NpuEagle3DecoderLayerImpl(
@@ -92,7 +95,9 @@ NpuEagle3DecoderLayerImpl::NpuEagle3DecoderLayerImpl(
   auto options = context.get_tensor_options();
 
   param_from_args(prefill_param_, model_args, parallel_args, true);
-  param_from_args(decode_param_, model_args, parallel_args, false);
+  param_from_args(decode_graph_param_, model_args, parallel_args, false);
+  decode_eager_param_ = decode_graph_param_;
+  decode_eager_param_.enableAclGraphPagedAttention = false;
   atb_weight_tensors_.resize(WEIGHT_COUNT_PER_LAYER);
   placeholder_vec_ = {1};
   dtype_ = c10::typeMetaToScalarType(options.dtype());
@@ -122,7 +127,8 @@ void NpuEagle3DecoderLayerImpl::initialize_linear_transpose_type() {
       check_transpose(at_host_weight_tensors[IN_MLP_W2_WEIGHT]);
   int transpose_value = static_cast<int>(transpose_type);
   prefill_param_.linearTransposeType[4] = transpose_value;
-  decode_param_.linearTransposeType[4] = transpose_value;
+  decode_graph_param_.linearTransposeType[4] = transpose_value;
+  decode_eager_param_.linearTransposeType[4] = transpose_value;
 }
 
 void NpuEagle3DecoderLayerImpl::merge_loaded_weights() {
@@ -142,8 +148,10 @@ void NpuEagle3DecoderLayerImpl::initialize_quantization_parameters() {
   if (quantize_type_ == "w8a8") {
     prefill_param_.packQuantType = {static_cast<int>(PackType::ALL_W8A8),
                                     static_cast<int>(PackType::ALL_W8A8)};
-    decode_param_.packQuantType = {static_cast<int>(PackType::ALL_W8A8),
-                                   static_cast<int>(PackType::ALL_W8A8)};
+    decode_graph_param_.packQuantType = {
+        static_cast<int>(PackType::ALL_W8A8),
+        static_cast<int>(PackType::ALL_W8A8)};
+    decode_eager_param_.packQuantType = decode_graph_param_.packQuantType;
     prefill_param_.linearQuantType = {static_cast<int>(LinearType::INT),
                                       static_cast<int>(LinearType::INVALID),
                                       static_cast<int>(LinearType::INVALID),
@@ -151,13 +159,15 @@ void NpuEagle3DecoderLayerImpl::initialize_quantization_parameters() {
                                       static_cast<int>(LinearType::INT),
                                       static_cast<int>(LinearType::INVALID),
                                       static_cast<int>(LinearType::FP)};
-    decode_param_.linearQuantType = {static_cast<int>(LinearType::INT),
-                                     static_cast<int>(LinearType::INVALID),
-                                     static_cast<int>(LinearType::INVALID),
-                                     static_cast<int>(LinearType::INT),
-                                     static_cast<int>(LinearType::INT),
-                                     static_cast<int>(LinearType::INVALID),
-                                     static_cast<int>(LinearType::FP)};
+    decode_graph_param_.linearQuantType = {
+        static_cast<int>(LinearType::INT),
+        static_cast<int>(LinearType::INVALID),
+        static_cast<int>(LinearType::INVALID),
+        static_cast<int>(LinearType::INT),
+        static_cast<int>(LinearType::INT),
+        static_cast<int>(LinearType::INVALID),
+        static_cast<int>(LinearType::FP)};
+    decode_eager_param_.linearQuantType = decode_graph_param_.linearQuantType;
   }
 }
 
@@ -177,7 +187,10 @@ int64_t NpuEagle3DecoderLayerImpl::init_layer() {
   name_ = "eagle3_decoder_layer";
   model_name_ = "eagle3";
   CHECK_OPERATION_STATUS_RETURN(init_node(prefill_node_, prefill_param_));
-  CHECK_OPERATION_STATUS_RETURN(init_node(decode_node_, decode_param_));
+  CHECK_OPERATION_STATUS_RETURN(
+      init_node(decode_graph_node_, decode_graph_param_));
+  CHECK_OPERATION_STATUS_RETURN(
+      init_node(decode_eager_node_, decode_eager_param_));
 
   return atb::NO_ERROR;
 }
@@ -243,13 +256,19 @@ torch::Tensor NpuEagle3DecoderLayerImpl::forward(
                             attn_mask,
                             kv_cache,
                             input_params,
-                            true);
+                            /*is_prefill=*/true,
+                            /*use_graph_decode_input=*/false);
     // mstxRangeEnd(id);
     st = execute_node(prefill_node_, node_id, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
                            << "execute prefill layer fail, error code: " << st;
   } else {
-    build_node_variant_pack(decode_node_,
+    const bool use_graph_decode_input =
+        ::xllm::ExecutionConfig::get_instance().enable_graph() &&
+        input_params.graph.tiling_data.defined();
+    auto& decode_node =
+        use_graph_decode_input ? decode_graph_node_ : decode_eager_node_;
+    build_node_variant_pack(decode_node,
                             hidden_states,
                             hidden_states_extra,
                             cos_pos,
@@ -257,8 +276,9 @@ torch::Tensor NpuEagle3DecoderLayerImpl::forward(
                             decode_attn_mask_,
                             kv_cache,
                             input_params,
-                            false);
-    st = execute_node(decode_node_, node_id + 1000, event, event_flag);
+                            /*is_prefill=*/false,
+                            use_graph_decode_input);
+    st = execute_node(decode_node, node_id + 1000, event, event_flag);
     LOG_IF(FATAL, st != 0) << model_name_
                            << "execute decode layer fail, error code: " << st;
   }
@@ -275,7 +295,8 @@ void NpuEagle3DecoderLayerImpl::build_node_variant_pack(
     at::Tensor& attn_mask,
     KVCache& kv_cache,
     ModelInputParams& input_params,
-    bool is_prefill) {
+    bool is_prefill,
+    bool use_graph_decode_input) {
   internal_tensors_ = atb_speed::Utils::AtTensor2Tensor(hidden_states);
   internal_tensors_extra_ =
       atb_speed::Utils::AtTensor2Tensor(hidden_states_extra);
@@ -314,6 +335,11 @@ void NpuEagle3DecoderLayerImpl::build_node_variant_pack(
             input_params.attention.device.q_seq_lens);
     node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 12).hostData =
         input_params.attention.host.q_seq_lens.data();
+  }
+  if (!is_prefill && use_graph_decode_input &&
+      input_params.graph.tiling_data.defined()) {
+    node.variantPack.inTensors.at(WEIGHT_COUNT_PER_LAYER + 12) =
+        atb_speed::Utils::AtTensor2Tensor(input_params.graph.tiling_data);
   }
 
   for (size_t i = 0; i < WEIGHT_COUNT_PER_LAYER; ++i) {
