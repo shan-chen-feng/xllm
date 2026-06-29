@@ -39,7 +39,7 @@ runtime::Options eagle3_draft_options(const runtime::Options& options) {
       .is_draft_engine(true)
       .num_decoding_tokens(1)
       .num_speculative_tokens(0)
-      .enable_graph_aux_hidden_states(false)
+      .enable_graph_aux_hidden_states(options.enable_graph())
       .backend("llm");
   return opts;
 }
