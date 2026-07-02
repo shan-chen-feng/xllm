@@ -193,6 +193,7 @@ nav:
     - getting_started/quick_start.md
     - supported_models.md
     - getting_started/launch_xllm.md
+    - getting_started/qwen_image_edit_plus.md
     - getting_started/disagg_pd.md
     - getting_started/multi_machine.md
     - 基本用法:
