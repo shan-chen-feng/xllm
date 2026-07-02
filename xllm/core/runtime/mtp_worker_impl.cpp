@@ -1250,7 +1250,10 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
 
   compute_stream_->synchronize();
   val_output.next_tokens = val_output.next_tokens.to(torch::kCPU);
-  write_target_context_to_cache(input, val_output);
+  {
+    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+    write_target_context_to_cache(input, val_output);
+  }
 
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;

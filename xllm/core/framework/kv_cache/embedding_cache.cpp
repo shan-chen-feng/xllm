@@ -35,6 +35,10 @@ torch::Tensor to_cpu_int64_contiguous(const torch::Tensor& tensor) {
   return cpu_tensor;
 }
 
+torch::Tensor clone_cached_embedding(const torch::Tensor& embedding) {
+  return embedding.detach().contiguous().clone();
+}
+
 }  // namespace
 
 EmbeddingCache::EmbeddingCache(int32_t total_nums) {
@@ -176,16 +180,16 @@ void EmbeddingCache::write_target_context(
     state.position_offset = last_idx;
     state.correction_token_id = correction_token;
     state.correction_position_offset = correction_offset;
-    state.embedding = accepted_embeddings.select(/*dim=*/0, i)
-                          .select(/*dim=*/0, last_idx)
-                          .detach();
+    state.embedding =
+        clone_cached_embedding(accepted_embeddings.select(/*dim=*/0, i)
+                                   .select(/*dim=*/0, last_idx));
     if (last_idx > 0) {
       const int64_t prev_token =
           accepted_tokens_data[row_offset + last_idx - 1];
       state.prev_token_id = static_cast<int32_t>(prev_token);
-      state.prev_embedding = accepted_embeddings.select(/*dim=*/0, i)
-                                 .select(/*dim=*/0, last_idx - 1)
-                                 .detach();
+      state.prev_embedding =
+          clone_cached_embedding(accepted_embeddings.select(/*dim=*/0, i)
+                                     .select(/*dim=*/0, last_idx - 1));
     }
 
     DecodeState& tail = mutable_tail(ids[i]);
