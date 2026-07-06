@@ -544,6 +544,27 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
 
   const uint64_t graph_key = get_graph_key(bucket_num_tokens, params_single);
 
+  // The graph executor hands back views into a slot's persistent output
+  // buffers. The draft engine replays back-to-back within the speculative loop
+  // while reusing a single slot's buffers, so a returned view can be
+  // overwritten by the next replay before the LM head / embedding cache reads
+  // it, corrupting the draft logits and lowering the accept rate. Return owned
+  // copies for the draft; keep the target path allocation-free.
+  const bool own_graph_outputs = options_.is_draft_engine();
+  auto finalize_output = [&](torch::Tensor hidden_states,
+                             torch::Tensor aux_hidden_states) {
+    if (own_graph_outputs) {
+      hidden_states = hidden_states.clone();
+      if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
+        aux_hidden_states = aux_hidden_states.clone();
+      }
+    }
+    if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
+      return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
+    }
+    return ModelOutput(hidden_states);
+  };
+
   // Check if captured graph exists for this bucket num_tokens
   int32_t slot_idx = 0;
   AclGraph* replay_graph = nullptr;
@@ -569,15 +590,11 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     ModelOutput result = replay_graph->replay(
         model_, tokens_tensor, positions_tensor, kv_caches, params_single);
     // Handle aux_hidden_states based on options
+    torch::Tensor aux_hidden_states;
     if (options_.enable_graph_aux_hidden_states()) {
-      torch::Tensor aux_hidden_states =
-          active_persistent_param.aux_hidden_states(n_tokens);
-      if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
-        return ModelOutput(
-            result.hidden_states, torch::Tensor(), aux_hidden_states);
-      }
+      aux_hidden_states = active_persistent_param.aux_hidden_states(n_tokens);
     }
-    return result;
+    return finalize_output(result.hidden_states, aux_hidden_states);
   }
 
   // Graph doesn't exist for this bucket num_tokens, try to create it lazily
@@ -614,14 +631,11 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     // already executed)
     torch::Tensor hidden_states =
         active_slot.graphs[graph_key]->get_hidden_states(n_tokens);
+    torch::Tensor aux_hidden_states;
     if (options_.enable_graph_aux_hidden_states()) {
-      torch::Tensor aux_hidden_states =
-          active_persistent_param.aux_hidden_states(n_tokens);
-      if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
-        return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
-      }
+      aux_hidden_states = active_persistent_param.aux_hidden_states(n_tokens);
     }
-    return ModelOutput(hidden_states);
+    return finalize_output(hidden_states, aux_hidden_states);
   }
 
   // Fallback to eager mode if capture fails
