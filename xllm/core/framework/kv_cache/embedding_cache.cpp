@@ -93,7 +93,8 @@ void EmbeddingCache::write_prefill_target_context(
     state.all_draft_accepted = false;
     state.token_id = static_cast<int32_t>(token);
     state.position_offset = 0;
-    state.embedding = target_embeddings.select(/*dim=*/0, i).detach();
+    state.embedding =
+        clone_cached_embedding(target_embeddings.select(/*dim=*/0, i));
 
     DecodeState& tail = mutable_tail(ids[i]);
     tail = std::move(state);
@@ -114,7 +115,7 @@ void EmbeddingCache::write_mtp_bootstrap_context(
   state.all_draft_accepted = false;
   state.token_id = token_id;
   state.position_offset = 0;
-  state.embedding = embedding.detach();
+  state.embedding = clone_cached_embedding(embedding);
 
   DecodeState& tail = mutable_tail(embedding_id);
   tail = std::move(state);
