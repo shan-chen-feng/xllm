@@ -68,6 +68,21 @@ bool allow_single_layer_graph(const ModelArgs& args,
          args.model_type() == "qwen3_eagle3";
 }
 
+bool should_clone_single_buffer_draft_graph_output(
+    const runtime::Options& options,
+    int32_t graph_slot_count) {
+  return graph_slot_count <= 1 && options.is_draft_engine() &&
+         options.backend() == "llm";
+}
+
+torch::Tensor clone_graph_output_if_needed(const torch::Tensor& tensor,
+                                           bool should_clone) {
+  if (!should_clone || !tensor.defined() || tensor.numel() == 0) {
+    return tensor;
+  }
+  return tensor.clone();
+}
+
 }  // namespace
 
 bool AclGraph::capture(CausalLM* model,
@@ -561,6 +576,8 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   }
   auto& active_slot = graph_slots_[slot_idx];
   auto& active_persistent_param = *active_slot.persistent_param;
+  const bool clone_graph_output = should_clone_single_buffer_draft_graph_output(
+      options_, graph_slot_count_);
 
   if (replay_graph != nullptr) {
     // Replay the existing graph
@@ -568,11 +585,15 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << "AclGraphExecutorImpl::run() in replay mode";
     ModelOutput result = replay_graph->replay(
         model_, tokens_tensor, positions_tensor, kv_caches, params_single);
+    result.hidden_states =
+        clone_graph_output_if_needed(result.hidden_states, clone_graph_output);
     // Handle aux_hidden_states based on options
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
           active_persistent_param.aux_hidden_states(n_tokens);
       if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
+        aux_hidden_states =
+            clone_graph_output_if_needed(aux_hidden_states, clone_graph_output);
         return ModelOutput(
             result.hidden_states, torch::Tensor(), aux_hidden_states);
       }
@@ -614,10 +635,14 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     // already executed)
     torch::Tensor hidden_states =
         active_slot.graphs[graph_key]->get_hidden_states(n_tokens);
+    hidden_states =
+        clone_graph_output_if_needed(hidden_states, clone_graph_output);
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
           active_persistent_param.aux_hidden_states(n_tokens);
       if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
+        aux_hidden_states =
+            clone_graph_output_if_needed(aux_hidden_states, clone_graph_output);
         return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
       }
     }
