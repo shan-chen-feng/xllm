@@ -334,6 +334,10 @@ AclGraph::~AclGraph() {
   } else if (capture_stream_.has_value()) {
     aclrtSynchronizeStream(capture_stream_.value().stream());
   }
+  if (input_ready_event_ != nullptr) {
+    aclrtDestroyEvent(input_ready_event_);
+    input_ready_event_ = nullptr;
+  }
   if (replay_done_event_ != nullptr) {
     aclrtDestroyEvent(replay_done_event_);
     replay_done_event_ = nullptr;
@@ -348,12 +352,32 @@ void AclGraph::initialize_capture_stream(c10::DeviceIndex device_index) {
   capture_stream_ = c10_npu::getStreamFromPool(true, device_index);
   update_stream_ = c10_npu::getStreamFromPool(true, device_index);
   device_index_ = device_index;
+  CHECK_EQ(aclrtCreateEventWithFlag(&input_ready_event_, ACL_EVENT_SYNC),
+           ACL_SUCCESS)
+      << "Failed to create ACL graph input ready event";
   CHECK_EQ(aclrtCreateEventWithFlag(&replay_done_event_, ACL_EVENT_SYNC),
            ACL_SUCCESS)
       << "Failed to create ACL graph replay completion event";
   LOG(INFO) << "Initialized capture_stream"
             << ", id: " << capture_stream_.value().id()
             << ", device_index: " << device_index;
+}
+
+void AclGraph::record_input_ready(aclrtStream current_stream) {
+  CHECK_NE(input_ready_event_, nullptr)
+      << "input_ready_event is not initialized";
+  CHECK_EQ(aclrtRecordEvent(input_ready_event_, current_stream), ACL_SUCCESS)
+      << "aclrtRecordEvent(input_ready_event) failed";
+  input_ready_stream_ = current_stream;
+}
+
+void AclGraph::make_stream_wait_for_input_ready(aclrtStream stream) {
+  CHECK_NE(input_ready_event_, nullptr)
+      << "input_ready_event is not initialized";
+  if (input_ready_stream_ != nullptr && stream != input_ready_stream_) {
+    CHECK_EQ(aclrtStreamWaitEvent(stream, input_ready_event_), ACL_SUCCESS)
+        << "aclrtStreamWaitEvent(input_ready_event) failed";
+  }
 }
 
 void AclGraph::make_current_stream_wait_for_graph(aclrtStream current_stream) {
@@ -410,6 +434,13 @@ ModelOutput AclGraph::replay(CausalLM* model,
   const bool can_use_prepared_inputs =
       replay_inputs_prepared && params.graph.input_tokens_override.defined() &&
       !needs_graph_metadata;
+  // Persistent graph inputs are updated on the caller's current stream, while
+  // NPUGraph replay runs on the stream captured by the graph.  Keep the two
+  // streams ordered so graph replay never consumes stale persistent buffers.
+  aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+  if (replay_inputs_prepared) {
+    make_stream_wait_for_input_ready(stream);
+  }
   if (log_eagle3_graph_debug_) {
     LOG(INFO) << kEagle3GraphDebugTag
               << " phase=replay_update_start persistent_param="
@@ -420,6 +451,9 @@ ModelOutput AclGraph::replay(CausalLM* model,
               << params.graph.input_tokens_override.defined()
               << " needs_graph_metadata=" << needs_graph_metadata
               << " can_use_prepared_inputs=" << can_use_prepared_inputs
+              << " replay_stream=" << stream
+              << " graph_stream=" << graph_stream_
+              << " input_ready_stream=" << input_ready_stream_
               << " tokens{" << tensor_debug_string(tokens) << "}"
               << " positions{" << tensor_debug_string(positions) << "}";
   }
@@ -445,11 +479,10 @@ ModelOutput AclGraph::replay(CausalLM* model,
           graph_params.value());
     }
   }
+  record_input_ready(stream);
 
   // Replay captured graph - NPUGraph mempool reuses temporary tensors
-  // Get current NPU stream from libtorch NPU API
-  aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-
+  make_stream_wait_for_input_ready(graph_stream_);
   graph_.replay();
   if (model->is_hybrid_linear_attention()) {
     CHECK(graph_params.has_value())
@@ -492,6 +525,7 @@ void AclGraph::prepare_replay_inputs(const torch::Tensor& tokens,
                            num_tokens_,
                            /*return_capture_params=*/false,
                            /*skip_token_update=*/true);
+  record_input_ready(c10_npu::getCurrentNPUStream().stream());
   replay_inputs_prepared_.store(true, std::memory_order_release);
 }
 
