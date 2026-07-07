@@ -435,7 +435,13 @@ ModelOutput AclGraph::replay(CausalLM* model,
               << sum_i64(persistent_param_.persistent_new_cache_slots(
                      actual_num_tokens))
               << " blk_sum="
-              << sum_i64(persistent_param_.persistent_block_tables());
+              << sum_i64(persistent_param_.persistent_block_tables())
+              // Per-slot paged-attention tiling: read by the attention kernel
+              // via device pointer, recomputed each update(). This is the prime
+              // suspect for the single-vs-double divergence since it is NOT one
+              // of the buffers matched so far. tiling_data_ is int32/uint32.
+              << " tiling_sum="
+              << sum_i64(persistent_param_.tiling_data());
   }
 
   graph_.replay();
