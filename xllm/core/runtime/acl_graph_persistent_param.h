@@ -18,6 +18,7 @@ limitations under the License.
 #include <acl/acl.h>
 #include <torch/torch.h>
 
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -177,6 +178,19 @@ class GraphPersistentParam final {
   // Setter for aux_hidden_states (for assignment)
   void set_aux_hidden_states(const torch::Tensor& value);
 
+  // Buffer-reuse synchronization.
+  //
+  // Every persistent_* buffer in this object is a single physical allocation
+  // that the captured graph reads by device pointer. update() overwrites those
+  // buffers in place. When schedule overlap runs step N's replay and step N+1's
+  // update() on different streams/threads (e.g. qwen3vl + eagle3 overlap), the
+  // writer must not clobber the buffers until the previous replay that reads
+  // them has finished. record_buffers_in_use() marks the read on the graph
+  // stream; wait_buffers_free() blocks the writer stream on that event before
+  // the next update(). This makes a single slot safe without double buffering.
+  void record_buffers_in_use(aclrtStream reader_stream);
+  void wait_buffers_free(aclrtStream writer_stream);
+
  private:
   bool uses_paged_attention_tiling() const {
     return need_update_attention_plan_ && tiling_data_.defined() &&
@@ -247,6 +261,13 @@ class GraphPersistentParam final {
   atb::Context* context_for_plan_;
   atb::Operation* custom_pa_op_for_plan_;
   aclrtStream stream_for_plan_;
+
+  // Event recorded on the graph/reader stream after a replay consumes these
+  // persistent buffers, and waited on by the writer stream before the next
+  // update() overwrites them. Guards against cross-step buffer reuse under
+  // schedule overlap. nullptr until first use is recorded.
+  aclrtEvent buffers_in_use_event_ = nullptr;
+  std::atomic<bool> buffers_in_use_recorded_{false};
 
   // Persistent paged attention tiling tensor on device
   torch::Tensor tiling_data_;

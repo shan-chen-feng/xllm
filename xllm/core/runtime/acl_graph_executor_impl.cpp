@@ -361,6 +361,10 @@ ModelOutput AclGraph::replay(CausalLM* model,
         << "update() should return ModelInputParams for graph task update";
     update_graph_tasks(graph_params.value());
   }
+  // Mark that this replay is reading the slot's persistent buffers on the graph
+  // stream. The next update() on this slot will wait for this event before
+  // overwriting them, making single-slot reuse safe under schedule overlap.
+  persistent_param_.record_buffers_in_use(graph_stream_);
   make_current_stream_wait_for_graph(stream);
 
   // Return the actual num_tokens portion of ModelOutput

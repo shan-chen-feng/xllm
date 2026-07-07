@@ -450,7 +450,40 @@ void GraphPersistentParam::replace_capture_cp_ep_padding(
                                      src.expert_array()));
 }
 
+void GraphPersistentParam::record_buffers_in_use(aclrtStream reader_stream) {
+  if (reader_stream == nullptr) {
+    return;
+  }
+  if (buffers_in_use_event_ == nullptr) {
+    // ACL_EVENT_SYNC matches the flag used for the graph replay-completion
+    // event; it is a cross-stream ordering event, not a timing event.
+    CHECK_EQ(aclrtCreateEventWithFlag(&buffers_in_use_event_, ACL_EVENT_SYNC),
+             ACL_SUCCESS)
+        << "Failed to create persistent-buffer in-use event";
+  }
+  CHECK_EQ(aclrtRecordEvent(buffers_in_use_event_, reader_stream), ACL_SUCCESS)
+      << "aclrtRecordEvent(buffers_in_use_event_) failed";
+  buffers_in_use_recorded_.store(true, std::memory_order_release);
+}
+
+void GraphPersistentParam::wait_buffers_free(aclrtStream writer_stream) {
+  if (writer_stream == nullptr || buffers_in_use_event_ == nullptr ||
+      !buffers_in_use_recorded_.load(std::memory_order_acquire)) {
+    return;
+  }
+  // Block the writer stream until the previous replay finished reading the
+  // persistent buffers. Cheap when the read already completed.
+  CHECK_EQ(aclrtStreamWaitEvent(writer_stream, buffers_in_use_event_),
+           ACL_SUCCESS)
+      << "aclrtStreamWaitEvent(buffers_in_use_event_) failed";
+  buffers_in_use_recorded_.store(false, std::memory_order_release);
+}
+
 GraphPersistentParam::~GraphPersistentParam() {
+  if (buffers_in_use_event_ != nullptr) {
+    aclrtDestroyEvent(buffers_in_use_event_);
+    buffers_in_use_event_ = nullptr;
+  }
   if (custom_pa_op_for_plan_ != nullptr) {
     atb::DestroyOperation(custom_pa_op_for_plan_);
     custom_pa_op_for_plan_ = nullptr;
@@ -631,6 +664,14 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       is_empty_dp_decode_rank
           ? 0
           : (is_chunked_prefill ? actual_batch_size : actual_num_tokens);
+
+  // Before overwriting any persistent buffer, ensure the previous replay that
+  // read these buffers has finished. Under schedule overlap the previous
+  // step's graph read and this update() can run on different streams; without
+  // this wait, a single slot's tiling/positions/block-tables/kv-seq-lens can be
+  // clobbered mid-read. All copies below issue on the current NPU stream, so
+  // gate that stream on the recorded read event.
+  wait_buffers_free(c10_npu::getCurrentNPUStream().stream());
 
   // Copy data from input parameters to persistent graph tensors.
   // Schedule-overlap prepare can defer token copy until replay because tokens
