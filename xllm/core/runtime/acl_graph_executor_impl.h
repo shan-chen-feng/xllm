@@ -175,7 +175,8 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   uint32_t get_bucket_num_tokens(uint32_t num_tokens) const;
 
   uint64_t get_graph_key(uint32_t bucket_num_tokens,
-                         const ModelInputParams& params) const;
+                         const ModelInputParams& params,
+                         uint32_t actual_num_tokens) const;
 };
 REGISTER_EXECUTOR("npu", AclGraphExecutorImpl);
 }  // namespace xllm::npu

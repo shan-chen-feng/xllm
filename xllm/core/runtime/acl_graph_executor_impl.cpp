@@ -45,6 +45,7 @@ namespace xllm::npu {
 namespace {
 constexpr uint64_t kSpecVerifyGraphKeyMask = 1ull << 63;
 constexpr uint64_t kSpecVerifyQMaxSeqLenShift = 32;
+constexpr uint64_t kDraftDecodeActualTokensShift = 32;
 
 std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
     const std::vector<KVCache>& kv_caches) {
@@ -68,19 +69,12 @@ bool allow_single_layer_graph(const ModelArgs& args,
          args.model_type() == "qwen3_eagle3";
 }
 
-bool should_clone_single_buffer_draft_graph_output(
-    const runtime::Options& options,
-    int32_t graph_slot_count) {
-  return graph_slot_count <= 1 && options.is_draft_engine() &&
-         options.backend() == "llm";
-}
-
-torch::Tensor clone_graph_output_if_needed(const torch::Tensor& tensor,
-                                           bool should_clone) {
-  if (!should_clone || !tensor.defined() || tensor.numel() == 0) {
-    return tensor;
-  }
-  return tensor.clone();
+bool needs_actual_num_tokens_graph_key(const ModelArgs& args,
+                                       const runtime::Options& options,
+                                       const ModelInputParams& params) {
+  return options.is_draft_engine() && options.backend() == "llm" &&
+         args.model_type() == "qwen3_eagle3" &&
+         params.meta.batch_forward_type.is_decode();
 }
 
 }  // namespace
@@ -559,7 +553,8 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     return model_->forward(tokens, positions, kv_caches, params);
   }
 
-  const uint64_t graph_key = get_graph_key(bucket_num_tokens, params_single);
+  const uint64_t graph_key =
+      get_graph_key(bucket_num_tokens, params_single, n_tokens);
 
   // Check if captured graph exists for this bucket num_tokens
   int32_t slot_idx = 0;
@@ -578,8 +573,6 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   }
   auto& active_slot = graph_slots_[slot_idx];
   auto& active_persistent_param = *active_slot.persistent_param;
-  const bool clone_graph_output = should_clone_single_buffer_draft_graph_output(
-      options_, graph_slot_count_);
 
   if (replay_graph != nullptr) {
     // Replay the existing graph
@@ -587,15 +580,11 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << "AclGraphExecutorImpl::run() in replay mode";
     ModelOutput result = replay_graph->replay(
         model_, tokens_tensor, positions_tensor, kv_caches, params_single);
-    result.hidden_states =
-        clone_graph_output_if_needed(result.hidden_states, clone_graph_output);
     // Handle aux_hidden_states based on options
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
           active_persistent_param.aux_hidden_states(n_tokens);
       if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
-        aux_hidden_states =
-            clone_graph_output_if_needed(aux_hidden_states, clone_graph_output);
         return ModelOutput(
             result.hidden_states, torch::Tensor(), aux_hidden_states);
       }
@@ -637,14 +626,10 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     // already executed)
     torch::Tensor hidden_states =
         active_slot.graphs[graph_key]->get_hidden_states(n_tokens);
-    hidden_states =
-        clone_graph_output_if_needed(hidden_states, clone_graph_output);
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
           active_persistent_param.aux_hidden_states(n_tokens);
       if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
-        aux_hidden_states =
-            clone_graph_output_if_needed(aux_hidden_states, clone_graph_output);
         return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
       }
     }
@@ -704,7 +689,8 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
     return;
   }
   const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
-  const uint64_t graph_key = get_graph_key(bucket_num_tokens, params);
+  const uint64_t graph_key = get_graph_key(
+      bucket_num_tokens, params, static_cast<uint32_t>(tokens.size(0)));
 
   AclGraph* graph = nullptr;
   {
@@ -771,7 +757,8 @@ uint32_t AclGraphExecutorImpl::get_bucket_num_tokens(
 
 uint64_t AclGraphExecutorImpl::get_graph_key(
     uint32_t bucket_num_tokens,
-    const ModelInputParams& params) const {
+    const ModelInputParams& params,
+    uint32_t actual_num_tokens) const {
   if (params.is_spec_verify &&
       params.meta.batch_forward_type.is_chunked_prefill()) {
     const uint64_t q_max_seq_len =
@@ -779,7 +766,12 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
     return static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
            (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
   }
-  return static_cast<uint64_t>(bucket_num_tokens);
+  uint64_t graph_key = static_cast<uint64_t>(bucket_num_tokens);
+  if (needs_actual_num_tokens_graph_key(args_, options_, params)) {
+    graph_key |= static_cast<uint64_t>(actual_num_tokens)
+                 << kDraftDecodeActualTokensShift;
+  }
+  return graph_key;
 }
 
 }  // namespace xllm::npu
