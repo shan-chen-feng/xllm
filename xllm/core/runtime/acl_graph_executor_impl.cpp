@@ -59,6 +59,27 @@ std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
   return {torch::Tensor(), torch::Tensor()};
 }
 
+// run() returns hidden_states / aux_hidden_states that are views into the
+// slot's persistent output buffers. With a single slot, the next replay
+// overwrites those buffers while a downstream consumer (e.g. the eagle3
+// index_select that turns aux_hidden into the draft's input embedding) may
+// still be reading them. That cross-step read-vs-overwrite races on
+// graph_stream_ (writer) vs the compute stream (reader) and is NOT covered by
+// the input-side buffers_in_use event. Clone into caller-owned memory so the
+// output survives the next replay.
+//
+// The clone is issued on the current stream, which replay()/capture() have
+// already ordered after the graph write via make_current_stream_wait_for_graph,
+// so it observes the correct data. With >1 slot, buffer rotation isolates
+// consecutive steps' outputs, so skip the copy to avoid the overhead.
+torch::Tensor own_graph_output(const torch::Tensor& view,
+                               int32_t graph_slot_count) {
+  if (graph_slot_count > 1 || !view.defined() || view.numel() == 0) {
+    return view;
+  }
+  return view.clone();
+}
+
 bool allow_single_layer_graph(const ModelArgs& args,
                               const runtime::Options& options) {
   // qwen3_eagle3 draft is intentionally a one-layer LLM. Keep the original
@@ -578,10 +599,13 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
           active_persistent_param.aux_hidden_states(n_tokens);
       if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
         return ModelOutput(
-            result.hidden_states, torch::Tensor(), aux_hidden_states);
+            own_graph_output(result.hidden_states, graph_slot_count_),
+            torch::Tensor(),
+            own_graph_output(aux_hidden_states, graph_slot_count_));
       }
     }
-    return result;
+    return ModelOutput(
+        own_graph_output(result.hidden_states, graph_slot_count_));
   }
 
   // Graph doesn't exist for this bucket num_tokens, try to create it lazily
@@ -622,10 +646,13 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
       torch::Tensor aux_hidden_states =
           active_persistent_param.aux_hidden_states(n_tokens);
       if (aux_hidden_states.defined() && aux_hidden_states.numel() > 0) {
-        return ModelOutput(hidden_states, torch::Tensor(), aux_hidden_states);
+        return ModelOutput(
+            own_graph_output(hidden_states, graph_slot_count_),
+            torch::Tensor(),
+            own_graph_output(aux_hidden_states, graph_slot_count_));
       }
     }
-    return ModelOutput(hidden_states);
+    return ModelOutput(own_graph_output(hidden_states, graph_slot_count_));
   }
 
   // Fallback to eager mode if capture fails
