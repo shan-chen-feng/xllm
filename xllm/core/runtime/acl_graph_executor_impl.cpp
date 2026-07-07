@@ -450,6 +450,26 @@ ModelOutput AclGraph::replay(CausalLM* model,
   persistent_param_.record_buffers_in_use(graph_stream_);
   make_current_stream_wait_for_graph(stream);
 
+  // DIAGNOSTIC: checksum the graph OUTPUT for the identical inputs logged above.
+  // Sync so the replay has finished writing before we read. If inputs match
+  // between single/double buffer (they do) but this diverges, the replay itself
+  // is nondeterministic (a real race in the graph output). If this also matches,
+  // the graph is fully deterministic and the accept-rate difference lives
+  // entirely outside the graph (validate/sampling/consumption). Remove once
+  // localized.
+  {
+    aclrtSynchronizeStream(stream);
+    torch::Tensor out = get_hidden_states(actual_num_tokens);
+    const double out_abs =
+        (out.defined() && out.numel() > 0)
+            ? out.to(torch::kFloat32).abs().sum().item<double>()
+            : 0.0;
+    LOG(INFO) << "[GRAPH_REPLAY_OUTPUT]"
+              << " graph=" << static_cast<const void*>(this)
+              << " bucket=" << num_tokens_ << " actual=" << actual_num_tokens
+              << " out_abs=" << out_abs;
+  }
+
   // Return the actual num_tokens portion of ModelOutput
   // Note: aux_hidden_states handling is done in AclGraphExecutorImpl::run()
   // since replay() doesn't have access to options
