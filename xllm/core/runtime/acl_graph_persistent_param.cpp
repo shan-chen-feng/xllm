@@ -19,11 +19,14 @@ limitations under the License.
 #include <torch/torch.h>
 #include <torch_npu/torch_npu.h>
 
+#include <absl/strings/str_join.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -44,6 +47,39 @@ limitations under the License.
 namespace xllm::npu {
 
 namespace {
+constexpr char kEagle3GraphDebugTag[] = "[EAGLE3_GRAPH_DEBUG]";
+
+bool should_log_eagle3_graph_debug(const ModelArgs& args,
+                                   const runtime::Options& options,
+                                   const ModelInputParams& params) {
+  return options.is_draft_engine() && options.backend() == "llm" &&
+         args.model_type() == "qwen3_eagle3" &&
+         params.meta.batch_forward_type.is_decode();
+}
+
+std::string tensor_debug_string(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return "undefined";
+  }
+  std::ostringstream oss;
+  oss << "shape=" << tensor.sizes() << " dtype=" << tensor.dtype()
+      << " device=" << tensor.device() << " ptr=" << tensor.data_ptr();
+  return oss.str();
+}
+
+std::string tiling_prefix_string(const uint32_t* data,
+                                 size_t size,
+                                 size_t limit = 24) {
+  if (data == nullptr || size == 0) {
+    return "";
+  }
+  std::vector<uint32_t> values;
+  values.reserve(std::min(size, limit));
+  for (size_t i = 0; i < std::min(size, limit); ++i) {
+    values.emplace_back(data[i]);
+  }
+  return absl::StrJoin(values, ",");
+}
 
 int64_t get_decode_graph_capacity(const runtime::Options& options) {
   CHECK_GT(options.num_decoding_tokens(), 0)
@@ -631,6 +667,34 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
       is_empty_dp_decode_rank
           ? 0
           : (is_chunked_prefill ? actual_batch_size : actual_num_tokens);
+  const bool log_eagle3_graph_debug =
+      should_log_eagle3_graph_debug(args_, options_, params);
+  if (log_eagle3_graph_debug) {
+    LOG(INFO) << kEagle3GraphDebugTag
+              << " phase=persistent_update_begin persistent_param=" << this
+              << " return_capture_params=" << return_capture_params
+              << " skip_token_update=" << skip_token_update
+              << " actual_num_tokens=" << actual_num_tokens
+              << " padded_num_tokens=" << padded_num_tokens
+              << " actual_batch_size=" << actual_batch_size
+              << " padded_batch_size=" << padded_batch_size
+              << " actual_seq_len_rows=" << actual_seq_len_rows
+              << " meta.num_sequences=" << params.meta.num_sequences
+              << " meta.actual_num_sequences="
+              << params.meta.actual_num_sequences
+              << " q_max_seq_len=" << q_max_seq_len
+              << " is_empty_dp_decode_rank=" << is_empty_dp_decode_rank
+              << " uses_paged_attention_tiling="
+              << uses_paged_attention_tiling()
+              << " tokens{" << tensor_debug_string(tokens) << "}"
+              << " positions{" << tensor_debug_string(positions) << "}"
+              << " input_embedding{"
+              << tensor_debug_string(params.embedding.input_embedding) << "}"
+              << " host_q_seq_lens=["
+              << absl::StrJoin(params.attention.host.q_seq_lens, ",") << "]"
+              << " host_kv_seq_lens=["
+              << absl::StrJoin(params.attention.host.kv_seq_lens, ",") << "]";
+  }
 
   // Copy data from input parameters to persistent graph tensors.
   // Schedule-overlap prepare can defer token copy until replay because tokens
@@ -909,6 +973,27 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
   }
   const bool use_expanded_spec_decode_attention =
       params.graph.use_expanded_decode_for_spec_verify_attention;
+  if (log_eagle3_graph_debug) {
+    LOG(INFO) << kEagle3GraphDebugTag
+              << " phase=persistent_update_lens persistent_param=" << this
+              << " padded_q_seq_lens=["
+              << absl::StrJoin(padded_q_seq_lens_vec, ",") << "]"
+              << " padded_kv_seq_lens=["
+              << absl::StrJoin(padded_kv_seq_lens_vec, ",") << "]"
+              << " q_seq_lens_persistent{"
+              << tensor_debug_string(
+                     q_seq_lens(static_cast<uint32_t>(padded_batch_size)))
+              << "}"
+              << " kv_seq_lens_persistent{"
+              << tensor_debug_string(
+                     kv_seq_lens(static_cast<uint32_t>(padded_batch_size)))
+              << "}"
+              << " block_tables_persistent{"
+              << tensor_debug_string(persistent_block_tables(
+                     static_cast<uint32_t>(padded_batch_size)))
+              << "}"
+              << " tiling_data{" << tensor_debug_string(tiling_data_) << "}";
+  }
   if (is_qwen3_5_spec_verify_chunked_prefill) {
     CHECK(use_expanded_spec_decode_attention)
         << "Qwen3.5 spec-verify ACL graph requires MTP worker expanded "
@@ -1429,6 +1514,29 @@ void GraphPersistentParam::plan_paged_attention_tiling(
   if (VLOG_IS_ON(kGraphExecutorLogVerboseLevel)) {
     parse_pa_host_tiling_buffer(tiling_buffer_info.tilingBuffer,
                                 tiling_buffer_info.tilingBufferSize);
+  }
+  if (should_log_eagle3_graph_debug(args_, options_, input_params)) {
+    const auto* tiling_buffer =
+        reinterpret_cast<const uint32_t*>(tiling_buffer_info.tilingBuffer);
+    LOG(INFO) << kEagle3GraphDebugTag
+              << " phase=plan_paged_attention_tiling persistent_param="
+              << this << " query_tokens=" << tokens.size(0)
+              << " tiling_buffer_size="
+              << tiling_buffer_info.tilingBufferSize
+              << " tiling_prefix=["
+              << tiling_prefix_string(
+                     tiling_buffer,
+                     tiling_buffer_info.tilingBufferSize / sizeof(uint32_t))
+              << "]"
+              << " k_cache{" << tensor_debug_string(k_cache) << "}"
+              << " v_cache{" << tensor_debug_string(v_cache) << "}"
+              << " block_tables{" << tensor_debug_string(block_tables) << "}"
+              << " context_lens{"
+              << tensor_debug_string(input_params.attention.device.kv_seq_lens)
+              << "}"
+              << " host_kv_seq_lens=["
+              << absl::StrJoin(input_params.attention.host.kv_seq_lens, ",")
+              << "]";
   }
   aclError acl_status =
       aclrtMemcpyAsync(tiling_data_.data_ptr(),

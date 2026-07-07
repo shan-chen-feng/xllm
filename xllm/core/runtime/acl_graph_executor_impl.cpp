@@ -23,7 +23,10 @@ limitations under the License.
 #include <torch_npu/csrc/libs/init_npu.h>
 #include <torch_npu/torch_npu.h>
 
+#include <absl/strings/str_join.h>
+
 #include <algorithm>
+#include <sstream>
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
@@ -45,7 +48,7 @@ namespace xllm::npu {
 namespace {
 constexpr uint64_t kSpecVerifyGraphKeyMask = 1ull << 63;
 constexpr uint64_t kSpecVerifyQMaxSeqLenShift = 32;
-constexpr uint64_t kDraftDecodeActualTokensShift = 32;
+constexpr char kEagle3GraphDebugTag[] = "[EAGLE3_GRAPH_DEBUG]";
 
 std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
     const std::vector<KVCache>& kv_caches) {
@@ -69,12 +72,73 @@ bool allow_single_layer_graph(const ModelArgs& args,
          args.model_type() == "qwen3_eagle3";
 }
 
-bool needs_actual_num_tokens_graph_key(const ModelArgs& args,
-                                       const runtime::Options& options,
-                                       const ModelInputParams& params) {
+bool should_log_eagle3_graph_debug(const ModelArgs& args,
+                                   const runtime::Options& options) {
   return options.is_draft_engine() && options.backend() == "llm" &&
-         args.model_type() == "qwen3_eagle3" &&
-         params.meta.batch_forward_type.is_decode();
+         args.model_type() == "qwen3_eagle3";
+}
+
+std::string tensor_debug_string(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return "undefined";
+  }
+  std::ostringstream oss;
+  oss << "shape=" << tensor.sizes() << " dtype=" << tensor.dtype()
+      << " device=" << tensor.device() << " ptr=" << tensor.data_ptr();
+  return oss.str();
+}
+
+void log_eagle3_graph_input(const char* phase,
+                            const ModelArgs& args,
+                            const runtime::Options& options,
+                            const torch::Tensor& tokens,
+                            const torch::Tensor& positions,
+                            const ModelInputParams& params,
+                            uint32_t bucket_num_tokens,
+                            uint64_t graph_key,
+                            int32_t slot_idx,
+                            int32_t graph_slot_count,
+                            const GraphPersistentParam* persistent_param,
+                            bool graph_exists,
+                            bool slot_prepared) {
+  if (!should_log_eagle3_graph_debug(args, options)) {
+    return;
+  }
+  LOG(INFO) << kEagle3GraphDebugTag << " phase=" << phase
+            << " slot=" << slot_idx << "/" << graph_slot_count
+            << " persistent_param=" << persistent_param
+            << " graph_exists=" << graph_exists
+            << " slot_prepared=" << slot_prepared
+            << " bucket_num_tokens=" << bucket_num_tokens
+            << " actual_num_tokens=" << tokens.size(0)
+            << " graph_key=" << graph_key
+            << " batch_forward_type="
+            << params.meta.batch_forward_type.to_string()
+            << " meta.num_sequences=" << params.meta.num_sequences
+            << " meta.actual_num_sequences="
+            << params.meta.actual_num_sequences
+            << " q_max_seq_len=" << params.meta.q_max_seq_len
+            << " kv_max_seq_len=" << params.meta.kv_max_seq_len
+            << " is_spec_verify=" << params.is_spec_verify
+            << " input_tokens_override_defined="
+            << params.graph.input_tokens_override.defined()
+            << " tokens{" << tensor_debug_string(tokens) << "}"
+            << " positions{" << tensor_debug_string(positions) << "}"
+            << " input_embedding{"
+            << tensor_debug_string(params.embedding.input_embedding) << "}"
+            << " q_seq_lens_device{"
+            << tensor_debug_string(params.attention.device.q_seq_lens) << "}"
+            << " kv_seq_lens_device{"
+            << tensor_debug_string(params.attention.device.kv_seq_lens) << "}"
+            << " new_cache_slots{"
+            << tensor_debug_string(params.attention.device.new_cache_slots)
+            << "}"
+            << " block_tables{"
+            << tensor_debug_string(params.attention.device.block_tables) << "}"
+            << " host_q_seq_lens=["
+            << absl::StrJoin(params.attention.host.q_seq_lens, ",") << "]"
+            << " host_kv_seq_lens=["
+            << absl::StrJoin(params.attention.host.kv_seq_lens, ",") << "]";
 }
 
 }  // namespace
@@ -111,6 +175,15 @@ bool AclGraph::capture(CausalLM* model,
       static_cast<uint32_t>(tokens.size(/*dim=*/0));
   CHECK_GE(num_tokens_, actual_num_tokens)
       << "num_tokens_ >= actual_num_tokens";
+  if (log_eagle3_graph_debug_) {
+    LOG(INFO) << kEagle3GraphDebugTag
+              << " phase=capture_update_start persistent_param="
+              << &persistent_param_
+              << " bucket_num_tokens=" << bucket_num_tokens
+              << " actual_num_tokens=" << actual_num_tokens
+              << " tokens{" << tensor_debug_string(tokens) << "}"
+              << " positions{" << tensor_debug_string(positions) << "}";
+  }
   auto graph_params = persistent_param_.update(tokens,
                                                k_cache,
                                                v_cache,
@@ -337,6 +410,19 @@ ModelOutput AclGraph::replay(CausalLM* model,
   const bool can_use_prepared_inputs =
       replay_inputs_prepared && params.graph.input_tokens_override.defined() &&
       !needs_graph_metadata;
+  if (log_eagle3_graph_debug_) {
+    LOG(INFO) << kEagle3GraphDebugTag
+              << " phase=replay_update_start persistent_param="
+              << &persistent_param_ << " bucket_num_tokens=" << num_tokens_
+              << " actual_num_tokens=" << actual_num_tokens
+              << " replay_inputs_prepared=" << replay_inputs_prepared
+              << " input_tokens_override_defined="
+              << params.graph.input_tokens_override.defined()
+              << " needs_graph_metadata=" << needs_graph_metadata
+              << " can_use_prepared_inputs=" << can_use_prepared_inputs
+              << " tokens{" << tensor_debug_string(tokens) << "}"
+              << " positions{" << tensor_debug_string(positions) << "}";
+  }
   std::optional<ModelInputParams> graph_params;
   if (can_use_prepared_inputs) {
     persistent_param_.update_tokens(
@@ -387,6 +473,16 @@ void AclGraph::prepare_replay_inputs(const torch::Tensor& tokens,
   CHECK_LE(actual_num_tokens, num_tokens_)
       << "num_tokens mismatch: expected <= " << num_tokens_ << ", got "
       << actual_num_tokens;
+  if (log_eagle3_graph_debug_) {
+    LOG(INFO) << kEagle3GraphDebugTag
+              << " phase=prepare_replay_inputs_start persistent_param="
+              << &persistent_param_ << " bucket_num_tokens=" << num_tokens_
+              << " actual_num_tokens=" << actual_num_tokens
+              << " input_tokens_override_defined="
+              << params.graph.input_tokens_override.defined()
+              << " tokens{" << tensor_debug_string(tokens) << "}"
+              << " positions{" << tensor_debug_string(positions) << "}";
+  }
   auto [k_cache, v_cache] = find_attention_plan_kv_cache(kv_cache);
   persistent_param_.update(tokens,
                            k_cache,
@@ -407,8 +503,7 @@ AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
   const bool need_update_attn_mask = model->is_hybrid_linear_attention();
   const bool is_hybrid_linear_attn = model->is_hybrid_linear_attention();
   graph_slot_count_ =
-      ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() &&
-              options.backend() == "vlm"
+      ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer()
           ? 2
           : 1;
   for (int32_t slot_idx = 0; slot_idx < graph_slot_count_; ++slot_idx) {
@@ -553,11 +648,11 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     return model_->forward(tokens, positions, kv_caches, params);
   }
 
-  const uint64_t graph_key =
-      get_graph_key(bucket_num_tokens, params_single, n_tokens);
+  const uint64_t graph_key = get_graph_key(bucket_num_tokens, params_single);
 
   // Check if captured graph exists for this bucket num_tokens
   int32_t slot_idx = 0;
+  bool slot_prepared = false;
   AclGraph* replay_graph = nullptr;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
@@ -570,9 +665,23 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
     if (it != slot.graphs.end()) {
       replay_graph = it->second.get();
     }
+    slot_prepared = slot.is_prepared;
   }
   auto& active_slot = graph_slots_[slot_idx];
   auto& active_persistent_param = *active_slot.persistent_param;
+  log_eagle3_graph_input("run_select_slot",
+                         args_,
+                         options_,
+                         tokens_tensor,
+                         positions_tensor,
+                         params_single,
+                         bucket_num_tokens,
+                         graph_key,
+                         slot_idx,
+                         graph_slot_count_,
+                         active_slot.persistent_param.get(),
+                         replay_graph != nullptr,
+                         slot_prepared);
 
   if (replay_graph != nullptr) {
     // Replay the existing graph
@@ -593,8 +702,10 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
   }
 
   // Graph doesn't exist for this bucket num_tokens, try to create it lazily
-  auto graph =
-      std::make_unique<AclGraph>(active_persistent_param, device_.index());
+  auto graph = std::make_unique<AclGraph>(
+      active_persistent_param,
+      device_.index(),
+      should_log_eagle3_graph_debug(args_, options_));
   VLOG(kGraphExecutorLogVerboseLevel)
       << "AclGraphExecutorImpl::run() in capture mode";
   bool capture_success = false;
@@ -689,27 +800,72 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
     return;
   }
   const uint32_t bucket_num_tokens = get_bucket_num_tokens(graph_num_tokens);
-  const uint64_t graph_key = get_graph_key(
-      bucket_num_tokens, params, static_cast<uint32_t>(tokens.size(0)));
+  const uint64_t graph_key = get_graph_key(bucket_num_tokens, params);
 
   AclGraph* graph = nullptr;
   {
     std::lock_guard<std::mutex> lock(graph_slots_mutex_);
     if (last_started_replay_slot_ < 0) {
+      if (should_log_eagle3_graph_debug(args_, options_)) {
+        LOG(INFO) << kEagle3GraphDebugTag
+                  << " phase=prepare_skip_no_started_slot"
+                  << " bucket_num_tokens=" << bucket_num_tokens
+                  << " actual_num_tokens=" << tokens.size(0)
+                  << " graph_key=" << graph_key;
+      }
       return;
     }
     const int32_t prepare_slot =
         (last_started_replay_slot_ + 1) % graph_slot_count_;
     auto& slot = graph_slots_[prepare_slot];
     if (slot.is_prepared) {
+      log_eagle3_graph_input("prepare_skip_already_prepared",
+                             args_,
+                             options_,
+                             tokens,
+                             positions,
+                             params,
+                             bucket_num_tokens,
+                             graph_key,
+                             prepare_slot,
+                             graph_slot_count_,
+                             slot.persistent_param.get(),
+                             /*graph_exists=*/true,
+                             slot.is_prepared);
       return;
     }
     auto it = slot.graphs.find(graph_key);
     if (it == slot.graphs.end()) {
+      log_eagle3_graph_input("prepare_skip_no_graph",
+                             args_,
+                             options_,
+                             tokens,
+                             positions,
+                             params,
+                             bucket_num_tokens,
+                             graph_key,
+                             prepare_slot,
+                             graph_slot_count_,
+                             slot.persistent_param.get(),
+                             /*graph_exists=*/false,
+                             slot.is_prepared);
       return;
     }
     graph = it->second.get();
     slot.is_prepared = true;
+    log_eagle3_graph_input("prepare_hit",
+                           args_,
+                           options_,
+                           tokens,
+                           positions,
+                           params,
+                           bucket_num_tokens,
+                           graph_key,
+                           prepare_slot,
+                           graph_slot_count_,
+                           slot.persistent_param.get(),
+                           /*graph_exists=*/true,
+                           slot.is_prepared);
   }
   graph->prepare_replay_inputs(tokens, positions, kv_caches, params);
 }
@@ -757,8 +913,7 @@ uint32_t AclGraphExecutorImpl::get_bucket_num_tokens(
 
 uint64_t AclGraphExecutorImpl::get_graph_key(
     uint32_t bucket_num_tokens,
-    const ModelInputParams& params,
-    uint32_t actual_num_tokens) const {
+    const ModelInputParams& params) const {
   if (params.is_spec_verify &&
       params.meta.batch_forward_type.is_chunked_prefill()) {
     const uint64_t q_max_seq_len =
@@ -766,12 +921,7 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
     return static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
            (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
   }
-  uint64_t graph_key = static_cast<uint64_t>(bucket_num_tokens);
-  if (needs_actual_num_tokens_graph_key(args_, options_, params)) {
-    graph_key |= static_cast<uint64_t>(actual_num_tokens)
-                 << kDraftDecodeActualTokensShift;
-  }
-  return graph_key;
+  return static_cast<uint64_t>(bucket_num_tokens);
 }
 
 }  // namespace xllm::npu

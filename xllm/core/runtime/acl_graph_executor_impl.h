@@ -56,8 +56,11 @@ struct AclGraphTaskUpdateContext;
 class AclGraph {
  public:
   explicit AclGraph(GraphPersistentParam& persistent_param,
-                    c10::DeviceIndex device_index)
-      : persistent_param_(persistent_param), device_index_(device_index) {
+                    c10::DeviceIndex device_index,
+                    bool log_eagle3_graph_debug = false)
+      : persistent_param_(persistent_param),
+        device_index_(device_index),
+        log_eagle3_graph_debug_(log_eagle3_graph_debug) {
     // Initialize capture stream in constructor
     initialize_capture_stream(device_index);
   }
@@ -120,6 +123,7 @@ class AclGraph {
   std::shared_ptr<AclGraphTaskUpdateContext> graph_task_context_;
   std::optional<c10_npu::NPUStream> update_stream_;
   std::atomic<bool> replay_inputs_prepared_{false};
+  bool log_eagle3_graph_debug_ = false;
 };
 
 // Executor implementation using ACL graph optimization
@@ -175,8 +179,7 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   uint32_t get_bucket_num_tokens(uint32_t num_tokens) const;
 
   uint64_t get_graph_key(uint32_t bucket_num_tokens,
-                         const ModelInputParams& params,
-                         uint32_t actual_num_tokens) const;
+                         const ModelInputParams& params) const;
 };
 REGISTER_EXECUTOR("npu", AclGraphExecutorImpl);
 }  // namespace xllm::npu
