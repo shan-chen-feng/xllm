@@ -413,8 +413,10 @@ AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
   const bool need_update_attn_mask = model->is_hybrid_linear_attention();
   const bool is_hybrid_linear_attn = model->is_hybrid_linear_attention();
   graph_slot_count_ =
-      ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() ? 2
-                                                                           : 1;
+      ::xllm::ExecutionConfig::get_instance().enable_graph_double_buffer() &&
+              options.backend() == "vlm"
+          ? 2
+          : 1;
   for (int32_t slot_idx = 0; slot_idx < graph_slot_count_; ++slot_idx) {
     graph_slots_[slot_idx].persistent_param =
         std::make_unique<GraphPersistentParam>(args_,
