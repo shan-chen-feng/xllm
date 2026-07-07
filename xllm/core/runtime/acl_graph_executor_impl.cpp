@@ -49,6 +49,7 @@ namespace {
 constexpr uint64_t kSpecVerifyGraphKeyMask = 1ull << 63;
 constexpr uint64_t kSpecVerifyQMaxSeqLenShift = 32;
 constexpr char kEagle3GraphDebugTag[] = "[EAGLE3_GRAPH_DEBUG]";
+constexpr uint64_t kDraftDecodeBlockTableWidthShift = 32;
 
 std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
     const std::vector<KVCache>& kv_caches) {
@@ -76,6 +77,21 @@ bool should_log_eagle3_graph_debug(const ModelArgs& args,
                                    const runtime::Options& options) {
   return options.is_draft_engine() && options.backend() == "llm" &&
          args.model_type() == "qwen3_eagle3";
+}
+
+bool needs_block_table_width_graph_key(const ModelArgs& args,
+                                       const runtime::Options& options,
+                                       const ModelInputParams& params) {
+  return should_log_eagle3_graph_debug(args, options) &&
+         params.meta.batch_forward_type.is_decode();
+}
+
+uint64_t get_block_table_width(const ModelInputParams& params) {
+  const auto& block_tables = params.attention.device.block_tables;
+  if (!block_tables.defined() || block_tables.dim() < 2) {
+    return 0;
+  }
+  return static_cast<uint64_t>(std::max<int64_t>(block_tables.size(1), 1));
 }
 
 std::string tensor_debug_string(const torch::Tensor& tensor) {
@@ -112,6 +128,7 @@ void log_eagle3_graph_input(const char* phase,
             << " bucket_num_tokens=" << bucket_num_tokens
             << " actual_num_tokens=" << tokens.size(0)
             << " graph_key=" << graph_key
+            << " block_table_width=" << get_block_table_width(params)
             << " batch_forward_type="
             << params.meta.batch_forward_type.to_string()
             << " meta.num_sequences=" << params.meta.num_sequences
@@ -334,10 +351,6 @@ AclGraph::~AclGraph() {
   } else if (capture_stream_.has_value()) {
     aclrtSynchronizeStream(capture_stream_.value().stream());
   }
-  if (input_ready_event_ != nullptr) {
-    aclrtDestroyEvent(input_ready_event_);
-    input_ready_event_ = nullptr;
-  }
   if (replay_done_event_ != nullptr) {
     aclrtDestroyEvent(replay_done_event_);
     replay_done_event_ = nullptr;
@@ -352,32 +365,12 @@ void AclGraph::initialize_capture_stream(c10::DeviceIndex device_index) {
   capture_stream_ = c10_npu::getStreamFromPool(true, device_index);
   update_stream_ = c10_npu::getStreamFromPool(true, device_index);
   device_index_ = device_index;
-  CHECK_EQ(aclrtCreateEventWithFlag(&input_ready_event_, ACL_EVENT_SYNC),
-           ACL_SUCCESS)
-      << "Failed to create ACL graph input ready event";
   CHECK_EQ(aclrtCreateEventWithFlag(&replay_done_event_, ACL_EVENT_SYNC),
            ACL_SUCCESS)
       << "Failed to create ACL graph replay completion event";
   LOG(INFO) << "Initialized capture_stream"
             << ", id: " << capture_stream_.value().id()
             << ", device_index: " << device_index;
-}
-
-void AclGraph::record_input_ready(aclrtStream current_stream) {
-  CHECK_NE(input_ready_event_, nullptr)
-      << "input_ready_event is not initialized";
-  CHECK_EQ(aclrtRecordEvent(input_ready_event_, current_stream), ACL_SUCCESS)
-      << "aclrtRecordEvent(input_ready_event) failed";
-  input_ready_stream_ = current_stream;
-}
-
-void AclGraph::make_stream_wait_for_input_ready(aclrtStream stream) {
-  CHECK_NE(input_ready_event_, nullptr)
-      << "input_ready_event is not initialized";
-  if (input_ready_stream_ != nullptr && stream != input_ready_stream_) {
-    CHECK_EQ(aclrtStreamWaitEvent(stream, input_ready_event_), ACL_SUCCESS)
-        << "aclrtStreamWaitEvent(input_ready_event) failed";
-  }
 }
 
 void AclGraph::make_current_stream_wait_for_graph(aclrtStream current_stream) {
@@ -434,13 +427,6 @@ ModelOutput AclGraph::replay(CausalLM* model,
   const bool can_use_prepared_inputs =
       replay_inputs_prepared && params.graph.input_tokens_override.defined() &&
       !needs_graph_metadata;
-  // Persistent graph inputs are updated on the caller's current stream, while
-  // NPUGraph replay runs on the stream captured by the graph.  Keep the two
-  // streams ordered so graph replay never consumes stale persistent buffers.
-  aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-  if (replay_inputs_prepared) {
-    make_stream_wait_for_input_ready(stream);
-  }
   if (log_eagle3_graph_debug_) {
     LOG(INFO) << kEagle3GraphDebugTag
               << " phase=replay_update_start persistent_param="
@@ -451,9 +437,6 @@ ModelOutput AclGraph::replay(CausalLM* model,
               << params.graph.input_tokens_override.defined()
               << " needs_graph_metadata=" << needs_graph_metadata
               << " can_use_prepared_inputs=" << can_use_prepared_inputs
-              << " replay_stream=" << stream
-              << " graph_stream=" << graph_stream_
-              << " input_ready_stream=" << input_ready_stream_
               << " tokens{" << tensor_debug_string(tokens) << "}"
               << " positions{" << tensor_debug_string(positions) << "}";
   }
@@ -479,10 +462,11 @@ ModelOutput AclGraph::replay(CausalLM* model,
           graph_params.value());
     }
   }
-  record_input_ready(stream);
 
   // Replay captured graph - NPUGraph mempool reuses temporary tensors
-  make_stream_wait_for_input_ready(graph_stream_);
+  // Get current NPU stream from libtorch NPU API
+  aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
   graph_.replay();
   if (model->is_hybrid_linear_attention()) {
     CHECK(graph_params.has_value())
@@ -525,7 +509,6 @@ void AclGraph::prepare_replay_inputs(const torch::Tensor& tokens,
                            num_tokens_,
                            /*return_capture_params=*/false,
                            /*skip_token_update=*/true);
-  record_input_ready(c10_npu::getCurrentNPUStream().stream());
   replay_inputs_prepared_.store(true, std::memory_order_release);
 }
 
@@ -955,7 +938,12 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
     return static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
            (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
   }
-  return static_cast<uint64_t>(bucket_num_tokens);
+  uint64_t graph_key = static_cast<uint64_t>(bucket_num_tokens);
+  if (needs_block_table_width_graph_key(args_, options_, params)) {
+    graph_key |= get_block_table_width(params)
+                 << kDraftDecodeBlockTableWidthShift;
+  }
+  return graph_key;
 }
 
 }  // namespace xllm::npu
