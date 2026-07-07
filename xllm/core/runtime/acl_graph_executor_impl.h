@@ -116,6 +116,13 @@ class AclGraph {
   std::optional<c10_npu::NPUStream> capture_stream_;
   aclrtStream graph_stream_ = nullptr;
   aclrtEvent replay_done_event_ = nullptr;
+  // Recorded on the compute stream after update()'s H2D input copies, waited on
+  // by graph_stream_ before graph_.replay() so the replay never reads persistent
+  // input buffers that update() has not finished writing. Needed on the
+  // single-slot path where update() runs inline on the compute stream with no
+  // other barrier to graph_stream_ (double-buffer prepares inputs on the
+  // prepare stream and orders them via metadata_ready_event instead).
+  aclrtEvent input_ready_event_ = nullptr;
   c10::DeviceIndex device_index_;
   std::shared_ptr<AclGraphTaskUpdateContext> graph_task_context_;
   std::optional<c10_npu::NPUStream> update_stream_;

@@ -277,6 +277,10 @@ AclGraph::~AclGraph() {
     aclrtDestroyEvent(replay_done_event_);
     replay_done_event_ = nullptr;
   }
+  if (input_ready_event_ != nullptr) {
+    aclrtDestroyEvent(input_ready_event_);
+    input_ready_event_ = nullptr;
+  }
 }
 
 void AclGraph::initialize_capture_stream(c10::DeviceIndex device_index) {
@@ -290,6 +294,9 @@ void AclGraph::initialize_capture_stream(c10::DeviceIndex device_index) {
   CHECK_EQ(aclrtCreateEventWithFlag(&replay_done_event_, ACL_EVENT_SYNC),
            ACL_SUCCESS)
       << "Failed to create ACL graph replay completion event";
+  CHECK_EQ(aclrtCreateEventWithFlag(&input_ready_event_, ACL_EVENT_SYNC),
+           ACL_SUCCESS)
+      << "Failed to create ACL graph input-ready event";
   LOG(INFO) << "Initialized capture_stream"
             << ", id: " << capture_stream_.value().id()
             << ", device_index: " << device_index;
@@ -375,6 +382,61 @@ ModelOutput AclGraph::replay(CausalLM* model,
   // Replay captured graph - NPUGraph mempool reuses temporary tensors
   // Get current NPU stream from libtorch NPU API
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+  // update() issued its H2D input copies on the compute stream (`stream`).
+  // graph_.replay() reads those persistent buffers on graph_stream_. When the
+  // two differ (they do on the single-slot path), make the graph stream wait
+  // for the copies to complete first, mirroring the aclrtSynchronizeStream that
+  // capture() does before it records the graph. Without this the replay can
+  // read half-written tiling/positions/block-tables and silently corrupt the
+  // draft, which is what double-buffer was masking by preparing inputs on the
+  // prepare stream instead.
+  if (graph_stream_ != nullptr && graph_stream_ != stream) {
+    CHECK_EQ(aclrtRecordEvent(input_ready_event_, stream), ACL_SUCCESS)
+        << "aclrtRecordEvent(input_ready_event_) failed";
+    CHECK_EQ(aclrtStreamWaitEvent(graph_stream_, input_ready_event_),
+             ACL_SUCCESS)
+        << "aclrtStreamWaitEvent(graph_stream_, input_ready_event_) failed";
+  }
+
+  // DIAGNOSTIC: dump the persistent graph inputs the replay is about to read.
+  // Sync the compute stream first so update()'s H2D copies have landed and the
+  // checksums reflect exactly what graph_.replay() will consume. Compare the
+  // same decode step between double_buffer=on and off: whichever field diverges
+  // is the buffer actually being corrupted. Remove once localized.
+  {
+    aclrtSynchronizeStream(stream);
+    auto sum_i64 = [](const torch::Tensor& t) -> int64_t {
+      if (!t.defined() || t.numel() == 0) {
+        return 0;
+      }
+      return t.to(torch::kLong).sum().item<int64_t>();
+    };
+    auto sum_abs = [](const torch::Tensor& t) -> double {
+      if (!t.defined() || t.numel() == 0) {
+        return 0.0;
+      }
+      return t.to(torch::kFloat32).abs().sum().item<double>();
+    };
+    LOG(INFO) << "[GRAPH_REPLAY_INPUTS]"
+              << " graph=" << static_cast<const void*>(this)
+              << " hidden=" << persistent_param_.hidden_states(1).size(-1)
+              << " bucket=" << num_tokens_
+              << " actual=" << actual_num_tokens
+              << " prepared=" << can_use_prepared_inputs
+              << " tok_sum=" << sum_i64(persistent_param_.persistent_tokens(
+                                   actual_num_tokens))
+              << " pos_sum=" << sum_i64(persistent_param_.persistent_positions(
+                                   actual_num_tokens))
+              << " emb_abs=" << sum_abs(persistent_param_.persistent_embedding(
+                                   actual_num_tokens))
+              << " kv_sum=" << sum_i64(persistent_param_.kv_seq_lens())
+              << " slot_sum="
+              << sum_i64(persistent_param_.persistent_new_cache_slots(
+                     actual_num_tokens))
+              << " blk_sum="
+              << sum_i64(persistent_param_.persistent_block_tables());
+  }
 
   graph_.replay();
   if (model->is_hybrid_linear_attention()) {
