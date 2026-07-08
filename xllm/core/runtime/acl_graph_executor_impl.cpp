@@ -45,6 +45,11 @@ namespace xllm::npu {
 namespace {
 constexpr uint64_t kSpecVerifyGraphKeyMask = 1ull << 63;
 constexpr uint64_t kSpecVerifyQMaxSeqLenShift = 32;
+// Non-spec-verify keys use the low 32 bits for bucket_num_tokens; fold the
+// input-embedding hidden width into the high bits so different widths map to
+// distinct captured graphs. Disjoint from the spec-verify layout above, which
+// is only used when kSpecVerifyGraphKeyMask is set.
+constexpr uint64_t kEmbeddingDimGraphKeyShift = 32;
 
 std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
     const std::vector<KVCache>& kv_caches) {
@@ -752,7 +757,17 @@ uint64_t AclGraphExecutorImpl::get_graph_key(
     return static_cast<uint64_t>(bucket_num_tokens) | kSpecVerifyGraphKeyMask |
            (q_max_seq_len << kSpecVerifyQMaxSeqLenShift);
   }
-  return static_cast<uint64_t>(bucket_num_tokens);
+  // Fold the input-embedding hidden width into the key. The Eagle3 draft feeds
+  // embeddings of two widths across speculative steps (3*hidden bootstrap vs
+  // 1*hidden recycled aux state) whose forward topology differs (the fc_
+  // fusion layer runs only for the wide one), so they must not share a captured
+  // graph. Decode paths without an input_embedding leave the key unchanged.
+  uint64_t key = static_cast<uint64_t>(bucket_num_tokens);
+  if (params.embedding.input_embedding.defined()) {
+    key |= (static_cast<uint64_t>(params.embedding.input_embedding.size(1))
+            << kEmbeddingDimGraphKeyShift);
+  }
+  return key;
 }
 
 }  // namespace xllm::npu

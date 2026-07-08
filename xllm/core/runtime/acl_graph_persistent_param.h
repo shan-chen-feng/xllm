@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
 #include <acl/acl.h>
 #include <torch/torch.h>
 
@@ -141,12 +142,23 @@ class GraphPersistentParam final {
   bool need_update_attention_plan() const {
     return need_update_attention_plan_;
   }
+  // Returns the persistent embedding buffer for the width most recently seen
+  // in update() (active_embedding_dim_). Eagle3 draft feeds embeddings of two
+  // different widths across speculative steps (3*hidden for the bootstrap step,
+  // 1*hidden when recycling the draft's own aux hidden state), so each width
+  // gets its own buffer keyed by hidden size. See get_graph_key() which folds
+  // the width into the graph key so the two widths never share a captured
+  // graph.
   torch::Tensor persistent_embedding(uint32_t actual_tokens = 0) const {
+    auto it = persistent_embeddings_.find(active_embedding_dim_);
+    if (it == persistent_embeddings_.end()) {
+      return torch::Tensor();
+    }
     if (actual_tokens > 0) {
-      return persistent_embedding_.slice(
+      return it->second.slice(
           /*dim=*/0, /*start=*/0, /*end=*/actual_tokens);
     }
-    return persistent_embedding_;
+    return it->second;
   }
   torch::Tensor persistent_linear_state_indices(
       uint32_t actual_batch_size = 0) const {
@@ -233,7 +245,13 @@ class GraphPersistentParam final {
   torch::Tensor q_cu_seq_lens_default_;
 
   // for mtp model
-  torch::Tensor persistent_embedding_;
+  // Persistent input-embedding buffers keyed by hidden width. Eagle3 draft uses
+  // two widths across speculative steps; each width needs its own buffer so a
+  // narrow embedding is never copied into a buffer sized for a wider one.
+  absl::flat_hash_map<int64_t, torch::Tensor> persistent_embeddings_;
+  // Width most recently written in update(); selects which buffer the
+  // persistent_embedding() accessor returns when binding capture inputs.
+  int64_t active_embedding_dim_ = 0;
   torch::Tensor persistent_linear_state_indices_;
   torch::Tensor persistent_num_accepted_tokens_;
 

@@ -810,24 +810,32 @@ std::optional<ModelInputParams> GraphPersistentParam::update(
         persistent_block_tables_, actual_seq_len_rows, padded_batch_size);
   }
 
-  // Update persistent embedding from input_embedding if available
+  // Update persistent embedding from input_embedding if available.
+  // Buffers are keyed by hidden width: Eagle3 draft feeds a 3*hidden bootstrap
+  // embedding on the first speculative step and a 1*hidden embedding (its own
+  // recycled aux hidden state) on subsequent steps. Keying by width keeps a
+  // narrow embedding from being copied into a buffer sized for a wider one, and
+  // pairs with the width discriminator in get_graph_key().
   const auto& embedding = params.embedding.input_embedding;
   if (embedding.defined()) {
     const int64_t embedding_tokens = embedding.size(0);
+    const int64_t embedding_dim = embedding.size(1);
+    active_embedding_dim_ = embedding_dim;
 
-    // Initialize persistent_embedding_ if needed and not already initialized
-    if (persistent_embedding_.numel() == 0) {
+    // Initialize the buffer for this width if not already present.
+    auto it = persistent_embeddings_.find(embedding_dim);
+    if (it == persistent_embeddings_.end()) {
       const int64_t max_tokens_per_batch = options_.max_tokens_per_batch();
-      const int64_t embedding_dim = embedding.size(1);
       torch::Dtype dtype = util::parse_dtype(args_.dtype(), device_);
-      persistent_embedding_ =
-          torch::zeros({max_tokens_per_batch, embedding_dim},
-                       torch::dtype(dtype).device(device_));
+      it = persistent_embeddings_
+               .emplace(embedding_dim,
+                        torch::zeros({max_tokens_per_batch, embedding_dim},
+                                     torch::dtype(dtype).device(device_)))
+               .first;
     }
 
     // Copy embedding data to persistent buffer
-    persistent_embedding_
-        .slice(/*dim=*/0, /*start=*/0, /*end=*/embedding_tokens)
+    it->second.slice(/*dim=*/0, /*start=*/0, /*end=*/embedding_tokens)
         .copy_(embedding, /*non_blocking=*/true);
   }
   if (q_cu_seq_lens_default_.defined() &&
