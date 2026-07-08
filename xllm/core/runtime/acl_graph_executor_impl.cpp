@@ -24,6 +24,7 @@ limitations under the License.
 #include <torch_npu/torch_npu.h>
 
 #include <algorithm>
+#include <iomanip>
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
@@ -418,7 +419,18 @@ ModelOutput AclGraph::replay(CausalLM* model,
       }
       return t.to(torch::kFloat32).abs().sum().item<double>();
     };
-    LOG(INFO) << "[GRAPH_REPLAY_INPUTS]"
+    // KV-cache K/V *content* for the attention layer this graph reads. This is
+    // the last float input not yet checksummed. kv_sum above is only sequence
+    // LENGTHS. If this differs single-vs-double at matched inputs, the cached
+    // K/V is the corrupted input driving the ~1% output drift.
+    auto [k_cache_dbg, v_cache_dbg] = find_attention_plan_kv_cache(kv_cache);
+    const double k_abs = sum_abs(k_cache_dbg);
+    const double v_abs = sum_abs(v_cache_dbg);
+    // High-precision (setprecision(12)) to catch a sub-per-mille difference that
+    // 6 sig-figs would hide but that still perturbs the output ~1% through the
+    // layer.
+    LOG(INFO) << std::setprecision(12) << "[GRAPH_REPLAY_INPUTS]"
+              << " k_abs=" << k_abs << " v_abs=" << v_abs
               << " graph=" << static_cast<const void*>(this)
               << " hidden=" << persistent_param_.hidden_states(1).size(-1)
               << " bucket=" << num_tokens_
@@ -470,7 +482,7 @@ ModelOutput AclGraph::replay(CausalLM* model,
         (out.defined() && out.numel() > 0)
             ? out.to(torch::kFloat32).abs().sum().item<double>()
             : 0.0;
-    LOG(INFO) << "[GRAPH_REPLAY_OUTPUT]"
+    LOG(INFO) << std::setprecision(12) << "[GRAPH_REPLAY_OUTPUT]"
               << " graph=" << static_cast<const void*>(this)
               << " bucket=" << num_tokens_ << " actual=" << actual_num_tokens
               << " out_abs=" << out_abs;
