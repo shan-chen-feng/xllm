@@ -22,6 +22,7 @@ limitations under the License.
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <string>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -56,8 +57,11 @@ struct AclGraphTaskUpdateContext;
 class AclGraph {
  public:
   explicit AclGraph(GraphPersistentParam& persistent_param,
-                    c10::DeviceIndex device_index)
-      : persistent_param_(persistent_param), device_index_(device_index) {
+                    c10::DeviceIndex device_index,
+                    std::string model_type = {})
+      : persistent_param_(persistent_param),
+        device_index_(device_index),
+        model_type_(std::move(model_type)) {
     // Initialize capture stream in constructor
     initialize_capture_stream(device_index);
   }
@@ -124,6 +128,8 @@ class AclGraph {
   // prepare stream and orders them via metadata_ready_event instead).
   aclrtEvent input_ready_event_ = nullptr;
   c10::DeviceIndex device_index_;
+  // DIAGNOSTIC: model type string for log tagging (e.g. "qwen3_eagle3").
+  std::string model_type_;
   std::shared_ptr<AclGraphTaskUpdateContext> graph_task_context_;
   std::optional<c10_npu::NPUStream> update_stream_;
   std::atomic<bool> replay_inputs_prepared_{false};

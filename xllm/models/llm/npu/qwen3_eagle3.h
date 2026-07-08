@@ -21,7 +21,10 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -44,6 +47,46 @@ limitations under the License.
 #include "models/model_registry.h"
 
 namespace xllm::npu::model {
+
+namespace {
+// DIAGNOSTIC: dump abs-sum + first up-to-5x5 block of a [num_tokens, hidden]
+// tensor, tagged with model type, so eager draft inference can be compared
+// element-wise against the graph replay ([GRAPH_REPLAY] logs use the same
+// format). Remove once localized.
+inline void eagle3_log_block(const char* which,
+                             const std::string& model_type,
+                             const torch::Tensor& t) {
+  if (!t.defined() || t.numel() == 0) {
+    LOG(INFO) << "[EAGER_INFER] model_type=" << model_type << " " << which
+              << " <undefined/empty>";
+    return;
+  }
+  torch::Tensor m = t.dim() == 1 ? t.unsqueeze(0) : t;
+  const int64_t rows = std::min<int64_t>(5, m.size(0));
+  const int64_t cols = std::min<int64_t>(5, m.size(-1));
+  torch::Tensor blk = m.slice(0, 0, rows)
+                          .slice(1, 0, cols)
+                          .to(torch::kCPU)
+                          .to(torch::kFloat32)
+                          .contiguous();
+  const double abs_sum = m.to(torch::kFloat32).abs().sum().item<double>();
+  std::ostringstream os;
+  os.setf(std::ios::fixed);
+  os << std::setprecision(6);
+  os << "[EAGER_INFER] model_type=" << model_type << " " << which << " shape=["
+     << m.size(0) << "," << m.size(-1) << "] abs_sum=" << std::setprecision(9)
+     << abs_sum << std::setprecision(6) << " block=";
+  const float* p = blk.const_data_ptr<float>();
+  for (int64_t r = 0; r < rows; ++r) {
+    os << "[";
+    for (int64_t c = 0; c < cols; ++c) {
+      os << p[r * cols + c] << (c + 1 < cols ? " " : "");
+    }
+    os << "]";
+  }
+  LOG(INFO) << os.str();
+}
+}  // namespace
 
 // EAGLE-3 specific decoder layer that accepts embeds and hidden_states
 // separately, applies layernorms, then concatenates them
@@ -169,6 +212,28 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
       positions = torch::tensor({0}).to(torch::kInt32).to(tokens.device());
     }
 
+    // DIAGNOSTIC: only log in the eager path. When input_params.enable_graph is
+    // true this forward() is running under ACL graph capture, where a CPU copy
+    // / .item() would inject a device sync and corrupt capture. Replay does not
+    // call forward() at all, so the eager log only ever fires in eager mode.
+    const bool dbg_eager = !input_params.enable_graph &&
+                           input_params.meta.batch_forward_type.is_decode();
+    if (dbg_eager) {
+      LOG(INFO) << std::setprecision(12) << "[EAGER_INFER_INPUTS]"
+                << " model_type=" << model_type_
+                << " num_tokens=" << (tokens.defined() ? tokens.size(0) : 0)
+                << " tok_sum="
+                << (tokens.defined() && tokens.numel() > 0
+                        ? tokens.to(torch::kLong).sum().item<int64_t>()
+                        : 0)
+                << " pos_sum="
+                << (positions.defined() && positions.numel() > 0
+                        ? positions.to(torch::kLong).sum().item<int64_t>()
+                        : 0);
+      eagle3_log_block(
+          "in_emb", model_type_, input_params.embedding.input_embedding);
+    }
+
     torch::Tensor hidden_states = embed_tokens_(tokens, 0);
     // Get hidden_states_extra from input_params.embedding.input_embedding
     // In EAGLE-3, hidden_states_extra comes from verifier layers
@@ -273,6 +338,11 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
              event_flag);
     auto aux_hidden_states = hidden_states.clone();
     hidden_states = norm_(hidden_states, 0);
+
+    if (dbg_eager) {
+      eagle3_log_block("out_hidden", model_type_, hidden_states);
+      eagle3_log_block("out_aux", model_type_, aux_hidden_states);
+    }
 
     // For draft decode, we capture the hidden state before norm as
     // aux_hidden_states This is used for speculative decoding to pass hidden

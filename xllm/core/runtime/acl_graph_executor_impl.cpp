@@ -53,10 +53,12 @@ constexpr uint64_t kSpecVerifyQMaxSeqLenShift = 32;
 // compared element-wise, not just by a scalar checksum. Syncs on CPU copy.
 // Remove once localized.
 void log_hidden_block(const char* tag,
+                      const std::string& model_type,
                       const char* which,
                       const torch::Tensor& t) {
   if (!t.defined() || t.numel() == 0) {
-    LOG(INFO) << tag << " " << which << " <undefined/empty>";
+    LOG(INFO) << tag << " model_type=" << model_type << " " << which
+              << " <undefined/empty>";
     return;
   }
   torch::Tensor m = t.dim() == 1 ? t.unsqueeze(0) : t;
@@ -71,9 +73,9 @@ void log_hidden_block(const char* tag,
   std::ostringstream os;
   os.setf(std::ios::fixed);
   os << std::setprecision(6);
-  os << tag << " " << which << " shape=[" << m.size(0) << "," << m.size(-1)
-     << "] abs_sum=" << std::setprecision(9) << abs_sum << std::setprecision(6)
-     << " block=";
+  os << tag << " model_type=" << model_type << " " << which << " shape=["
+     << m.size(0) << "," << m.size(-1) << "] abs_sum=" << std::setprecision(9)
+     << abs_sum << std::setprecision(6) << " block=";
   const float* p = blk.const_data_ptr<float>();
   for (int64_t r = 0; r < rows; ++r) {
     os << "[";
@@ -468,7 +470,8 @@ ModelOutput AclGraph::replay(CausalLM* model,
     // 6 sig-figs would hide but that still perturbs the output ~1% through the
     // layer.
     LOG(INFO) << std::setprecision(12) << "[GRAPH_REPLAY_INPUTS]"
-              << " k_abs=" << k_abs << " v_abs=" << v_abs
+              << " model_type=" << model_type_ << " k_abs=" << k_abs
+              << " v_abs=" << v_abs
               << " graph=" << static_cast<const void*>(this)
               << " hidden=" << persistent_param_.hidden_states(1).size(-1)
               << " bucket=" << num_tokens_
@@ -493,6 +496,7 @@ ModelOutput AclGraph::replay(CausalLM* model,
               << " tiling_sum="
               << sum_i64(persistent_param_.tiling_data());
     log_hidden_block("[GRAPH_REPLAY]",
+                     model_type_,
                      "in_emb",
                      persistent_param_.persistent_embedding(actual_num_tokens));
   }
@@ -524,10 +528,11 @@ ModelOutput AclGraph::replay(CausalLM* model,
             ? out.to(torch::kFloat32).abs().sum().item<double>()
             : 0.0;
     LOG(INFO) << std::setprecision(12) << "[GRAPH_REPLAY_OUTPUT]"
+              << " model_type=" << model_type_
               << " graph=" << static_cast<const void*>(this)
               << " bucket=" << num_tokens_ << " actual=" << actual_num_tokens
               << " out_abs=" << out_abs;
-    log_hidden_block("[GRAPH_REPLAY]", "out_hidden", out);
+    log_hidden_block("[GRAPH_REPLAY]", model_type_, "out_hidden", out);
   }
 
   // Return the actual num_tokens portion of ModelOutput
@@ -752,7 +757,8 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
 
   // Graph doesn't exist for this bucket num_tokens, try to create it lazily
   auto graph =
-      std::make_unique<AclGraph>(active_persistent_param, device_.index());
+      std::make_unique<AclGraph>(
+          active_persistent_param, device_.index(), args_.model_type());
   VLOG(kGraphExecutorLogVerboseLevel)
       << "AclGraphExecutorImpl::run() in capture mode";
   bool capture_success = false;
