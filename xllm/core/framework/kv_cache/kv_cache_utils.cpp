@@ -69,6 +69,14 @@ torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
   CHECK(acl_ret == ACL_SUCCESS)
       << "aclrtMalloc KV cache failed, ret=" << std::hex << acl_ret
       << ", nbytes=" << nbytes;
+  // aclrtMalloc does not zero memory. Leaving the KV cache uninitialized lets a
+  // graph whose captured attention read-extent overreads past the live
+  // kv_seq_len consume per-process garbage -> non-deterministic draft output.
+  // Match the zeros-init of the non-huge-page / CUDA paths.
+  auto memset_ret = aclrtMemset(buffer, nbytes, 0, nbytes);
+  CHECK(memset_ret == ACL_SUCCESS)
+      << "aclrtMemset KV cache failed, ret=" << std::hex << memset_ret
+      << ", nbytes=" << nbytes;
 
   constexpr c10::DeviceType device_type = c10::DeviceType::PrivateUse1;
   auto tensor = torch::empty(
@@ -144,13 +152,18 @@ KVCacheTensors create_kv_cache_tensors(
                                    create_options.dtype(),
                                    npu_format_type);
   } else {
+    // DIAGNOSTIC/FIX: use zeros instead of empty. NPU previously allocated the
+    // KV cache uninitialized; a graph whose captured attention read-extent
+    // overreads past the live kv_seq_len then consumes garbage that differs per
+    // process, causing non-deterministic draft output from the 2nd decode step.
+    // CUDA (torch::zeros above) and the generic path already zero-init.
     tensors.key_cache = at_npu::native::npu_format_cast(
-        torch::empty(kv_cache_shape.key_cache_shape(),
+        torch::zeros(kv_cache_shape.key_cache_shape(),
                      torch::dtype(create_options.dtype())
                          .device(create_options.device())),
         npu_format_type);
     tensors.value_cache = at_npu::native::npu_format_cast(
-        torch::empty(kv_cache_shape.value_cache_shape(),
+        torch::zeros(kv_cache_shape.value_cache_shape(),
                      torch::dtype(create_options.dtype())
                          .device(create_options.device())),
         npu_format_type);
