@@ -25,6 +25,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <iomanip>
+#include <sstream>
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
@@ -46,6 +47,43 @@ namespace xllm::npu {
 namespace {
 constexpr uint64_t kSpecVerifyGraphKeyMask = 1ull << 63;
 constexpr uint64_t kSpecVerifyQMaxSeqLenShift = 32;
+
+// DIAGNOSTIC: dump the first up-to-5 rows x 5 cols of a [num_tokens, hidden]
+// tensor plus its abs-sum, so graph vs eager (and single vs double) can be
+// compared element-wise, not just by a scalar checksum. Syncs on CPU copy.
+// Remove once localized.
+void log_hidden_block(const char* tag,
+                      const char* which,
+                      const torch::Tensor& t) {
+  if (!t.defined() || t.numel() == 0) {
+    LOG(INFO) << tag << " " << which << " <undefined/empty>";
+    return;
+  }
+  torch::Tensor m = t.dim() == 1 ? t.unsqueeze(0) : t;
+  const int64_t rows = std::min<int64_t>(5, m.size(0));
+  const int64_t cols = std::min<int64_t>(5, m.size(-1));
+  torch::Tensor blk = m.slice(0, 0, rows)
+                          .slice(1, 0, cols)
+                          .to(torch::kCPU)
+                          .to(torch::kFloat32)
+                          .contiguous();
+  const double abs_sum = m.to(torch::kFloat32).abs().sum().item<double>();
+  std::ostringstream os;
+  os.setf(std::ios::fixed);
+  os << std::setprecision(6);
+  os << tag << " " << which << " shape=[" << m.size(0) << "," << m.size(-1)
+     << "] abs_sum=" << std::setprecision(9) << abs_sum << std::setprecision(6)
+     << " block=";
+  const float* p = blk.const_data_ptr<float>();
+  for (int64_t r = 0; r < rows; ++r) {
+    os << "[";
+    for (int64_t c = 0; c < cols; ++c) {
+      os << p[r * cols + c] << (c + 1 < cols ? " " : "");
+    }
+    os << "]";
+  }
+  LOG(INFO) << os.str();
+}
 
 std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
     const std::vector<KVCache>& kv_caches) {
@@ -454,6 +492,9 @@ ModelOutput AclGraph::replay(CausalLM* model,
               // of the buffers matched so far. tiling_data_ is int32/uint32.
               << " tiling_sum="
               << sum_i64(persistent_param_.tiling_data());
+    log_hidden_block("[GRAPH_REPLAY]",
+                     "in_emb",
+                     persistent_param_.persistent_embedding(actual_num_tokens));
   }
 
   graph_.replay();
@@ -486,6 +527,7 @@ ModelOutput AclGraph::replay(CausalLM* model,
               << " graph=" << static_cast<const void*>(this)
               << " bucket=" << num_tokens_ << " actual=" << actual_num_tokens
               << " out_abs=" << out_abs;
+    log_hidden_block("[GRAPH_REPLAY]", "out_hidden", out);
   }
 
   // Return the actual num_tokens portion of ModelOutput
