@@ -49,6 +49,50 @@ limitations under the License.
 namespace xllm::npu::model {
 
 namespace {
+// DIAGNOSTIC: read back the exact cache slots this eager step wrote (the slots
+// next step reads), matching [GRAPH_REPLAY] log_written_kv_slots so graph vs
+// eager KV write-back can be compared row-for-row. Remove once localized.
+inline void eagle3_log_kv_slots(const std::string& model_type,
+                                const torch::Tensor& k_cache,
+                                const torch::Tensor& v_cache,
+                                const torch::Tensor& slots) {
+  if (!k_cache.defined() || k_cache.numel() == 0 || !slots.defined() ||
+      slots.numel() == 0) {
+    LOG(INFO) << "[EAGER_INFER] model_type=" << model_type
+              << " kv_slots <empty>";
+    return;
+  }
+  torch::Tensor idx = slots.to(torch::kCPU).to(torch::kLong).contiguous();
+  auto read_rows = [&](const torch::Tensor& c) -> torch::Tensor {
+    torch::Tensor flat = c.flatten(0, 1);
+    flat = flat.reshape({flat.size(0), -1});
+    torch::Tensor sel = idx.to(flat.device()).clamp(0, flat.size(0) - 1);
+    return flat.index_select(0, sel).to(torch::kCPU).to(torch::kFloat32);
+  };
+  torch::Tensor kr = read_rows(k_cache);
+  torch::Tensor vr = v_cache.defined() && v_cache.numel() > 0
+                         ? read_rows(v_cache)
+                         : torch::Tensor();
+  const double k_sum = kr.abs().sum().item<double>();
+  const double v_sum = vr.defined() ? vr.abs().sum().item<double>() : 0.0;
+  std::ostringstream os;
+  os.setf(std::ios::fixed);
+  os << std::setprecision(6);
+  os << "[EAGER_INFER] model_type=" << model_type
+     << " kv_slots n=" << idx.numel()
+     << " first_slot=" << idx[0].item<int64_t>()
+     << " k_slotsum=" << std::setprecision(9) << k_sum << " v_slotsum=" << v_sum
+     << std::setprecision(6) << " k_row0=";
+  const int64_t cols = std::min<int64_t>(6, kr.size(-1));
+  const float* p = kr.contiguous().const_data_ptr<float>();
+  os << "[";
+  for (int64_t c = 0; c < cols; ++c) {
+    os << p[c] << (c + 1 < cols ? " " : "");
+  }
+  os << "]";
+  LOG(INFO) << os.str();
+}
+
 // DIAGNOSTIC: dump abs-sum + first up-to-5x5 block of a [num_tokens, hidden]
 // tensor, tagged with model type, so eager draft inference can be compared
 // element-wise against the graph replay ([GRAPH_REPLAY] logs use the same
@@ -342,6 +386,14 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     if (dbg_eager) {
       eagle3_log_block("out_hidden", model_type_, hidden_states);
       eagle3_log_block("out_aux", model_type_, aux_hidden_states);
+      // Read back the slots this eager forward just wrote (what next step
+      // reads), to compare KV write-back against [GRAPH_REPLAY].
+      if (!kv_caches.empty()) {
+        eagle3_log_kv_slots(model_type_,
+                            kv_caches[0].get_k_cache(),
+                            kv_caches[0].get_v_cache(),
+                            input_params.attention.device.new_cache_slots);
+      }
     }
 
     // For draft decode, we capture the hidden state before norm as

@@ -52,6 +52,55 @@ constexpr uint64_t kSpecVerifyQMaxSeqLenShift = 32;
 // tensor plus its abs-sum, so graph vs eager (and single vs double) can be
 // compared element-wise, not just by a scalar checksum. Syncs on CPU copy.
 // Remove once localized.
+// DIAGNOSTIC: read back the exact cache slots this step wrote (the slots the
+// NEXT step attends over) and log their abs-sum + first values. new_cache_slots
+// is a flat index = block_id*block_size + offset, so flatten the cache's leading
+// dims to [num_slots, feat] and index_select those rows. Comparing this graph
+// vs eager isolates whether the captured KV write-back lands correct values in
+// the right slots (a side effect that only shows up next step). Remove once
+// localized.
+void log_written_kv_slots(const char* tag,
+                          const std::string& model_type,
+                          const torch::Tensor& k_cache,
+                          const torch::Tensor& v_cache,
+                          const torch::Tensor& slots) {
+  if (!k_cache.defined() || k_cache.numel() == 0 || !slots.defined() ||
+      slots.numel() == 0) {
+    LOG(INFO) << tag << " model_type=" << model_type << " kv_slots <empty>";
+    return;
+  }
+  torch::Tensor idx = slots.to(torch::kCPU).to(torch::kLong).contiguous();
+  auto read_rows = [&](const torch::Tensor& c) -> torch::Tensor {
+    torch::Tensor flat = c.flatten(0, 1);  // [num_blocks*block_size, ...]
+    flat = flat.reshape({flat.size(0), -1});
+    torch::Tensor sel =
+        idx.to(flat.device()).clamp(0, flat.size(0) - 1);
+    return flat.index_select(0, sel).to(torch::kCPU).to(torch::kFloat32);
+  };
+  torch::Tensor kr = read_rows(k_cache);
+  torch::Tensor vr = v_cache.defined() && v_cache.numel() > 0
+                         ? read_rows(v_cache)
+                         : torch::Tensor();
+  const double k_sum = kr.abs().sum().item<double>();
+  const double v_sum =
+      vr.defined() ? vr.abs().sum().item<double>() : 0.0;
+  std::ostringstream os;
+  os.setf(std::ios::fixed);
+  os << std::setprecision(6);
+  os << tag << " model_type=" << model_type << " kv_slots n=" << idx.numel()
+     << " first_slot=" << idx[0].item<int64_t>()
+     << " k_slotsum=" << std::setprecision(9) << k_sum
+     << " v_slotsum=" << v_sum << std::setprecision(6) << " k_row0=";
+  const int64_t cols = std::min<int64_t>(6, kr.size(-1));
+  const float* p = kr.contiguous().const_data_ptr<float>();
+  os << "[";
+  for (int64_t c = 0; c < cols; ++c) {
+    os << p[c] << (c + 1 < cols ? " " : "");
+  }
+  os << "]";
+  LOG(INFO) << os.str();
+}
+
 void log_hidden_block(const char* tag,
                       const std::string& model_type,
                       const char* which,
@@ -533,6 +582,14 @@ ModelOutput AclGraph::replay(CausalLM* model,
               << " bucket=" << num_tokens_ << " actual=" << actual_num_tokens
               << " out_abs=" << out_abs;
     log_hidden_block("[GRAPH_REPLAY]", model_type_, "out_hidden", out);
+    // Read back the slots this replay just wrote (what next step reads).
+    auto [k_c, v_c] = find_attention_plan_kv_cache(kv_cache);
+    log_written_kv_slots(
+        "[GRAPH_REPLAY]",
+        model_type_,
+        k_c,
+        v_c,
+        persistent_param_.persistent_new_cache_slots(actual_num_tokens));
   }
 
   // Return the actual num_tokens portion of ModelOutput
