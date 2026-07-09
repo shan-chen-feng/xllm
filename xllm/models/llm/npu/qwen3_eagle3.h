@@ -274,8 +274,11 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
                 << (positions.defined() && positions.numel() > 0
                         ? positions.to(torch::kLong).sum().item<int64_t>()
                         : 0);
+      // in_aux_src = raw target->draft handoff (input_embedding). Same tag as
+      // the graph path's [GRAPH_REPLAY] in_aux_src so the two are directly
+      // comparable on the source aux hidden.
       eagle3_log_block(
-          "in_emb", model_type_, input_params.embedding.input_embedding);
+          "in_aux_src", model_type_, input_params.embedding.input_embedding);
     }
 
     torch::Tensor hidden_states = embed_tokens_(tokens, 0);

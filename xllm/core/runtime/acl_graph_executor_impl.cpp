@@ -163,11 +163,49 @@ std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
 // so it observes the correct data. With >1 slot, buffer rotation isolates
 // consecutive steps' outputs, so skip the copy to avoid the overhead.
 torch::Tensor own_graph_output(const torch::Tensor& view,
-                               int32_t graph_slot_count) {
-  if (graph_slot_count > 1 || !view.defined() || view.numel() == 0) {
+                               int32_t /*graph_slot_count*/) {
+  // DIAGNOSTIC: always clone the graph output (regardless of slot count) so the
+  // caller never holds a view into a persistent buffer the next replay
+  // overwrites. Remove once localized.
+  if (!view.defined() || view.numel() == 0) {
     return view;
   }
   return view.clone();
+}
+
+// DIAGNOSTIC: deep-clone every graph INPUT tensor except the KV cache, so the
+// graph cannot alias any caller/persistent-source buffer. If nondeterminism
+// disappears with this on, the bug is input tensor aliasing / shared-buffer
+// reuse; if it persists, it is inside the captured graph's own workspace (the
+// paged-attention theory) and no tensor clone can touch it. Remove once
+// localized.
+inline torch::Tensor clone_if_def(const torch::Tensor& t) {
+  return (t.defined() && t.numel() > 0) ? t.clone() : t;
+}
+
+ModelInputParams clone_graph_inputs(const ModelInputParams& in) {
+  ModelInputParams p = in;  // shallow copy; now deep-clone the tensors update()
+                            // reads (leave KV caches alone — handled separately)
+  p.attention.device.q_seq_lens = clone_if_def(in.attention.device.q_seq_lens);
+  p.attention.device.kv_seq_lens =
+      clone_if_def(in.attention.device.kv_seq_lens);
+  p.attention.device.q_cu_seq_lens =
+      clone_if_def(in.attention.device.q_cu_seq_lens);
+  p.attention.device.new_cache_slots =
+      clone_if_def(in.attention.device.new_cache_slots);
+  p.attention.device.block_tables =
+      clone_if_def(in.attention.device.block_tables);
+  p.embedding.input_embedding = clone_if_def(in.embedding.input_embedding);
+  p.embedding.linear_state_indices =
+      clone_if_def(in.embedding.linear_state_indices);
+  p.num_accepted_tokens = clone_if_def(in.num_accepted_tokens);
+  p.graph.tiling_data = clone_if_def(in.graph.tiling_data);
+  p.graph.attn_mask = clone_if_def(in.graph.attn_mask);
+  p.graph.expanded_kv_seq_lens = clone_if_def(in.graph.expanded_kv_seq_lens);
+  p.graph.expanded_block_tables = clone_if_def(in.graph.expanded_block_tables);
+  p.graph.expanded_tiling_data = clone_if_def(in.graph.expanded_tiling_data);
+  p.graph.input_tokens_override = clone_if_def(in.graph.input_tokens_override);
+  return p;
 }
 
 bool allow_single_layer_graph(const ModelArgs& args,
@@ -544,6 +582,13 @@ ModelOutput AclGraph::replay(CausalLM* model,
               // of the buffers matched so far. tiling_data_ is int32/uint32.
               << " tiling_sum="
               << sum_i64(persistent_param_.tiling_data());
+    // in_aux_src = the raw target->draft handoff (input_embedding) BEFORE it is
+    // copied into persistent_embedding_. Logged in both graph and eager paths so
+    // the comparison is apples-to-apples on the source aux hidden. in_emb below
+    // is the persistent COPY the graph actually reads; comparing the two tells
+    // us whether the copy-into-persistent itself diverges.
+    log_hidden_block(
+        "[GRAPH_REPLAY]", model_type_, "in_aux_src", params.embedding.input_embedding);
     log_hidden_block("[GRAPH_REPLAY]",
                      model_type_,
                      "in_emb",
@@ -653,10 +698,17 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
                                       const torch::Tensor& positions,
                                       std::vector<KVCache>& kv_caches,
                                       const ModelInputParams& params) {
+  // DIAGNOSTIC: clone all graph inputs (except KV cache) so the graph cannot
+  // alias any caller/persistent-source buffer. Back the const refs below with
+  // the cloned storage so the rest of run() transparently uses clones. Remove
+  // once localized.
+  torch::Tensor tokens_clone = clone_if_def(tokens);
+  torch::Tensor positions_clone = clone_if_def(positions);
+  ModelInputParams params_clone = clone_graph_inputs(params);
   // no mirco batch in decode phase
-  const torch::Tensor& tokens_tensor = tokens;
-  const torch::Tensor& positions_tensor = positions;
-  const ModelInputParams& params_single = params;
+  const torch::Tensor& tokens_tensor = tokens_clone;
+  const torch::Tensor& positions_tensor = positions_clone;
+  const ModelInputParams& params_single = params_clone;
   const bool in_decoding_phase =
       params_single.meta.batch_forward_type.is_decode();
   const bool in_spec_verify_phase =
