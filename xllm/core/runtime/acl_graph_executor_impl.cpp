@@ -849,6 +849,14 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << "AclGraphExecutorImpl::run() in replay mode";
     ModelOutput result = replay_graph->replay(
         model_, tokens_tensor, positions_tensor, kv_caches, params_single);
+    // DIAGNOSTIC: full device sync after every replay. Inserts real
+    // ordering/latency between consecutive replays of the SAME captured graph
+    // (the only thing single-buffer does that double-buffer / graph-eager
+    // alternation do not). If this fixes precision -> async ordering hazard
+    // (e.g. KV write vs next read on an internal graph stream), NOT memory /
+    // aliasing. If it does not -> stale mempool temporary read-before-write
+    // inside the captured graph. Remove once localized.
+    torch::npu::synchronize();
     // Handle aux_hidden_states based on options
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
