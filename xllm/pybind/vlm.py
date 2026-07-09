@@ -213,14 +213,10 @@ class VLM:
 
         try:
             # schedule the batch requests
-            if image_urls is not None:
-                self.master.handle_batch_request_with_image_urls(
-                    prompts, image_urls, request_params_list, callback
-                )
-            else:
-                self.master.handle_batch_request(
-                    prompts, mm_datas, request_params_list, callback
-                )
+            mm_utils.dispatch_vlm_batch(
+                self.master, prompts, mm_datas, image_urls,
+                request_params_list, callback
+            )
 
             # wait for batch request to be scheduled
             if wait_for_schedule:

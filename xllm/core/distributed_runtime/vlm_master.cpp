@@ -247,6 +247,98 @@ void VLMMaster::handle_batch_request_with_image_urls(
       std::move(conversations), std::move(sps), std::move(callback));
 }
 
+bool VLMMaster::build_mm_data_from_image_urls(
+    const std::vector<std::string>& image_urls,
+    MMData& mm_data,
+    std::string& error_message) {
+  if (image_urls.empty()) {
+    return true;  // text-only request, nothing to decode
+  }
+
+  // Build an image-only content vector (no prompt text) and reuse the same
+  // decode+process pipeline as the chat path, minus the chat template.
+  MMContentVec contents;
+  contents.reserve(image_urls.size());
+  for (const auto& url : image_urls) {
+    contents.emplace_back("image_url", ImageURL{url});
+  }
+  std::vector<Message> messages;
+  messages.emplace_back("user", std::move(contents));
+
+  static MMInputTransfer mm_input_transfer;
+  MMInput mm_inputs;
+  MMErrCode code = mm_input_transfer.trans(messages, mm_inputs);
+  if (code != MMErrCode::SUCCESS) {
+    error_message = MMErrToString(code);
+    return false;
+  }
+
+  if (!mm_inputs.empty() &&
+      !processor_->process_multimodal(mm_inputs, mm_data)) {
+    error_message = "Failed to process multimodal input.";
+    return false;
+  }
+  return true;
+}
+
+void VLMMaster::handle_batch_request_with_mm_urls(
+    std::vector<std::string> prompts,
+    std::vector<std::vector<std::string>> image_urls,
+    std::vector<RequestParams> sps,
+    BatchOutputCallback callback) {
+  CHECK(prompts.size() == image_urls.size())
+      << "Number of prompts and image urls should be the same";
+  CHECK(prompts.size() == sps.size() || sps.size() == 1)
+      << "Number of prompts and sampling parameters should be the same";
+
+  const size_t num_requests = prompts.size();
+  for (size_t i = 0; i < num_requests; ++i) {
+    scheduler_->incr_pending_requests(1);
+    auto cb = [i, callback](const RequestOutput& output) {
+      output.log_request_status();
+      return callback(i, output);
+    };
+
+    threadpool_->schedule([this,
+                           prompt = std::move(prompts[i]),
+                           urls = std::move(image_urls[i]),
+                           sp = (sps.size() == 1 ? sps[0] : std::move(sps[i])),
+                           callback = std::move(cb)]() mutable {
+      AUTO_COUNTER(request_handling_latency_seconds_completion);
+
+      // remove the pending request after scheduling
+      SCOPE_GUARD([this] { scheduler_->decr_pending_requests(); });
+
+      // verify the sampling params
+      if (!sp.verify_params(callback)) {
+        return;
+      }
+
+      // decode images into MMData; the prompt is left VERBATIM (vLLM-style).
+      MMData mm_data;
+      std::string error_message;
+      if (!build_mm_data_from_image_urls(urls, mm_data, error_message)) {
+        LOG(ERROR) << error_message;
+        CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error_message);
+        return;
+      }
+
+      auto request = generate_request(std::move(prompt),
+                                      std::move(mm_data),
+                                      std::move(sp),
+                                      std::move(callback));
+      if (!request) {
+        return;
+      }
+
+      if (!scheduler_->add_request(request)) {
+        CALLBACK_WITH_ERROR(StatusCode::RESOURCE_EXHAUSTED,
+                            "No available resources to schedule request");
+      }
+    });
+  }
+}
+
 void VLMMaster::handle_batch_request(
     std::vector<std::vector<Message>> conversations,
     std::vector<RequestParams> sps,

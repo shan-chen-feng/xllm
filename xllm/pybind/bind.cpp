@@ -388,6 +388,13 @@ PYBIND11_MODULE(xllm_export, m) {
                              BatchOutputCallback>(
                &VLMMaster::handle_batch_request_with_image_urls),
            py::call_guard<py::gil_scoped_release>())
+      .def("handle_batch_request_with_mm_urls",
+           py::overload_cast<std::vector<std::string>,
+                             std::vector<std::vector<std::string>>,
+                             std::vector<RequestParams>,
+                             BatchOutputCallback>(
+               &VLMMaster::handle_batch_request_with_mm_urls),
+           py::call_guard<py::gil_scoped_release>())
       .def("generate",
            &VLMMaster::generate,
            py::call_guard<py::gil_scoped_release>())

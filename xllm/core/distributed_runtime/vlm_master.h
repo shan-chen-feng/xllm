@@ -64,8 +64,21 @@ class VLMMaster : public Master {
                             std::vector<RequestParams> sps,
                             BatchOutputCallback callback);
 
-  // batch completion with image urls/paths (no python image processor)
+  // batch completion with image urls/paths (no python image processor).
+  // NOTE: this wraps prompt+images into a chat message and RE-APPLIES the chat
+  // template. Used by the messages/chat-style API. For vLLM-style verbatim
+  // prompts use handle_batch_request_with_mm_urls below.
   void handle_batch_request_with_image_urls(
+      std::vector<std::string> prompts,
+      std::vector<std::vector<std::string>> image_urls,
+      std::vector<RequestParams> sps,
+      BatchOutputCallback callback);
+
+  // batch completion, vLLM-style: the prompt is used VERBATIM (caller supplies
+  // the vision placeholder tokens, one block per image) and NO chat template is
+  // applied. Images are given as urls/paths/data-urls and decoded by the C++
+  // image processor into MMData.
+  void handle_batch_request_with_mm_urls(
       std::vector<std::string> prompts,
       std::vector<std::vector<std::string>> image_urls,
       std::vector<RequestParams> sps,
@@ -101,6 +114,13 @@ class VLMMaster : public Master {
                                             RequestParams sp,
                                             std::string payload,
                                             OutputCallback callback);
+
+  // Decode a list of image urls/paths/data-urls into MMData using the C++
+  // image processor, without touching any prompt text or chat template.
+  bool build_mm_data_from_image_urls(
+      const std::vector<std::string>& image_urls,
+      MMData& mm_data,
+      std::string& error_message);
 
   std::unique_ptr<Scheduler> scheduler_;
 

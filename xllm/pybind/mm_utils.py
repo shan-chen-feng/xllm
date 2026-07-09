@@ -126,3 +126,31 @@ def _to_image_url(image: Any) -> str:
         "image must be image path/url string, PIL.Image, bytes, "
         "or a list of these"
     )
+
+
+def dispatch_vlm_batch(master, prompts, mm_datas, image_urls,
+                       request_params_list, callback) -> None:
+    """Route a normalized vLLM-style batch to the right VLMMaster entrypoint.
+
+    Two mutually-exclusive input shapes come out of
+    ``normalize_vllm_style_inputs``:
+
+    * ``image_urls`` set  -> images given as PIL/path/bytes (converted to urls).
+      Uses ``handle_batch_request_with_mm_urls``: the prompt is used VERBATIM
+      (caller supplies ``<|vision_start|><|image_pad|><|vision_end|>`` blocks,
+      one per image) and NO chat template is applied. This matches vLLM offline
+      ``LLM.generate`` semantics.
+    * ``mm_datas`` set    -> caller passed pre-built ``MMData`` objects.
+      Uses ``handle_batch_request`` (also verbatim prompt).
+
+    Kept as a standalone function so both LLM.generate and VLM.generate share
+    one dispatch path instead of duplicating branch logic.
+    """
+    if image_urls is not None:
+        master.handle_batch_request_with_mm_urls(
+            prompts, image_urls, request_params_list, callback
+        )
+    else:
+        master.handle_batch_request(
+            prompts, mm_datas, request_params_list, callback
+        )
