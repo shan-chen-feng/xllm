@@ -24,8 +24,10 @@ limitations under the License.
 #include <torch_npu/torch_npu.h>
 
 #include <algorithm>
+#include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
@@ -851,14 +853,16 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
         << "AclGraphExecutorImpl::run() in replay mode";
     ModelOutput result = replay_graph->replay(
         model_, tokens_tensor, positions_tensor, kv_caches, params_single);
-    // DIAGNOSTIC: full device sync after every replay. Inserts real
-    // ordering/latency between consecutive replays of the SAME captured graph
-    // (the only thing single-buffer does that double-buffer / graph-eager
-    // alternation do not). If this fixes precision -> async ordering hazard
-    // (e.g. KV write vs next read on an internal graph stream), NOT memory /
-    // aliasing. If it does not -> stale mempool temporary read-before-write
-    // inside the captured graph. Remove once localized.
+    // DIAGNOSTIC: full device sync + 5s host sleep after every replay. The sync
+    // drains all device work; the sleep opens a large wall-clock gap before the
+    // next replay of the SAME captured graph. If this makes step 2+ correct AND
+    // deterministic, the hazard is timing/ordering between consecutive same-graph
+    // replays (something must complete/settle between them). If it still fails
+    // even fully drained + idle, the hazard is NOT timing — it is stale/uninit
+    // state baked into the captured graph, independent of when the next replay
+    // runs. Remove once localized.
     torch::npu::synchronize();
+    std::this_thread::sleep_for(std::chrono::seconds(5));
     // Handle aux_hidden_states based on options
     if (options_.enable_graph_aux_hidden_states()) {
       torch::Tensor aux_hidden_states =
