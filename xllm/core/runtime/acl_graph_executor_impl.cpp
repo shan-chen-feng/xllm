@@ -507,18 +507,20 @@ ModelOutput AclGraph::replay(CausalLM* model,
     }
   }
 
-  // Replay captured graph - NPUGraph mempool reuses temporary tensors
-  // Get current NPU stream from libtorch NPU API
+  // Replay captured graph - NPUGraph mempool reuses temporary tensors.
+  // Use a dedicated non-default graph stream for replay as an experiment, even
+  // when the caller is already on a non-default compute stream. update() still
+  // runs on the current stream (`stream`); the graph stream waits for it below,
+  // then the caller stream waits for replay completion via
+  // make_current_stream_wait_for_graph(stream).
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+  if (capture_stream_.has_value()) {
+    graph_stream_ = capture_stream_.value().stream();
+  }
 
   // update() issued its H2D input copies on the compute stream (`stream`).
-  // graph_.replay() reads those persistent buffers on graph_stream_. When the
-  // two differ (they do on the single-slot path), make the graph stream wait
-  // for the copies to complete first, mirroring the aclrtSynchronizeStream that
-  // capture() does before it records the graph. Without this the replay can
-  // read half-written tiling/positions/block-tables and silently corrupt the
-  // draft, which is what double-buffer was masking by preparing inputs on the
-  // prepare stream instead.
+  // graph_.replay() reads those persistent buffers on graph_stream_. Make the
+  // graph stream wait for the copies to complete first.
   if (graph_stream_ != nullptr && graph_stream_ != stream) {
     CHECK_EQ(aclrtRecordEvent(input_ready_event_, stream), ACL_SUCCESS)
         << "aclrtRecordEvent(input_ready_event_) failed";
