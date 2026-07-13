@@ -59,6 +59,16 @@ std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
   return {torch::Tensor(), torch::Tensor()};
 }
 
+// The qwen3_eagle3 draft is intentionally a one-layer LLM. The generic
+// single-layer models keep the eager fallback, but this draft path is allowed
+// into the ACL graph so its decode attention can consume the graph tiling data
+// exactly like the qwen3 target does.
+bool allow_single_layer_graph(const ModelArgs& args,
+                              const runtime::Options& options) {
+  return options.is_draft_engine() && options.backend() == "llm" &&
+         args.model_type() == "qwen3_eagle3";
+}
+
 }  // namespace
 
 bool AclGraph::capture(CausalLM* model,
@@ -428,7 +438,10 @@ ModelOutput AclGraphExecutorImpl::run(const torch::Tensor& tokens,
            << " in_spec_verify_phase: " << in_spec_verify_phase
            << " q_max_seq_len: " << params_single.meta.q_max_seq_len
            << " n_layers: " << args_.n_layers();
-  if ((!in_decoding_phase && !in_spec_verify_phase) || args_.n_layers() == 1) {
+  const bool single_layer_eager_only =
+      args_.n_layers() == 1 && !allow_single_layer_graph(args_, options_);
+  if ((!in_decoding_phase && !in_spec_verify_phase) ||
+      single_layer_eager_only) {
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in eager mode";
     COUNTER_INC(num_model_execution_total_eager);
@@ -627,7 +640,10 @@ void AclGraphExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
   const bool in_spec_verify_phase =
       params.is_spec_verify &&
       params.meta.batch_forward_type.is_chunked_prefill();
-  if ((!in_decoding_phase && !in_spec_verify_phase) || args_.n_layers() == 1) {
+  const bool single_layer_eager_only =
+      args_.n_layers() == 1 && !allow_single_layer_graph(args_, options_);
+  if ((!in_decoding_phase && !in_spec_verify_phase) ||
+      single_layer_eager_only) {
     return;
   }
   if (model_->requires_graph_forward_metadata()) {
