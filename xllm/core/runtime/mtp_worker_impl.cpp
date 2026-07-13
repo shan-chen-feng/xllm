@@ -514,6 +514,35 @@ MTPWorkerImpl::MTPWorkerImpl(const ParallelArgs& parallel_args,
       enable_opt_validate_probs_(enable_opt_validate_probs) {
   draft_impl_ =
       std::make_unique<LLMWorkerImpl>(parallel_args, device, draft_options);
+  if (options_.enable_graph()) {
+    draft_compute_stream_ = device_.get_stream_from_pool();
+    LOG(INFO) << "Initialized MTP draft compute stream: "
+              << *draft_compute_stream_;
+  }
+}
+
+Stream& MTPWorkerImpl::draft_compute_stream() {
+  return draft_compute_stream_ ? *draft_compute_stream_ : *compute_stream_;
+}
+
+const Stream& MTPWorkerImpl::draft_compute_stream() const {
+  return draft_compute_stream_ ? *draft_compute_stream_ : *compute_stream_;
+}
+
+bool MTPWorkerImpl::has_separate_draft_compute_stream() const {
+  return draft_compute_stream_ != nullptr;
+}
+
+void MTPWorkerImpl::wait_draft_compute_stream_for_target() {
+  if (has_separate_draft_compute_stream()) {
+    draft_compute_stream_->wait_stream(*compute_stream_);
+  }
+}
+
+void MTPWorkerImpl::wait_target_compute_stream_for_draft() {
+  if (has_separate_draft_compute_stream()) {
+    compute_stream_->wait_stream(*draft_compute_stream_);
+  }
 }
 
 bool MTPWorkerImpl::init_model(const std::string& model_weights_path,
@@ -759,12 +788,14 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                                           *prepare_stream_,
                                           *compute_stream_,
                                           target_prepared);
+    wait_draft_compute_stream_for_target();
     auto draft_output = run_worker_no_sync_impl(*draft_impl_,
                                                 input,
                                                 *prepare_stream_,
-                                                *compute_stream_,
+                                                draft_compute_stream(),
                                                 draft_prepared);
     (void)draft_output;
+    wait_target_compute_stream_for_draft();
     clear_all_output_embeddings(*output);
     return output;
   } else {
@@ -782,7 +813,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
         run_worker_no_sync_impl(*draft_impl_,
                                 new_input,
                                 *prepare_stream_,
-                                *compute_stream_,
+                                draft_compute_stream(),
                                 draft_extend_prepared)
             .value();
     (void)draft_extend_output;
@@ -792,12 +823,13 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_empty(
                                        *draft_impl_,
                                        input,
                                        *prepare_stream_,
-                                       *compute_stream_,
+                                       draft_compute_stream(),
                                        draft_step_prepared[i])
                                        .value();
       (void)draft_output;
     }
 
+    wait_target_compute_stream_for_draft();
     new_input = input;
     for (int32_t& token_num :
          new_input.input_params.parallel.dp_global_token_nums) {
@@ -858,13 +890,18 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_prefill(
   }
   // generate kv cache for draft model
   timer.reset();
+  wait_draft_compute_stream_for_target();
   ForwardOutput draft_output = run_worker_no_sync_impl(*draft_impl_,
                                                        prefill_input,
                                                        *prepare_stream_,
-                                                       *compute_stream_,
+                                                       draft_compute_stream(),
                                                        draft_prepared)
                                    .value();
-  process_draft_sample_output(draft_output.sample_output);
+  {
+    c10::StreamGuard stream_guard = draft_compute_stream().set_stream_guard();
+    process_draft_sample_output(draft_output.sample_output);
+  }
+  wait_target_compute_stream_for_draft();
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               timer.elapsed_seconds());
 
@@ -1037,7 +1074,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
         run_worker_no_sync_impl(*draft_impl_,
                                 current_draft_input,
                                 *prepare_stream_,
-                                *compute_stream_,
+                                draft_compute_stream(),
                                 draft_prepared[draft_idx]);
 
     // Overlap next-step input preparation with async draft forward.
@@ -1058,12 +1095,17 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     // yields a unified prob, so we only broadcast the [batch] token tensor
     if (get_optimization_config().enable_spec_token_broadcast &&
         enable_schedule_overlap()) {
-      c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+      c10::StreamGuard stream_guard =
+          draft_compute_stream().set_stream_guard();
       SampleOutput& draft_sample = draft_outputs.back().sample_output;
       broadcast_spec_tokens(draft_sample.next_tokens,
                             spec_broadcast_group(parallel_args_));
     }
-    process_draft_sample_output(draft_outputs.back().sample_output);
+    {
+      c10::StreamGuard stream_guard =
+          draft_compute_stream().set_stream_guard();
+      process_draft_sample_output(draft_outputs.back().sample_output);
+    }
     if (draft_idx == num_speculative_tokens - 1) {
       continue;
     }
@@ -1072,13 +1114,13 @@ std::optional<ForwardOutput> MTPWorkerImpl::step_decode(
     set_token_ids_device_tensor(current_draft_input,
                                 last_output.next_tokens,
                                 current_draft_input.token_ids.options(),
-                                *compute_stream_);
+                                draft_compute_stream());
     check_draft_input_embedding(last_output.embeddings, "decode");
     if (last_output.embeddings.defined()) {
       current_draft_input.input_params.embedding.input_embedding =
           last_output.embeddings;
       record_current_metadata_ready_event(current_draft_input,
-                                          *compute_stream_);
+                                          draft_compute_stream());
     }
   }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
@@ -1132,6 +1174,7 @@ std::optional<ForwardOutput> MTPWorkerImpl::run_validate(
   // run the target model to get the verification scores
   Timer timer;
   ForwardInput target_prepared;
+  wait_target_compute_stream_for_draft();
   fill_validate_input_from_draft_outputs(
       draft_outputs, validate_input, *compute_stream_);
   ForwardOutput target_output = run_worker_no_sync_impl(*target_impl_,

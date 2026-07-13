@@ -139,9 +139,19 @@ class MTPWorkerImpl : public SpeculativeWorkerImpl {
   void write_target_context_to_cache(const ForwardInput& input,
                                      const SampleOutput& validate_output);
 
+  Stream& draft_compute_stream();
+  const Stream& draft_compute_stream() const;
+  bool has_separate_draft_compute_stream() const;
+  void wait_draft_compute_stream_for_target();
+  void wait_target_compute_stream_for_draft();
+
  protected:
   // Draft model worker
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
+
+  // Optional compute stream for the draft worker. In graph mode, target replay
+  // stays on compute_stream_ while draft replay runs on this stream.
+  std::unique_ptr<Stream> draft_compute_stream_;
 
   // Embedding cache for speculative decoding
   std::shared_ptr<EmbeddingCache> embedding_cache_;
