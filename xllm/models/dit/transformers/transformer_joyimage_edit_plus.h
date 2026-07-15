@@ -74,12 +74,11 @@ inline torch::Tensor joyimage_joint_attention(
     int64_t num_heads,
     const torch::Tensor& attn_mask = torch::Tensor()) {
 #if defined(USE_NPU)
-  // npu_fusion_attention expects the "masked" positions as True, so invert the
-  // "attend" mask. Shape [B, 1, 1, S] broadcasts over heads/query.
-  c10::optional<torch::Tensor> npu_mask = c10::nullopt;
-  if (attn_mask.defined()) {
-    npu_mask = attn_mask.logical_not();
-  }
+  // JoyImage uses full bidirectional attention. Do not pass the pipeline-side
+  // padding mask to npu_fusion_attention: that mask is [B,1,1,Skv], while the
+  // NPU kernel requires an explicit Sq dimension ([B,1,Sq,Skv], [Sq,Skv], ...).
+  // This mirrors the QwenImageEditPlus/Wan DiT NPU paths, which run full
+  // attention with atten_mask=nullopt.
   auto results = at_npu::native::custom_ops::npu_fusion_attention(
       query,
       key,
@@ -88,7 +87,7 @@ inline torch::Tensor joyimage_joint_attention(
       /*input_layout=*/"BSND",
       /*pse=*/torch::nullopt,
       /*padding_mask=*/torch::nullopt,
-      /*atten_mask=*/npu_mask,
+      /*atten_mask=*/torch::nullopt,
       /*scale=*/std::pow(static_cast<double>(query.size(3)), -0.5),
       /*keep_prob=*/1.0,
       /*pre_tockens=*/65535,
@@ -646,8 +645,11 @@ class JoyImageEditPlusTransformer3DModelImpl : public torch::nn::Module {
     auto rope_cos = torch::stack(cos_list, 0);  // [B, N, head_dim]
     auto rope_sin = torch::stack(sin_list, 0);
 
-    // 4. Attention mask [B, 1, 1, N + L].
+    // 4. Attention mask. NPU path uses full attention with no mask (same as
+    //    QwenImageEditPlus/Wan DiT); fallback SDPA can still consume the compact
+    //    padding mask if needed.
     torch::Tensor attn_mask;
+#if !defined(USE_NPU)
     if (encoder_hidden_states_mask.defined()) {
       auto img_mask = torch::zeros(
           {B, N}, torch::TensorOptions().device(device).dtype(torch::kBool));
@@ -662,6 +664,7 @@ class JoyImageEditPlusTransformer3DModelImpl : public torch::nn::Module {
           {img_mask, encoder_hidden_states_mask.to(torch::kBool)}, 1);
       attn_mask = full.unsqueeze(1).unsqueeze(1);  // [B,1,1,N+L]
     }
+#endif
 
     // 5. Blocks. Per-block modulation table added to temb6 -> Modulate handles
     //    it internally, so we feed temb6 (the [B,6,hidden] proj) as the "x".
