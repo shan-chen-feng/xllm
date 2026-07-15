@@ -57,8 +57,8 @@ inline torch::Tensor apply_rotary_emb_batched(const torch::Tensor& x,
       {x_float.size(0), x_float.size(1), x_float.size(2), -1, 2});
   auto x_real = x_pairs.select(-1, 0);
   auto x_imag = x_pairs.select(-1, 1);
-  auto rotated = torch::stack({-x_imag, x_real}, -1)
-                     .flatten(3);  // [B, S, H, D]
+  auto rotated =
+      torch::stack({-x_imag, x_real}, -1).flatten(3);  // [B, S, H, D]
 
   auto out = x_float * cos_b + rotated * sin_b;
   return out.to(x.dtype());
@@ -68,9 +68,9 @@ inline torch::Tensor apply_rotary_emb_batched(const torch::Tensor& x,
 // (True == attend). NPU uses npu_fusion_attention (BSND layout); the fallback
 // uses scaled_dot_product_attention.
 inline torch::Tensor joyimage_joint_attention(
-    const torch::Tensor& query,   // [B, S, H, D]
-    const torch::Tensor& key,     // [B, S, H, D]
-    const torch::Tensor& value,   // [B, S, H, D]
+    const torch::Tensor& query,  // [B, S, H, D]
+    const torch::Tensor& key,    // [B, S, H, D]
+    const torch::Tensor& value,  // [B, S, H, D]
     int64_t num_heads,
     const torch::Tensor& attn_mask = torch::Tensor()) {
 #if defined(USE_NPU)
@@ -103,7 +103,10 @@ inline torch::Tensor joyimage_joint_attention(
   if (attn_mask.defined()) {
     mask = attn_mask;  // [B, 1, 1, S] bool broadcasts over heads/query
   }
-  auto output = torch::scaled_dot_product_attention(q, k, v, mask,
+  auto output = torch::scaled_dot_product_attention(q,
+                                                    k,
+                                                    v,
+                                                    mask,
                                                     /*dropout_p=*/0.0,
                                                     /*is_causal=*/false);
   if (output.dtype() != out_dtype) output = output.to(out_dtype);
@@ -138,8 +141,7 @@ class ModulateImpl final : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    weight::load_weight(
-        state_dict, "modulate_table", modulate_table_, loaded_);
+    weight::load_weight(state_dict, "modulate_table", modulate_table_, loaded_);
   }
   void verify_loaded_weights(const std::string& prefix) const {
     CHECK(loaded_) << "weight not loaded for " << prefix + "modulate_table";
@@ -159,14 +161,12 @@ class TextProjectionImpl final : public torch::nn::Module {
                      int64_t in_features,
                      int64_t hidden_size)
       : options_(context.get_tensor_options()) {
-    linear_1_ = register_module(
-        "linear_1",
-        layer::AddMatmulWeightTransposed(in_features, hidden_size, true,
-                                         options_));
-    linear_2_ = register_module(
-        "linear_2",
-        layer::AddMatmulWeightTransposed(hidden_size, hidden_size, true,
-                                         options_));
+    linear_1_ = register_module("linear_1",
+                                layer::AddMatmulWeightTransposed(
+                                    in_features, hidden_size, true, options_));
+    linear_2_ = register_module("linear_2",
+                                layer::AddMatmulWeightTransposed(
+                                    hidden_size, hidden_size, true, options_));
   }
 
   torch::Tensor forward(const torch::Tensor& caption) {
@@ -202,17 +202,20 @@ class TimeTextEmbeddingImpl final : public torch::nn::Module {
                         int64_t time_proj_dim,
                         int64_t text_embed_dim)
       : options_(context.get_tensor_options()) {
-    timesteps_proj_ = register_module(
-        "timesteps_proj",
-        qwenimage::Timesteps(context, time_freq_dim, /*flip_sin_to_cos=*/true,
-                             /*downscale_freq_shift=*/0.0, /*scale=*/1.0));
+    timesteps_proj_ =
+        register_module("timesteps_proj",
+                        qwenimage::Timesteps(context,
+                                             time_freq_dim,
+                                             /*flip_sin_to_cos=*/true,
+                                             /*downscale_freq_shift=*/0.0,
+                                             /*scale=*/1.0));
     time_embedder_ = register_module(
         "time_embedder",
         qwenimage::TimestepEmbedding(context, time_freq_dim, hidden_size));
-    time_proj_ = register_module(
-        "time_proj",
-        layer::AddMatmulWeightTransposed(hidden_size, time_proj_dim, true,
-                                         options_));
+    time_proj_ =
+        register_module("time_proj",
+                        layer::AddMatmulWeightTransposed(
+                            hidden_size, time_proj_dim, true, options_));
     text_embedder_ = register_module(
         "text_embedder", TextProjection(context, text_embed_dim, hidden_size));
   }
@@ -224,9 +227,9 @@ class TimeTextEmbeddingImpl final : public torch::nn::Module {
       const torch::Tensor& encoder_hidden_states) {
     auto t = timesteps_proj_->forward(timestep);
     t = t.to(encoder_hidden_states.dtype());
-    auto temb = time_embedder_->forward(t);           // [B, hidden]
+    auto temb = time_embedder_->forward(t);  // [B, hidden]
     auto act = torch::silu(temb);
-    auto timestep_proj = time_proj_->forward(act);     // [B, time_proj_dim]
+    auto timestep_proj = time_proj_->forward(act);  // [B, time_proj_dim]
     auto text = text_embedder_->forward(encoder_hidden_states);
     return std::make_tuple(temb, timestep_proj, text);
   }
@@ -234,8 +237,7 @@ class TimeTextEmbeddingImpl final : public torch::nn::Module {
   void load_state_dict(const StateDict& state_dict) {
     time_embedder_->load_state_dict(
         state_dict.get_dict_with_prefix("time_embedder."));
-    time_proj_->load_state_dict(
-        state_dict.get_dict_with_prefix("time_proj."));
+    time_proj_->load_state_dict(state_dict.get_dict_with_prefix("time_proj."));
     text_embedder_->load_state_dict(
         state_dict.get_dict_with_prefix("text_embedder."));
   }
@@ -397,22 +399,20 @@ class TransformerBlockImpl final : public torch::nn::Module {
 
     img_mod_ = register_module("img_mod", Modulate(dim, 6));
     img_mlp_ = register_module(
-        "img_mlp",
-        qwenimage::FeedForward(context, dim, dim, /*mult=*/4));
+        "img_mlp", qwenimage::FeedForward(context, dim, dim, /*mult=*/4));
     txt_mod_ = register_module("txt_mod", Modulate(dim, 6));
     txt_mlp_ = register_module(
-        "txt_mlp",
-        qwenimage::FeedForward(context, dim, dim, /*mult=*/4));
-    attn_ = register_module("attn",
-                            JoyAttention(context, dim, num_heads, head_dim, eps));
+        "txt_mlp", qwenimage::FeedForward(context, dim, dim, /*mult=*/4));
+    attn_ = register_module(
+        "attn", JoyAttention(context, dim, num_heads, head_dim, eps));
     (void)mlp_hidden;  // FeedForward uses dim*4 internally (== dim*ratio)
   }
 
   // FP32 layernorm without affine.
   static torch::Tensor fp32_norm(const torch::Tensor& x, double eps) {
     auto xf = x.to(torch::kFloat32);
-    auto out = torch::layer_norm(xf, {xf.size(-1)}, /*weight=*/{}, /*bias=*/{},
-                                 eps);
+    auto out =
+        torch::layer_norm(xf, {xf.size(-1)}, /*weight=*/{}, /*bias=*/{}, eps);
     return out.to(x.dtype());
   }
 
@@ -450,9 +450,8 @@ class TransformerBlockImpl final : public torch::nn::Module {
     auto txt_modulated =
         txt_normed * (1 + txt_c1.unsqueeze(1)) + txt_s1.unsqueeze(1);
 
-    auto attn_out =
-        attn_->forward(img_modulated, txt_modulated, rope_cos, rope_sin,
-                       attn_mask);
+    auto attn_out = attn_->forward(
+        img_modulated, txt_modulated, rope_cos, rope_sin, attn_mask);
     auto img_attn = std::get<0>(attn_out);
     auto txt_attn = std::get<1>(attn_out);
 
@@ -522,22 +521,25 @@ class JoyImageEditPlusTransformer3DModelImpl : public torch::nn::Module {
     img_in_ = register_module(
         "img_in",
         torch::nn::Conv3d(
-            torch::nn::Conv3dOptions(in_channels_, hidden_size_,
-                                     {patch_size_[0], patch_size_[1],
-                                      patch_size_[2]})
+            torch::nn::Conv3dOptions(
+                in_channels_,
+                hidden_size_,
+                {patch_size_[0], patch_size_[1], patch_size_[2]})
                 .stride({patch_size_[0], patch_size_[1], patch_size_[2]})
                 .bias(true)));
-    img_in_->to(options_);
 
-    condition_embedder_ = register_module(
-        "condition_embedder",
-        TimeTextEmbedding(context, hidden_size_, /*time_freq_dim=*/256,
-                          /*time_proj_dim=*/hidden_size_ * 6, text_dim));
+    condition_embedder_ =
+        register_module("condition_embedder",
+                        TimeTextEmbedding(context,
+                                          hidden_size_,
+                                          /*time_freq_dim=*/256,
+                                          /*time_proj_dim=*/hidden_size_ * 6,
+                                          text_dim));
 
     double_blocks_ = register_module("double_blocks", torch::nn::ModuleList());
     for (int64_t i = 0; i < num_layers; ++i) {
-      auto block = TransformerBlock(context, hidden_size_, num_heads_,
-                                    head_dim_, mlp_width_ratio);
+      auto block = TransformerBlock(
+          context, hidden_size_, num_heads_, head_dim_, mlp_width_ratio);
       double_blocks_->push_back(block);
       block_layers_.push_back(block);
     }
@@ -601,18 +603,19 @@ class JoyImageEditPlusTransformer3DModelImpl : public torch::nn::Module {
 
     // 1. Condition embeddings.
     auto cond = condition_embedder_->forward(timestep, encoder_hidden_states);
-    auto vec = std::get<1>(cond);   // [B, hidden*6] -> but we use per-block temb
-    auto txt = std::get<2>(cond);   // [B, L, hidden]
+    auto vec = std::get<1>(cond);  // [B, hidden*6] -> but we use per-block temb
+    auto txt = std::get<2>(cond);  // [B, L, hidden]
     // vec is the projected timestep [B, 6*hidden]; blocks re-add modulate_table
-    // to a [B, hidden] signal. Diffusers passes vec.unflatten(1,(6,-1)) then the
-    // Modulate table adds to it. To match, feed each block the [B, 6, hidden]
-    // signal; our Modulate expects [B, hidden] or [B, 1, hidden]. We therefore
-    // pass timestep_proj reshaped to [B, 6, hidden] and let Modulate add table.
+    // to a [B, hidden] signal. Diffusers passes vec.unflatten(1,(6,-1)) then
+    // the Modulate table adds to it. To match, feed each block the [B, 6,
+    // hidden] signal; our Modulate expects [B, hidden] or [B, 1, hidden]. We
+    // therefore pass timestep_proj reshaped to [B, 6, hidden] and let Modulate
+    // add table.
     auto temb6 = vec.unflatten(1, std::vector<int64_t>{6, -1});  // [B,6,hidden]
 
     // 2. Patchify via Conv3d.
     auto x = hidden_states.reshape({B * N, C, pt, ph, pw});
-    x = img_in_->forward(x);            // [B*N, hidden, 1, 1, 1]
+    x = img_in_->forward(x);  // [B*N, hidden, 1, 1, 1]
     auto img = x.reshape({B, N, hidden_size_});
 
     // 3. Per-sample 3D RoPE with temporal offsets, padded to N.
@@ -655,8 +658,8 @@ class JoyImageEditPlusTransformer3DModelImpl : public torch::nn::Module {
         }
         img_mask.index_put_({b, torch::indexing::Slice(0, actual)}, true);
       }
-      auto full = torch::cat({img_mask, encoder_hidden_states_mask.to(torch::kBool)},
-                             1);
+      auto full = torch::cat(
+          {img_mask, encoder_hidden_states_mask.to(torch::kBool)}, 1);
       attn_mask = full.unsqueeze(1).unsqueeze(1);  // [B,1,1,N+L]
     }
 
@@ -678,8 +681,8 @@ class JoyImageEditPlusTransformer3DModelImpl : public torch::nn::Module {
 
   static torch::Tensor fp32_norm_out(const torch::Tensor& x) {
     auto xf = x.to(torch::kFloat32);
-    auto out = torch::layer_norm(xf, {xf.size(-1)}, /*weight=*/{}, /*bias=*/{},
-                                 1e-6);
+    auto out =
+        torch::layer_norm(xf, {xf.size(-1)}, /*weight=*/{}, /*bias=*/{}, 1e-6);
     return out.to(x.dtype());
   }
 
@@ -698,8 +701,7 @@ class JoyImageEditPlusTransformer3DModelImpl : public torch::nn::Module {
       }
       condition_embedder_->load_state_dict(
           state_dict->get_dict_with_prefix("condition_embedder."));
-      proj_out_->load_state_dict(
-          state_dict->get_dict_with_prefix("proj_out."));
+      proj_out_->load_state_dict(state_dict->get_dict_with_prefix("proj_out."));
       for (size_t i = 0; i < block_layers_.size(); ++i) {
         auto prefix = "double_blocks." + std::to_string(i) + ".";
         block_layers_[i]->load_state_dict(
@@ -716,8 +718,8 @@ class JoyImageEditPlusTransformer3DModelImpl : public torch::nn::Module {
     condition_embedder_->verify_loaded_weights("condition_embedder.");
     proj_out_->verify_loaded_weights("proj_out.");
     for (size_t i = 0; i < block_layers_.size(); ++i) {
-      block_layers_[i]->verify_loaded_weights(
-          "double_blocks." + std::to_string(i) + ".");
+      block_layers_[i]->verify_loaded_weights("double_blocks." +
+                                              std::to_string(i) + ".");
     }
   }
 
@@ -752,8 +754,8 @@ REGISTER_MODEL_ARGS(JoyImageEditPlusTransformer3DModel, [&] {
   LOAD_ARG_OR(wan_patch_size, "patch_size", (std::vector<int64_t>{1, 2, 2}));
   LOAD_ARG_OR(mlp_width_ratio, "mlp_width_ratio", 4.0);
   LOAD_ARG_OR(text_dim, "text_dim", 4096);
-  LOAD_ARG_OR(rope_dim_list, "rope_dim_list",
-              (std::vector<int64_t>{16, 56, 56}));
+  LOAD_ARG_OR(
+      rope_dim_list, "rope_dim_list", (std::vector<int64_t>{16, 56, 56}));
   LOAD_ARG_OR(rope_theta_dit, "theta", 10000);
 });
 

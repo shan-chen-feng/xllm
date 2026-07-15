@@ -69,9 +69,6 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
     if (vae_scale_factor_spatial_ <= 0) vae_scale_factor_spatial_ = 8;
 
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
-    if (::xllm::DiTConfig::get_instance().dit_enable_vae_tiling()) {
-      vae_->enable_tiling();
-    }
     transformer_ = joyimage::JoyImageEditPlusTransformer3DModel(
         context.get_model_context("transformer"));
     scheduler_ =
@@ -123,15 +120,17 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
   // Build the 6D padded latent tensor: target noise + reference latents.
   // Returns {padded_latents[B,N,C,pt,ph,pw], target_mask[B,N],
   //          shape_list (per-sample list of (t,h,w))}.
-  std::tuple<torch::Tensor, torch::Tensor,
+  std::tuple<torch::Tensor,
+             torch::Tensor,
              std::vector<std::vector<std::array<int64_t, 3>>>>
-  prepare_latents(int64_t batch_size,
-                  int64_t num_channels_latents,
-                  int64_t height,
-                  int64_t width,
-                  int64_t seed,
-                  const std::vector<std::vector<torch::Tensor>>& reference_images,
-                  const torch::Tensor& provided_latents) {
+  prepare_latents(
+      int64_t batch_size,
+      int64_t num_channels_latents,
+      int64_t height,
+      int64_t width,
+      int64_t seed,
+      const std::vector<std::vector<torch::Tensor>>& reference_images,
+      const torch::Tensor& provided_latents) {
     std::vector<torch::Tensor> all_patches;
     std::vector<torch::Tensor> all_target_masks;
     std::vector<std::vector<std::array<int64_t, 3>>> all_shapes;
@@ -173,7 +172,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
         sample_patches.push_back(pr.first);
         auto n = pr.first.size(0);
         sample_masks.push_back(torch::full(
-            {n}, /*value=*/(j == 0),
+            {n},
+            /*value=*/(j == 0),
             torch::TensorOptions().device(device_).dtype(torch::kBool)));
       }
       auto combined = torch::cat(sample_patches, 0);
@@ -184,10 +184,13 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
       max_patches = std::max(max_patches, combined.size(0));
     }
 
-    auto padded = torch::zeros(
-        {batch_size, max_patches, num_channels_latents, patch_t_, patch_h_,
-         patch_w_},
-        options_);
+    auto padded = torch::zeros({batch_size,
+                                max_patches,
+                                num_channels_latents,
+                                patch_t_,
+                                patch_h_,
+                                patch_w_},
+                               options_);
     auto target_mask = torch::zeros(
         {batch_size, max_patches},
         torch::TensorOptions().device(device_).dtype(torch::kBool));
@@ -204,8 +207,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
     torch::NoGradGuard no_grad;
     const auto& gp = input.generation_params;
     int64_t num_inference_steps = gp.num_inference_steps;
-    double guidance_scale = gp.true_cfg_scale > 0 ? gp.true_cfg_scale
-                                                  : gp.guidance_scale;
+    double guidance_scale =
+        gp.true_cfg_scale > 0 ? gp.true_cfg_scale : gp.guidance_scale;
     int64_t seed = gp.seed >= 0 ? gp.seed : 42;
 
     // Collect reference images (one sample per batch entry).
@@ -269,9 +272,9 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
            "the Qwen3-VL embedding service.";
     torch::Tensor prompt_embeds =
         input.prompt_embeds.to(options_.device(), dtype_);
-    torch::Tensor prompt_embeds_mask = torch::ones(
-        {prompt_embeds.size(0), prompt_embeds.size(1)},
-        torch::TensorOptions().device(device_).dtype(torch::kLong));
+    torch::Tensor prompt_embeds_mask =
+        torch::ones({prompt_embeds.size(0), prompt_embeds.size(1)},
+                    torch::TensorOptions().device(device_).dtype(torch::kLong));
 
     torch::Tensor neg_embeds, neg_embeds_mask;
     if (do_cfg) {
@@ -279,9 +282,9 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
           << "JoyImageEditPlus CFG (guidance_scale > 1) requires precomputed "
              "`negative_prompt_embeds`.";
       neg_embeds = input.negative_prompt_embeds.to(options_.device(), dtype_);
-      neg_embeds_mask =
-          torch::ones({neg_embeds.size(0), neg_embeds.size(1)},
-                      torch::TensorOptions().device(device_).dtype(torch::kLong));
+      neg_embeds_mask = torch::ones(
+          {neg_embeds.size(0), neg_embeds.size(1)},
+          torch::TensorOptions().device(device_).dtype(torch::kLong));
       // Pad/concat [negative, positive] to equal sequence length.
       int64_t max_l = std::max(prompt_embeds.size(1), neg_embeds.size(1));
       prompt_embeds = pad_seq(prompt_embeds, max_l);
@@ -292,8 +295,13 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
 
     // Latents.
     int64_t num_channels_latents = in_channels_;
-    auto lp = prepare_latents(batch_size, num_channels_latents, height, width,
-                              seed, vae_refs, input.latents);
+    auto lp = prepare_latents(batch_size,
+                              num_channels_latents,
+                              height,
+                              width,
+                              seed,
+                              vae_refs,
+                              input.latents);
     auto latents = std::get<0>(lp);
     auto target_mask = std::get<1>(lp);
     auto shape_list = std::get<2>(lp);
@@ -317,8 +325,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
         dbl_shape.insert(dbl_shape.end(), shape_list.begin(), shape_list.end());
         auto embeds = torch::cat({neg_embeds, prompt_embeds}, 0);
         auto mask = torch::cat({neg_embeds_mask, prompt_embeds_mask}, 0);
-        auto pred = transformer_->forward(model_in, t_expand, embeds, mask,
-                                          dbl_shape);
+        auto pred =
+            transformer_->forward(model_in, t_expand, embeds, mask, dbl_shape);
         auto chunks = pred.chunk(2, 0);
         auto uncond = chunks[0];
         auto cond = chunks[1];
@@ -332,8 +340,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
         noise_pred = comb * (cond_norm / noise_norm.clamp_min(1e-6));
       } else {
         auto t_expand = t.repeat({batch_size});
-        noise_pred = transformer_->forward(latents, t_expand, prompt_embeds,
-                                           prompt_embeds_mask, shape_list);
+        noise_pred = transformer_->forward(
+            latents, t_expand, prompt_embeds, prompt_embeds_mask, shape_list);
       }
 
       latents = scheduler_->step(noise_pred, t, latents).to(latents.dtype());
@@ -352,8 +360,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
       vid = vid.permute({3, 0, 4, 1, 5, 2, 6})
                 .reshape({1, c, lt * patch_t_, lh * patch_h_, lw * patch_w_});
       vid = vid * latents_std_tensor(vid) + latents_mean_tensor(vid);
-      auto img = vae_->decode(vid.to(dtype_)).sample;  // [1,C,1,H,W]
-      img = img.to(torch::kFloat32).squeeze(0).squeeze(1);    // [C,H,W]
+      auto img = vae_->decode(vid.to(dtype_)).sample;       // [1,C,1,H,W]
+      img = img.to(torch::kFloat32).squeeze(0).squeeze(1);  // [C,H,W]
       images.push_back(img.unsqueeze(0));
     }
     auto image = torch::cat(images, 0);
@@ -386,21 +394,22 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
   // Nearest 1024-base aspect bucket (h, w).
   std::pair<int64_t, int64_t> joyimage_bucket(int64_t h, int64_t w) {
     static const std::vector<std::pair<int64_t, int64_t>> kBuckets = {
-        {512, 1792},  {512, 1856},  {512, 1920},  {512, 1984},  {512, 2048},
-        {576, 1600},  {576, 1664},  {576, 1728},  {576, 1792},  {640, 1472},
-        {640, 1536},  {640, 1600},  {704, 1344},  {704, 1408},  {704, 1472},
-        {768, 1216},  {768, 1280},  {768, 1344},  {832, 1152},  {832, 1216},
-        {896, 1088},  {896, 1152},  {960, 1024},  {960, 1088},  {1024, 960},
-        {1024, 1024}, {1088, 896},  {1088, 960},  {1152, 832},  {1152, 896},
-        {1216, 768},  {1216, 832},  {1280, 768},  {1344, 704},  {1344, 768},
-        {1408, 704},  {1472, 640},  {1472, 704},  {1536, 640},  {1600, 576},
-        {1600, 640},  {1664, 576},  {1728, 576},  {1792, 512},  {1792, 576},
-        {1856, 512},  {1920, 512},  {1984, 512},  {2048, 512}};
+        {512, 1792},  {512, 1856}, {512, 1920}, {512, 1984}, {512, 2048},
+        {576, 1600},  {576, 1664}, {576, 1728}, {576, 1792}, {640, 1472},
+        {640, 1536},  {640, 1600}, {704, 1344}, {704, 1408}, {704, 1472},
+        {768, 1216},  {768, 1280}, {768, 1344}, {832, 1152}, {832, 1216},
+        {896, 1088},  {896, 1152}, {960, 1024}, {960, 1088}, {1024, 960},
+        {1024, 1024}, {1088, 896}, {1088, 960}, {1152, 832}, {1152, 896},
+        {1216, 768},  {1216, 832}, {1280, 768}, {1344, 704}, {1344, 768},
+        {1408, 704},  {1472, 640}, {1472, 704}, {1536, 640}, {1600, 576},
+        {1600, 640},  {1664, 576}, {1728, 576}, {1792, 512}, {1792, 576},
+        {1856, 512},  {1920, 512}, {1984, 512}, {2048, 512}};
     double target = static_cast<double>(h) / static_cast<double>(w);
     int64_t best_h = 1024, best_w = 1024;
     double best_diff = std::numeric_limits<double>::max();
     for (const auto& hw : kBuckets) {
-      double diff = std::abs(static_cast<double>(hw.first) / hw.second - target);
+      double diff =
+          std::abs(static_cast<double>(hw.first) / hw.second - target);
       if (diff < best_diff) {
         best_diff = diff;
         best_h = hw.first;
