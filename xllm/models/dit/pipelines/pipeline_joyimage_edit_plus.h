@@ -25,8 +25,11 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/dit_model_loader.h"
 #include "core/framework/model_context.h"
+#include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/runtime/dit_forward_params.h"
 #include "models/dit/autoencoders/autoencoder_kl_wan.h"
@@ -47,7 +50,9 @@ namespace xllm {
 class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
  public:
   JoyImageEditPlusPipelineImpl(const DiTModelContext& context)
-      : context_(context), vae_model_args_(context.get_model_args("vae")) {
+      : context_(context),
+        parallel_args_(context.get_parallel_args()),
+        vae_model_args_(context.get_model_args("vae")) {
     options_ = context.get_tensor_options();
     dtype_ = options_.dtype().toScalarType();
     device_ = options_.device();
@@ -65,7 +70,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
 
     vae_ = AutoencoderKLWan(context.get_model_context("vae"));
     transformer_ = joyimage::JoyImageEditPlusTransformer3DModel(
-        context.get_model_context("transformer"));
+        context.get_model_context("transformer"), parallel_args_);
     scheduler_ =
         FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
 
@@ -305,6 +310,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
     scheduler_->set_timesteps(num_inference_steps, device_);
     scheduler_->set_begin_index(0);
     auto timesteps = scheduler_->timesteps();
+    DiTCache::get_instance().set_infer_steps(num_inference_steps);
+    DiTCache::get_instance().set_num_blocks(num_layers_);
 
     for (int64_t i = 0; i < timesteps.size(0); ++i) {
       auto t = timesteps[i];
@@ -313,17 +320,57 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
 
       torch::Tensor noise_pred;
       if (do_cfg) {
-        auto model_in = torch::cat({latents, latents}, 0);
-        auto t_expand = t.repeat({model_in.size(0)});
-        auto dbl_shape = shape_list;
-        dbl_shape.insert(dbl_shape.end(), shape_list.begin(), shape_list.end());
-        auto embeds = torch::cat({neg_embeds, prompt_embeds}, 0);
-        auto mask = torch::cat({neg_embeds_mask, prompt_embeds_mask}, 0);
-        auto pred =
-            transformer_->forward(model_in, t_expand, embeds, mask, dbl_shape);
-        auto chunks = pred.chunk(2, 0);
-        auto uncond = chunks[0];
-        auto cond = chunks[1];
+        torch::Tensor cond;
+        torch::Tensor uncond;
+        if (::xllm::ParallelConfig::get_instance().cfg_size() == 2) {
+          CHECK(parallel_args_.dit_cfg_group_ != nullptr)
+              << "JoyImageEditPlus CFG parallel requires dit_cfg_group_";
+          const int32_t rank = parallel_args_.dit_cfg_group_->rank();
+          torch::Tensor local_pred;
+          auto t_expand = t.repeat({batch_size});
+          if (rank == 0) {
+            local_pred = transformer_->forward(latents,
+                                               t_expand,
+                                               prompt_embeds,
+                                               prompt_embeds_mask,
+                                               shape_list,
+                                               /*use_cfg=*/false,
+                                               /*step_index=*/i + 1);
+          } else {
+            local_pred = transformer_->forward(latents,
+                                               t_expand,
+                                               neg_embeds,
+                                               neg_embeds_mask,
+                                               shape_list,
+                                               /*use_cfg=*/true,
+                                               /*step_index=*/i + 1);
+          }
+          torch::Tensor gathered_pred =
+              xllm::parallel_state::gather(local_pred,
+                                           parallel_args_.dit_cfg_group_,
+                                           /*dim=*/0);
+          auto chunks = gathered_pred.chunk(2, 0);
+          cond = chunks[0];
+          uncond = chunks[1];
+        } else {
+          auto model_in = torch::cat({latents, latents}, 0);
+          auto t_expand = t.repeat({model_in.size(0)});
+          auto dbl_shape = shape_list;
+          dbl_shape.insert(
+              dbl_shape.end(), shape_list.begin(), shape_list.end());
+          auto embeds = torch::cat({neg_embeds, prompt_embeds}, 0);
+          auto mask = torch::cat({neg_embeds_mask, prompt_embeds_mask}, 0);
+          auto pred = transformer_->forward(model_in,
+                                            t_expand,
+                                            embeds,
+                                            mask,
+                                            dbl_shape,
+                                            /*use_cfg=*/false,
+                                            /*step_index=*/i + 1);
+          auto chunks = pred.chunk(2, 0);
+          uncond = chunks[0];
+          cond = chunks[1];
+        }
         auto comb = uncond + guidance_scale * (cond - uncond);
         // Norm-rescale (diffusers): comb * (||cond|| / ||comb||) over channel
         // dim (2) of the 6D [B, N, C, pt, ph, pw] prediction.
@@ -334,8 +381,13 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
         noise_pred = comb * (cond_norm / noise_norm.clamp_min(1e-6));
       } else {
         auto t_expand = t.repeat({batch_size});
-        noise_pred = transformer_->forward(
-            latents, t_expand, prompt_embeds, prompt_embeds_mask, shape_list);
+        noise_pred = transformer_->forward(latents,
+                                           t_expand,
+                                           prompt_embeds,
+                                           prompt_embeds_mask,
+                                           shape_list,
+                                           /*use_cfg=*/false,
+                                           /*step_index=*/i + 1);
       }
 
       latents = scheduler_->step(noise_pred, t, latents).to(latents.dtype());
@@ -425,6 +477,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module {
   }
 
   DiTModelContext context_;
+  const ParallelArgs parallel_args_;
   const ModelArgs& vae_model_args_;
   torch::Device device_ = torch::kCPU;
   torch::ScalarType dtype_;
