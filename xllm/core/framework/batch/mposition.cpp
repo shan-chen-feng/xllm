@@ -242,8 +242,7 @@ std::tuple<torch::Tensor, int32_t> MPositionHelper::get_positions_omni(
 
       // audio case
       if (min_ed == ed_audio_start) {
-        auto audio_len = audio_utils::get_feat_extract_output_lengths(
-            audio_seqlens[audio_idx]);
+        auto audio_len = audio_seqlens[audio_idx];
         auto audio_pos_ids =
             torch::arange(audio_len.item<int32_t>(), torch::kInt32)
                 .view({1, -1})
@@ -294,8 +293,7 @@ std::tuple<torch::Tensor, int32_t> MPositionHelper::get_positions_omni(
       // use_audio_in_video case
       else if (min_ed == ed_vision_start &&
                ed_vision_start + 1 == ed_audio_start) {
-        auto audio_len = audio_utils::get_feat_extract_output_lengths(
-            audio_seqlens[audio_idx]);
+        auto audio_len = audio_seqlens[audio_idx];
         auto audio_pos_ids =
             torch::arange(audio_len.item<int32_t>(), torch::kInt32)
                 .view({1, -1})

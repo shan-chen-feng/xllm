@@ -213,14 +213,12 @@ bool WhisperFeatureExtractor::process_audio(
     std::vector<torch::Tensor> raw_speech,
     bool audio_in_video) {
   int64_t batch_size = raw_speech.size();
-
-  if (raw_speech.empty()) {
-    return true;
-  }
+  raw_speech[0].print();
   std::vector<torch::Tensor> batched_speech;
   for (const auto& speech : raw_speech) {
     if (speech.dim() > 1) {
       LOG(ERROR) << "Only mono-channel audio is supported";
+      return false;
     }
 
     torch::Tensor processed_speech;
@@ -298,18 +296,22 @@ bool WhisperFeatureExtractor::process_audio(
     audio_feature_items = mm_datas.get(MMType::AUDIO);
   }
 
-  for (size_t feat_idx = 0; feat_idx < audio_feature_items->size();
+  bool only_audio_processor = (audio_feature_items->size() == 0 &&
+                               input_features_extracted.size(0) > 0);
+
+  for (size_t feat_idx = 0; feat_idx < input_features_extracted.size(0);
        feat_idx++) {
-    auto& item = audio_feature_items->at(feat_idx);
+    auto& item = only_audio_processor ? mm_datas.add(MMType::AUDIO)
+                                      : *audio_feature_items->at(feat_idx);
     if (!return_attention_mask_) {
       auto input_features = input_features_extracted[feat_idx].permute({1, 0});
       auto feat_origin_lens =
           torch::tensor({input_features.size(0)}, torch::kLong);
       auto feat_length =
           audio_utils::get_feat_extract_output_lengths(feat_origin_lens);
-      item->set_data({{"input_features", input_features},
-                      {"feat_length", feat_length},
-                      {"feat_origin_lens", feat_origin_lens}});
+      item.set_data({{"input_features", input_features},
+                     {"feat_length", feat_length},
+                     {"feat_origin_lens", feat_origin_lens}});
     } else {
       torch::Tensor feat_origin_lens =
           torch::sum(rescaled_attention_mask[feat_idx], -1).to(torch::kLong);
@@ -322,14 +324,14 @@ bool WhisperFeatureExtractor::process_audio(
       auto bool_mask = rescaled_attention_mask[feat_idx].to(torch::kBool);
       auto input_features = permuted.index({bool_mask});
       if (audio_in_video) {
-        item->add("input_features", input_features);
-        item->add("feat_length",
-                  torch::tensor({feat_length.item<int64_t>()}, torch::kLong));
-        item->add(
+        item.add("input_features", input_features);
+        item.add("feat_length",
+                 torch::tensor({feat_length.item<int64_t>()}, torch::kLong));
+        item.add(
             "feat_origin_lens",
             torch::tensor({feat_origin_lens.item<int64_t>()}, torch::kLong));
       } else {
-        item->set_data(
+        item.set_data(
             {{"input_features", input_features},
              {"feat_length",
               torch::tensor({feat_length.item<int64_t>()}, torch::kLong)},
@@ -339,7 +341,7 @@ bool WhisperFeatureExtractor::process_audio(
       }
     }
   }
-
+  delete audio_feature_items;
   return true;
 }
 }  // namespace xllm

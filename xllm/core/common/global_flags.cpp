@@ -626,6 +626,10 @@ DEFINE_bool(
     false,
     "Whether to decode both audio and video when the input is a video.");
 
+DEFINE_bool(vlm_only_audio_processor,
+            false,
+            "Whether only use audio processor for asr models");
+
 // --- concurrent rec worker config ---
 DEFINE_uint32(rec_worker_max_concurrency,
               1,

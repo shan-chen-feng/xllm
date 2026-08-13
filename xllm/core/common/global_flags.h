@@ -303,6 +303,7 @@ DECLARE_bool(enable_xattention_one_stage);
 
 DECLARE_bool(use_audio_in_video);
 
+DECLARE_bool(vlm_only_audio_processor);
 // --- concurrent rec worker config ---
 DECLARE_uint32(rec_worker_max_concurrency);
 

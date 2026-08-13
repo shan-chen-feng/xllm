@@ -98,6 +98,7 @@ class Qwen3OmniMoe_InputProcessor : public InputProcessor {
   }
 
   void process(std::string& prompt, const MMData& mm_data) override {
+    LOG(INFO) << prompt;
     torch::Tensor image_grid_thw;
     if (auto res = mm_data.get<torch::Tensor>("image_grid_thw")) {
       image_grid_thw = res.value();
@@ -504,9 +505,10 @@ class Qwen3OmniMoe_Thinker_AudioTransformerImpl : public torch::nn::Module {
   torch::Tensor forward(const torch::Tensor& input_features,
                         const ModelInputParams& input_params,
                         const torch::Tensor& feature_lens = torch::Tensor()) {
+    std::cout << feature_lens;
     auto aftercnn_lens_calc =
         audio_utils::get_feat_extract_output_lengths(feature_lens);
-
+    std::cout << aftercnn_lens_calc;
     auto chunk_num =
         torch::ceil(feature_lens / (n_window_ * 2)).to(torch::kLong);
     int64_t total_chunks = chunk_num.sum().item<int64_t>();
@@ -528,8 +530,8 @@ class Qwen3OmniMoe_Thinker_AudioTransformerImpl : public torch::nn::Module {
                              n_window_ * 2);
 
     auto input_t = input_features.t();
-    auto chunk_lengths_list = chunk_lengths.to(torch::kCPU).contiguous();
-
+    chunk_lengths.print();
+    std::cout << chunk_lengths;
     auto chunk_lengths_cpu = chunk_lengths.to(torch::kCPU).contiguous();
     at::IntArrayRef split_sizes(chunk_lengths_cpu.data_ptr<int64_t>(),
                                 static_cast<size_t>(chunk_lengths_cpu.size(0)));

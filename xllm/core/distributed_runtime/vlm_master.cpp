@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
+#include "core/common/global_flags.h"
 #include "core/common/message.h"
 #include "framework/chat_template/jinja_chat_template.h"
 #include "framework/model/model_args.h"
@@ -96,13 +97,15 @@ VLMMaster::VLMMaster(const Options& options)
   }
 
   // create image processor
-  auto image_processor_factory =
-      ModelRegistry::get_image_processor_factory(model_args_.model_type());
-  if (image_processor_factory == nullptr) {
-    LOG(ERROR) << "No image processor defined for model type: "
-               << model_args_.model_type();
-  } else {
-    image_processor_ = image_processor_factory(model_args_);
+  if (!FLAGS_vlm_only_audio_processor) {
+    auto image_processor_factory =
+        ModelRegistry::get_image_processor_factory(model_args_.model_type());
+    if (image_processor_factory == nullptr) {
+      LOG(ERROR) << "No image processor defined for model type: "
+                 << model_args_.model_type();
+    } else {
+      image_processor_ = image_processor_factory(model_args_);
+    }
   }
 
   if (model_args_.has_feature_extractor()) {
@@ -456,13 +459,14 @@ std::shared_ptr<Request> VLMMaster::generate_request(
   }
 
   MMData mm_data;
-  if (!mm_inputs.empty() && !image_processor_->process(mm_inputs, mm_data)) {
-    LOG(ERROR) << " image processor process failed.";
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "Image processor process failed.");
-    return nullptr;
+  if (!FLAGS_vlm_only_audio_processor) {
+    if (!mm_inputs.empty() && !image_processor_->process(mm_inputs, mm_data)) {
+      LOG(ERROR) << " image processor process failed.";
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                          "Image processor process failed.");
+      return nullptr;
+    }
   }
-
   if (feature_extractor_ && !mm_inputs.empty() &&
       !feature_extractor_->process(mm_inputs, mm_data)) {
     LOG(ERROR) << " feature extractor process failed.";
