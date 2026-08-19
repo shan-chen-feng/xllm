@@ -54,6 +54,10 @@ cc_library(
     qwen2_vl_prompt_processor.h
     qwen2_vl_image_processor.h
     qwen2_vl_video_processor.h
+    qwen3_audio_common.h
+    qwen3_audio_processor.h
+    qwen3_omni_moe_processor.h
+    qwen3_omni_moe_prompt_processor.h
     qwen3_vl_prompt_processor.h
     qwen3_vl_video_processor.h
     video_processor.h
@@ -75,6 +79,8 @@ cc_library(
     qwen2_vl_prompt_processor.cpp
     qwen2_vl_image_processor.cpp
     qwen2_vl_video_processor.cpp
+    qwen3_audio_processor.cpp
+    qwen3_omni_moe_prompt_processor.cpp
     qwen3_vl_prompt_processor.cpp
     qwen3_vl_video_processor.cpp
   DEPS
